@@ -1,0 +1,144 @@
+# CI workflow: run tests for whichever workstream(s) changed
+# Lives in src/platform/ci/ — symlink to .github/workflows/ during deploy
+name: Workstream Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      engine: ${{ steps.changes.outputs.engine }}
+      agents: ${{ steps.changes.outputs.agents }}
+      data-mcp: ${{ steps.changes.outputs.data-mcp }}
+      frontend: ${{ steps.changes.outputs.frontend }}
+      platform: ${{ steps.changes.outputs.platform }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed workstreams
+        id: changes
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE="${{ github.event.before }}"
+          fi
+          CHANGED=$(git diff --name-only "$BASE" HEAD 2>/dev/null || echo "")
+
+          echo "engine=false" >> "$GITHUB_OUTPUT"
+          echo "agents=false" >> "$GITHUB_OUTPUT"
+          echo "data-mcp=false" >> "$GITHUB_OUTPUT"
+          echo "frontend=false" >> "$GITHUB_OUTPUT"
+          echo "platform=false" >> "$GITHUB_OUTPUT"
+
+          if echo "$CHANGED" | grep -q '^src/engine/'; then
+            echo "engine=true" >> "$GITHUB_OUTPUT"
+          fi
+          if echo "$CHANGED" | grep -q '^src/agents/'; then
+            echo "agents=true" >> "$GITHUB_OUTPUT"
+          fi
+          if echo "$CHANGED" | grep -q '^src/data-mcp/'; then
+            echo "data-mcp=true" >> "$GITHUB_OUTPUT"
+          fi
+          if echo "$CHANGED" | grep -q '^src/frontend/'; then
+            echo "frontend=true" >> "$GITHUB_OUTPUT"
+          fi
+          if echo "$CHANGED" | grep -qE '^(src/platform/|docker-compose\.yaml)'; then
+            echo "platform=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  test-engine:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.engine == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - name: Install dependencies
+        run: uv sync
+      - name: Run engine tests
+        run: uv run pytest src/engine/tests/ -x -q
+
+  test-agents:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.agents == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - name: Install dependencies
+        run: uv sync
+      - name: Run agent tests
+        run: uv run pytest src/agents/ -x -q
+
+  test-data-mcp:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.data-mcp == 'true'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: lms
+          POSTGRES_PASSWORD: lms_dev
+          POSTGRES_DB: lms_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U lms -d lms_db"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - name: Install dependencies
+        run: uv sync
+      - name: Apply schema
+        run: PGPASSWORD=lms_dev psql -h localhost -U lms -d lms_db -f contracts/db-schema.sql
+      - name: Run data-mcp tests
+        run: uv run pytest src/data-mcp/tests/ -x -q
+        env:
+          DATABASE_URL: postgresql://lms:lms_dev@localhost:5432/lms_db
+
+  test-frontend:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: src/frontend/pnpm-lock.yaml
+      - name: Install dependencies
+        working-directory: src/frontend
+        run: pnpm install --frozen-lockfile
+      - name: Run frontend tests
+        working-directory: src/frontend
+        run: pnpm test --run
+
+  test-platform:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.platform == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate docker-compose
+        run: docker compose config -q
+      - name: Check smoke test scripts are executable
+        run: |
+          for f in src/platform/smoke-tests/test_*.sh; do
+            [ -x "$f" ] || { echo "FAIL: $f is not executable"; exit 1; }
+          done
