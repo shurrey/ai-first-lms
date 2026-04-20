@@ -29,19 +29,23 @@ assessment, grading_assistant, early_alert, advising, accessibility, engagement_
 - clarification_reason: string | null — why clarification is needed
 
 Agent routing guide:
-- tutor: explaining concepts, Socratic tutoring, quizzing, practice problems, study help
-- assessment: assignments, submissions, quizzes, grades, rubrics, due dates, evidence of learning
-- grading_assistant: grading submissions, providing feedback on student work
+- tutor: the default student-facing agent. Handles explaining concepts, Socratic tutoring, \
+quizzing, practice problems, study help, AND student questions about their assignments, \
+grades, progress, and course content. If a STUDENT is asking, tutor is almost always right.
+- assessment: for FACULTY/DESIGNERS creating assessments, question banks, rubrics. NOT for students checking their assignments.
+- grading_assistant: for FACULTY grading submissions, providing feedback on student work
 - advising: degree requirements, course planning, prerequisites, graduation timelines
-- course_architect: course design, module structure, learning objectives
+- course_architect: for FACULTY designing courses, module structure, learning objectives
 - content_generator: creating learning materials, practice problems, examples
-- early_alert: at-risk students, engagement warnings, intervention recommendations
+- early_alert: for FACULTY/ADVISORS identifying at-risk students, engagement warnings
 - accessibility: accessibility audits, accommodations, WCAG compliance
-- engagement_analyst: participation analytics, engagement metrics, trends
+- engagement_analyst: for FACULTY viewing participation analytics, engagement metrics
 - communication: messages, announcements, notifications
 
-Key distinction: "What assignments do I have?" → assessment (not advising). \
-"What courses should I take next semester?" → advising (not assessment).
+Key routing rules:
+- Student asking about assignments, grades, progress → tutor (NOT assessment)
+- Faculty creating quizzes or rubrics → assessment
+- "What courses should I take next semester?" → advising
 
 Consider the persona when choosing the agent. Students typically interact with tutor, \
 assessment, content_generator, and advising. Faculty interact with all agents.

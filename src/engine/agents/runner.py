@@ -108,12 +108,17 @@ class ClaudeAgentRunner:
 
         system_prompt = self._load_system_prompt(agent_name)
         message = inputs.get("message", "")
+        persona = inputs.get("persona", "student")
+        course_id = inputs.get("course_id", "")
+
+        # Add session context to the user message
+        user_content = f"[Persona: {persona} | Course: {course_id}]\n\n{message}"
 
         try:
             response = await self._client.messages.create(
                 model=self._model,
                 system=system_prompt,
-                messages=[{"role": "user", "content": message}],
+                messages=[{"role": "user", "content": user_content}],
                 max_tokens=1024,
             )
 
