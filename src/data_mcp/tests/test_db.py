@@ -10,7 +10,7 @@ from data_mcp.settings import Settings
 
 def test_settings_defaults() -> None:
     s = Settings()
-    assert s.database_url == "postgresql://lms:lms@localhost:5432/lms"
+    assert s.database_url == "postgresql://lms:lms_dev@localhost:5432/lms_db"
     assert s.db_pool_min == 2
     assert s.db_pool_max == 10
 
