@@ -1,0 +1,55 @@
+version: 1
+agent:
+  name: course_architect
+  version: 0.1.0
+  description: "Drafts course structures \u2014 outcomes, modules, standards alignment, syllabi.\nAlways produces drafts for\
+    \ faculty approval.\n"
+  persona_scope:
+  - faculty
+  - instructional_designer
+  model: claude-sonnet-4-6
+  requires_pii: []
+  inputs:
+    type: object
+    properties:
+      topic:
+        type: string
+      audience:
+        type: string
+      duration_weeks:
+        type: integer
+      standards:
+        type: array
+        items:
+          type: string
+      constraints:
+        type: string
+        nullable: true
+    required:
+    - topic
+    - audience
+    - duration_weeks
+  outputs:
+    type: object
+    properties:
+      outcomes:
+        type: array
+      modules:
+        type: array
+      syllabus_md:
+        type: string
+      alignment:
+        type: array
+    required:
+    - outcomes
+    - modules
+    - syllabus_md
+  mcp_tools:
+  - standards.lookup
+  - content.library_search
+  - graph.subgraph_for_outcomes
+  - content.save_draft
+  composable_with:
+  - content_generator
+  - assessment
+  requires_human_approval: true

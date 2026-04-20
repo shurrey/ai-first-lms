@@ -1,0 +1,49 @@
+version: 1
+agent:
+  name: engagement_analyst
+  version: 0.1.0
+  description: 'Answers natural-language questions over learning analytics.
+
+    Produces narratives and charts with caveats.
+
+    '
+  persona_scope:
+  - faculty
+  - admin
+  - advisor
+  model: claude-sonnet-4-6
+  requires_pii: []
+  inputs:
+    type: object
+    properties:
+      question:
+        type: string
+      scope:
+        type: object
+      window:
+        type: object
+    required:
+    - question
+  outputs:
+    type: object
+    properties:
+      narrative_md:
+        type: string
+      charts:
+        type: array
+      caveats:
+        type: array
+        items:
+          type: string
+      query_used:
+        type: string
+        nullable: true
+    required:
+    - narrative_md
+  mcp_tools:
+  - analytics.query
+  - analytics.describe_schema
+  - charts.render
+  - graph.aggregate
+  composable_with: []
+  requires_human_approval: false

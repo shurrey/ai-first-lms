@@ -1,0 +1,59 @@
+cases:
+  - id: ca-syllabus-draft
+    inputs:
+      topic: "Intro to Data Ethics"
+      audience: "undergrad"
+      duration_weeks: 15
+    expected:
+      output_schema_version: v1
+      assertions:
+        - has_outcomes: true
+        - has_modules: true
+        - has_syllabus_md: true
+        - outcomes_have_bloom_levels: true
+
+  - id: ca-standards-alignment
+    inputs:
+      topic: "Computer Science 101"
+      audience: "undergrad"
+      duration_weeks: 15
+      standards: ["ABET"]
+    expected:
+      output_schema_version: v1
+      assertions:
+        - outcomes_aligned_to_standards: true
+        - uses_standards_lookup: true
+
+  - id: ca-short-course
+    inputs:
+      topic: "Python Workshop"
+      audience: "professional"
+      duration_weeks: 4
+    expected:
+      output_schema_version: v1
+      assertions:
+        - module_count_matches_duration: true
+        - has_outcomes: true
+
+  - id: ca-gap-analysis
+    inputs:
+      topic: "Biology 200"
+      audience: "undergrad"
+      duration_weeks: 15
+      constraints: "Must include lab component"
+    expected:
+      output_schema_version: v1
+      assertions:
+        - has_alignment_matrix: true
+        - constraints_reflected: true
+
+  - id: ca-draft-saved
+    inputs:
+      topic: "Art History"
+      audience: "graduate"
+      duration_weeks: 12
+    expected:
+      output_schema_version: v1
+      assertions:
+        - draft_saved_via_tool: true
+        - has_draft_id: true
