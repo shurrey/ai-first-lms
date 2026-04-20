@@ -7,7 +7,7 @@ import logging
 import time
 from typing import Any
 
-from engine.agents.runner import AgentRunner, StubAgentRunner
+from engine.agents.runner import AgentRunner, ClaudeAgentRunner
 from engine.graph.state import AgentResult, OrchestratorState
 
 logger = logging.getLogger(__name__)
@@ -24,7 +24,7 @@ def set_agent_runner(runner: AgentRunner | None) -> None:
 def get_agent_runner() -> AgentRunner:
     global _agent_runner  # noqa: PLW0603
     if _agent_runner is None:
-        _agent_runner = StubAgentRunner()
+        _agent_runner = ClaudeAgentRunner()
     return _agent_runner
 
 
