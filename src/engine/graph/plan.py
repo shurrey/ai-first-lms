@@ -211,3 +211,18 @@ async def plan_multi_agent(state: OrchestratorState) -> OrchestratorState:
         "plan_cursor": 0,
         "events_emitted": events,
     }
+
+
+async def plan(state: OrchestratorState) -> OrchestratorState:
+    """Unified plan step — auto-detects single vs multi-agent planning."""
+    interpretation = state.get("interpretation")
+    if not interpretation:
+        return await plan_react(state)
+
+    action = interpretation.get("action", "")
+    agents = interpretation.get("parameters", {}).get("agents", [])
+    pattern = _detect_multi_agent_pattern(action, agents)
+
+    if pattern:
+        return await plan_multi_agent(state)
+    return await plan_react(state)
