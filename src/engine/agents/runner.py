@@ -29,7 +29,7 @@ _MCP_SERVERS: dict[str, str] = {
 }
 
 # Max tool-use iterations to prevent infinite loops
-_MAX_TOOL_ROUNDS = 5
+_MAX_TOOL_ROUNDS = 10
 
 
 class AgentRunner(Protocol):
@@ -102,22 +102,54 @@ async def _call_mcp_tool(tool_name: str, arguments: dict[str, Any]) -> str:
         return json.dumps({"error": f"Tool call failed: {exc}"})
 
 
-def _mcp_tools_to_claude_tools(mcp_tool_names: list[str]) -> list[dict[str, Any]]:
-    """Convert MCP tool names to Claude API tool definitions.
+# Cached tool schemas fetched from MCP servers at first use
+_tool_schema_cache: dict[str, dict[str, Any]] = {}
+_schema_cache_loaded = False
 
-    Since we don't fetch schemas dynamically (expensive per-call), we use
-    generic schemas that let Claude pass any JSON arguments.
-    """
+
+async def _ensure_tool_schemas() -> None:
+    """Fetch and cache tool schemas from all MCP servers (once)."""
+    global _schema_cache_loaded
+    if _schema_cache_loaded:
+        return
+
+    from mcp.client.sse import sse_client
+    from mcp import ClientSession
+
+    for server_name, base_url in _MCP_SERVERS.items():
+        if server_name == "graph":  # alias for content
+            continue
+        try:
+            async with sse_client(f"{base_url}/sse") as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    tools_result = await session.list_tools()
+                    for t in tools_result.tools:
+                        _tool_schema_cache[t.name] = {
+                            "name": t.name.replace(".", "_"),
+                            "description": t.description or f"MCP tool: {t.name}",
+                            "input_schema": t.inputSchema,
+                        }
+            logger.info("Loaded %d tool schemas from %s", len([k for k in _tool_schema_cache if k.startswith(server_name)]), server_name)
+        except Exception as exc:
+            logger.warning("Failed to load schemas from %s: %s", server_name, exc)
+
+    _schema_cache_loaded = True
+
+
+def _mcp_tools_to_claude_tools(mcp_tool_names: list[str]) -> list[dict[str, Any]]:
+    """Convert MCP tool names to Claude API tool definitions using cached schemas."""
     tools = []
     for name in mcp_tool_names:
-        tools.append({
-            "name": name.replace(".", "_"),  # Claude tools can't have dots
-            "description": f"MCP tool: {name}. Call this tool to query the LMS database.",
-            "input_schema": {
-                "type": "object",
-                "additionalProperties": True,
-            },
-        })
+        if name in _tool_schema_cache:
+            tools.append(_tool_schema_cache[name])
+        else:
+            # Fallback for tools not in cache
+            tools.append({
+                "name": name.replace(".", "_"),
+                "description": f"MCP tool: {name}",
+                "input_schema": {"type": "object", "additionalProperties": True},
+            })
     return tools
 
 
@@ -204,6 +236,7 @@ class ClaudeAgentRunner:
         logger.info("ClaudeAgentRunner: invoking %s with tools", agent_name)
         start = time.monotonic()
 
+        await _ensure_tool_schemas()
         system_prompt = self._load_system_prompt(agent_name)
         message = inputs.get("message", "")
         persona = inputs.get("persona", "student")
