@@ -2,10 +2,32 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from engine.graph.builder import build_graph
+from engine.graph.dispatch import set_agent_runner
+from engine.graph.interpret import set_llm_client
 from engine.graph.state import OrchestratorState
+
+
+class _MockLLM:
+    async def create_message(self, model, system, messages, max_tokens):
+        return json.dumps({
+            "action": "explain", "agent": "tutor", "parameters": {},
+            "confidence": 0.95, "needs_clarification": False, "clarification_reason": None,
+        })
+
+
+@pytest.fixture(autouse=True)
+def _mock_deps():
+    from engine.agents.runner import StubAgentRunner
+    set_llm_client(_MockLLM())
+    set_agent_runner(StubAgentRunner())
+    yield
+    set_llm_client(None)
+    set_agent_runner(None)
 
 
 def test_graph_compiles():

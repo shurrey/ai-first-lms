@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from langgraph.graph import END, StateGraph
 
+from engine.graph.clarify import clarify
+from engine.graph.dispatch import dispatch
 from engine.graph.edges import should_clarify
-from engine.graph.nodes import clarify, dispatch, interpret, plan, synthesize
+from engine.graph.interpret import interpret
+from engine.graph.plan import plan_react as plan
+from engine.graph.synthesize import synthesize
 from engine.graph.state import OrchestratorState
 
 
