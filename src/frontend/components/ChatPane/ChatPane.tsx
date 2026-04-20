@@ -3,39 +3,36 @@
 import { useState, useCallback, useEffect } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { useSession } from "@/lib/session-context";
+import { useTurn } from "@/lib/turn-context";
 import { converse } from "@/lib/api";
-import { useEventStream } from "@/lib/use-event-stream";
 import { MessageList } from "./MessageList";
 import { ChatInput } from "./ChatInput";
 import type { ChatMessage } from "./MessageBubble";
 
 export function ChatPane() {
   const { sessionId } = useSession();
+  const turnState = useTurn();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
-  const turnState = useEventStream(sessionId, activeTurnId);
 
   // When the SSE stream produces a final result, add the assistant message
   useEffect(() => {
     if (turnState.status === "done" && turnState.finalResult) {
       setMessages((prev) => {
-        // Replace the streaming placeholder with the final answer
         const withoutPlaceholder = prev.filter(
-          (m) => m.id !== `streaming-${activeTurnId}`
+          (m) => m.id !== `streaming-${turnState.activeTurnId}`
         );
         return [
           ...withoutPlaceholder,
           {
-            id: `assistant-${activeTurnId}`,
+            id: `assistant-${turnState.activeTurnId}`,
             role: "assistant" as const,
             content: turnState.finalResult!.answer_markdown,
             timestamp: new Date().toISOString(),
           },
         ];
       });
-      setActiveTurnId(null);
     }
-  }, [turnState.status, turnState.finalResult, activeTurnId]);
+  }, [turnState.status, turnState.finalResult, turnState.activeTurnId]);
 
   // While streaming, show accumulated agent tokens as a live message
   useEffect(() => {
@@ -45,10 +42,10 @@ export function ChatPane() {
 
     setMessages((prev) => {
       const idx = prev.findIndex(
-        (m) => m.id === `streaming-${activeTurnId}`
+        (m) => m.id === `streaming-${turnState.activeTurnId}`
       );
       const streamMsg: ChatMessage = {
-        id: `streaming-${activeTurnId}`,
+        id: `streaming-${turnState.activeTurnId}`,
         role: "assistant",
         content: allTokens,
         timestamp: new Date().toISOString(),
@@ -60,28 +57,27 @@ export function ChatPane() {
       }
       return [...prev, streamMsg];
     });
-  }, [turnState.status, turnState.agentTokens, activeTurnId]);
+  }, [turnState.status, turnState.agentTokens, turnState.activeTurnId]);
 
   // Handle errors from the stream
   useEffect(() => {
     if (turnState.status === "error" && turnState.error) {
       setMessages((prev) => {
         const withoutPlaceholder = prev.filter(
-          (m) => m.id !== `streaming-${activeTurnId}`
+          (m) => m.id !== `streaming-${turnState.activeTurnId}`
         );
         return [
           ...withoutPlaceholder,
           {
-            id: `error-${activeTurnId}`,
+            id: `error-${turnState.activeTurnId}`,
             role: "assistant" as const,
             content: `Error: ${turnState.error!.message}`,
             timestamp: new Date().toISOString(),
           },
         ];
       });
-      setActiveTurnId(null);
     }
-  }, [turnState.status, turnState.error, activeTurnId]);
+  }, [turnState.status, turnState.error, turnState.activeTurnId]);
 
   const converseMutation = useMutation({
     mutationFn: (message: string) => {
@@ -89,7 +85,7 @@ export function ChatPane() {
       return converse(sessionId, message);
     },
     onSuccess: (data) => {
-      setActiveTurnId(data.turn_id);
+      turnState.startTurn(data.turn_id);
     },
     onError: () => {
       setMessages((prev) => [
