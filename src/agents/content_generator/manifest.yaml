@@ -1,0 +1,83 @@
+version: 1
+agent:
+  name: content_generator
+  version: 0.1.0
+  description: 'Generates learning materials — summaries, worked examples, study guides,
+
+    reading guides, slide drafts, practice problems. Serves both faculty and
+
+    students directly; also invoked by orchestrator on behalf of other agents.
+
+    '
+  persona_scope:
+  - student
+  - faculty
+  - instructional_designer
+  model: claude-haiku-4-5-20251001
+  requires_pii: []
+  inputs:
+    type: object
+    properties:
+      topic_or_nodes:
+        type: array
+        items:
+          type: string
+      format:
+        type: string
+        enum:
+        - summary
+        - study_guide
+        - worked_example
+        - reading_guide
+        - slide_deck_outline
+        - practice_problems
+      reading_level:
+        type: string
+        enum:
+        - middle_school
+        - high_school
+        - intro_undergrad
+        - undergrad
+        - graduate
+        default: intro_undergrad
+      length:
+        type: string
+        enum:
+        - brief
+        - standard
+        - long
+        default: standard
+      audience:
+        type: string
+        enum:
+        - student
+        - faculty
+        default: student
+    required:
+    - topic_or_nodes
+    - format
+  outputs:
+    type: object
+    properties:
+      content_md:
+        type: string
+      citations:
+        type: array
+        items:
+          type: string
+      draft_id:
+        type: string
+    required:
+    - content_md
+  mcp_tools:
+  - content.retrieve
+  - content.search
+  - content.save_draft
+  - standards.lookup
+  - graph.subgraph
+  composable_with:
+  - tutor
+  - course_architect
+  - assessment
+  - communication
+  requires_human_approval: false

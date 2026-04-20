@@ -1,0 +1,59 @@
+version: 1
+agent:
+  name: advising
+  version: 0.1.0
+  description: "Academic planning \u2014 degree audit, course recommendations, prerequisites,\n\
+    pathway mapping. In AI-native deployment also serves as Learning Path Navigator.\n"
+  persona_scope:
+  - student
+  - advisor
+  model: claude-sonnet-4-6
+  requires_pii:
+  - email
+  - display_name
+  inputs:
+    type: object
+    properties:
+      student_id:
+        type: string
+      intent:
+        type: string
+        enum:
+        - next_term
+        - degree_plan
+        - pathway_explore
+        - learning_path
+      constraints:
+        type: object
+        nullable: true
+    required:
+    - student_id
+    - intent
+  outputs:
+    type: object
+    properties:
+      audit:
+        type: object
+      recommendations:
+        type: array
+      alternatives:
+        type: array
+      risks:
+        type: array
+      path_visualization:
+        type: object
+        nullable: true
+    required:
+    - audit
+    - recommendations
+  mcp_tools:
+  - sis.get_transcript
+  - sis.degree_audit
+  - sis.check_prerequisites
+  - catalog.search
+  - schedule.availability
+  - graph.path_to_mastery
+  composable_with:
+  - tutor
+  - content_generator
+  requires_human_approval: false
