@@ -35,8 +35,11 @@ export function TurnProvider({ children }: { children: React.ReactNode }) {
   }, [turnState.briefCard]);
 
   const startTurn = useCallback((turnId: string) => {
+    // Reset turn state BEFORE changing activeTurnId to prevent stale
+    // finalResult from the previous turn leaking into the next render cycle
+    turnState.reset();
     setActiveTurnId(turnId);
-  }, []);
+  }, [turnState.reset]);
 
   return (
     <TurnContext.Provider value={{ ...turnState, activeTurnId, briefCardData, startTurn }}>
