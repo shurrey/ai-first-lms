@@ -22,3 +22,21 @@ export async function createSession(
   }
   return res.json();
 }
+
+export async function converse(
+  sessionId: string,
+  message: string
+): Promise<{ turn_id: string; stream_url: string }> {
+  const res = await fetch(`${API_BASE}/api/converse`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      session_id: sessionId,
+      message,
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to send message: ${res.status}`);
+  }
+  return res.json();
+}
