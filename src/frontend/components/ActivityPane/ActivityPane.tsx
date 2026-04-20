@@ -1,13 +1,24 @@
 "use client";
 
 import { ActivityTree } from "./ActivityTree";
+import { BriefCard } from "@/components/BriefCard/BriefCard";
 import { CanvasRouter } from "@/components/Canvas/CanvasRouter";
 import { ApprovalGate } from "@/components/ApprovalGate";
 import { useTurn } from "@/lib/turn-context";
+import { converse } from "@/lib/api";
+import { useSession } from "@/lib/session-context";
 
 export function ActivityPane() {
   const turn = useTurn();
+  const { sessionId } = useSession();
   const artifacts = turn.finalResult?.artifacts ?? [];
+
+  const handleBriefAction = (prompt: string) => {
+    if (!sessionId) return;
+    converse(sessionId, prompt).then((data) => {
+      turn.startTurn(data.turn_id);
+    });
+  };
 
   return (
     <aside className="flex h-full flex-col overflow-y-auto border-l border-border bg-muted/30 p-4">
@@ -15,9 +26,13 @@ export function ActivityPane() {
         Activity
       </h2>
       <div className="flex-1 space-y-4">
+        {/* Course brief card */}
+        {turn.briefCardData && (
+          <BriefCard data={turn.briefCardData} onAction={handleBriefAction} />
+        )}
+
         <ActivityTree />
 
-        {/* Approval gate when awaiting approval */}
         {turn.approval && (
           <div className="space-y-3">
             <CanvasRouter
@@ -36,7 +51,6 @@ export function ActivityPane() {
           </div>
         )}
 
-        {/* Final artifacts */}
         {artifacts.length > 0 && (
           <div className="space-y-3">
             <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">

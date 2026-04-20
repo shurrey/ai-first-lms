@@ -12,13 +12,14 @@ const MOCK_COURSES = [
 ];
 
 export function CourseSelector() {
-  const { persona, courseId, setCourseId, setSessionId } = useSession();
+  const { persona, courseId, setCourseId, setSessionId, setBriefTurnId } = useSession();
 
   const createSessionMutation = useMutation({
     mutationFn: (selectedCourseId: string) =>
       createSession(persona, selectedCourseId),
     onSuccess: (data) => {
       setSessionId(data.session_id);
+      setBriefTurnId(data.brief_turn_id ?? null);
     },
   });
 

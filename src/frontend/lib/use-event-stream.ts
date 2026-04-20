@@ -14,6 +14,7 @@ import type {
   ApprovalRequestPayload,
   ReasoningPayload,
   PlanPayload,
+  BriefCardPayload,
 } from "./events";
 
 export interface TurnState {
@@ -28,6 +29,7 @@ export interface TurnState {
   approval: ApprovalRequestPayload | null;
   finalResult: FinalPayload | null;
   error: ErrorPayload | null;
+  briefCard: BriefCardPayload | null;
 }
 
 type TurnAction =
@@ -47,6 +49,7 @@ const initialState: TurnState = {
   approval: null,
   finalResult: null,
   error: null,
+  briefCard: null,
 };
 
 function turnReducer(state: TurnState, action: TurnAction): TurnState {
@@ -130,6 +133,9 @@ function turnReducer(state: TurnState, action: TurnAction): TurnState {
             status: "error",
             error: payload as ErrorPayload,
           };
+
+        case "brief_card":
+          return { ...state, briefCard: event.payload as BriefCardPayload };
 
         default:
           return state;

@@ -7,7 +7,7 @@ export async function createSession(
   persona: Persona,
   courseId: string,
   personId?: string
-): Promise<{ session_id: string }> {
+): Promise<{ session_id: string; brief_turn_id: string | null; stream_url: string | null }> {
   const res = await fetch(`${API_BASE}/api/session`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
