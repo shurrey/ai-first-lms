@@ -207,9 +207,10 @@ class ClaudeAgentRunner:
         system_prompt = self._load_system_prompt(agent_name)
         message = inputs.get("message", "")
         persona = inputs.get("persona", "student")
+        person_id = inputs.get("person_id", "")
         course_id = inputs.get("course_id", "")
 
-        user_content = f"[Persona: {persona} | Course: {course_id}]\n\n{message}"
+        user_content = f"[Persona: {persona} | Person ID: {person_id} | Course ID: {course_id}]\n\n{message}"
 
         # Get this agent's allowed tools
         mcp_tool_names = _AGENT_TOOLS.get(agent_name, [])

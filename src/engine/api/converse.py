@@ -52,6 +52,7 @@ async def _run_graph(app, session, turn: Turn) -> None:  # type: ignore[no-untyp
             "session_id": session.id,
             "turn_id": turn.id,
             "persona": session.persona,
+            "person_id": session.person_id or "",
             "course_id": session.course_id,
             "conversation": [],
             "current_message": turn.message,
