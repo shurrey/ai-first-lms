@@ -41,6 +41,7 @@ async def dispatch(state: OrchestratorState) -> OrchestratorState:
     persona = state.get("persona", "student")
     person_id = state.get("person_id", "")
     course_id = state.get("course_id", "")
+    conversation = state.get("conversation", [])
     events: list[dict[str, Any]] = list(state.get("events_emitted", []))
     results: list[AgentResult] = list(state.get("agent_results", []))
     completed_steps: dict[str, dict[str, Any]] = {}
@@ -60,7 +61,7 @@ async def dispatch(state: OrchestratorState) -> OrchestratorState:
         # Execute ready steps (potentially in parallel)
         tasks = []
         for step in ready:
-            tasks.append(_execute_step(runner, step, message, events, persona, person_id, course_id))
+            tasks.append(_execute_step(runner, step, message, events, persona, person_id, course_id, conversation))
 
         step_results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -121,6 +122,7 @@ async def _execute_step(
     persona: str = "student",
     person_id: str = "",
     course_id: str = "",
+    conversation: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Execute a single plan step and return events + result."""
     step_id = step["step_id"]
@@ -138,7 +140,13 @@ async def _execute_step(
     })
 
     start_time = time.monotonic()
-    result = await runner.run(agent, {"message": message, "persona": persona, "person_id": person_id, "course_id": course_id})
+    result = await runner.run(agent, {
+        "message": message,
+        "persona": persona,
+        "person_id": person_id,
+        "course_id": course_id,
+        "conversation": conversation or [],
+    })
     elapsed_ms = (time.monotonic() - start_time) * 1000
 
     # Emit tool_call events

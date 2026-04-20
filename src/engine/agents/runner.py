@@ -267,8 +267,9 @@ class ClaudeAgentRunner:
         persona = inputs.get("persona", "student")
         person_id = inputs.get("person_id", "")
         course_id = inputs.get("course_id", "")
+        conversation = inputs.get("conversation", [])
 
-        user_content = f"[Persona: {persona} | Person ID: {person_id} | Course ID: {course_id}]\n\n{message}"
+        context_prefix = f"[Persona: {persona} | Person ID: {person_id} | Course ID: {course_id}]"
 
         # Get this agent's allowed tools
         mcp_tool_names = _AGENT_TOOLS.get(agent_name, [])
@@ -277,7 +278,24 @@ class ClaudeAgentRunner:
         # Tool name mapping: Claude uses underscores, MCP uses dots
         tool_name_map = {name.replace(".", "_"): name for name in mcp_tool_names}
 
-        messages: list[dict[str, Any]] = [{"role": "user", "content": user_content}]
+        # Build messages with conversation history for context
+        messages: list[dict[str, Any]] = []
+        if conversation:
+            # Add context prefix to the first message
+            first_content = conversation[0].get("content", "")
+            messages.append({
+                "role": conversation[0].get("role", "user"),
+                "content": f"{context_prefix}\n\n{first_content}",
+            })
+            for turn in conversation[1:]:
+                messages.append({
+                    "role": turn.get("role", "user"),
+                    "content": turn.get("content", ""),
+                })
+            # Add current message
+            messages.append({"role": "user", "content": message})
+        else:
+            messages.append({"role": "user", "content": f"{context_prefix}\n\n{message}"})
         total_input_tokens = 0
         total_output_tokens = 0
         tool_call_records: list[dict[str, Any]] = []

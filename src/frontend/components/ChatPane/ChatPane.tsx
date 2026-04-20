@@ -19,14 +19,17 @@ export function ChatPane() {
   // When the SSE stream produces a final result, add the assistant message
   useEffect(() => {
     if (turnState.status === "done" && turnState.finalResult) {
+      const msgId = `assistant-${turnState.activeTurnId}`;
       setMessages((prev) => {
+        // Deduplicate: don't add if this message ID already exists
+        if (prev.some((m) => m.id === msgId)) return prev;
         const withoutPlaceholder = prev.filter(
           (m) => m.id !== `streaming-${turnState.activeTurnId}`
         );
         return [
           ...withoutPlaceholder,
           {
-            id: `assistant-${turnState.activeTurnId}`,
+            id: msgId,
             role: "assistant" as const,
             content: turnState.finalResult!.answer_markdown,
             timestamp: new Date().toISOString(),
