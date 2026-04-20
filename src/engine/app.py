@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from engine.api.approval import router as approval_router
 from engine.api.converse import router as converse_router
@@ -15,6 +16,14 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="AI-First LMS Orchestrator",
         version="0.1.0",
+    )
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:3000"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
 
     app.state.session_store = SessionStore()
