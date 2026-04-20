@@ -1,0 +1,70 @@
+version: 1
+agent:
+  name: tutor
+  version: 0.1.0
+  description: 'Socratic tutoring over course content for students. Explains concepts,
+
+    offers worked examples, runs adaptive quizzes, identifies weak spots from
+
+    recent evidence, and generates practice when asked.
+
+    '
+  persona_scope:
+  - student
+  - faculty
+  model: claude-sonnet-4-6
+  requires_pii: []
+  inputs:
+    type: object
+    properties:
+      query:
+        type: string
+      course_id:
+        type: string
+      student_id:
+        type: string
+        nullable: true
+      mode:
+        type: string
+        enum:
+        - explain
+        - quiz_me
+        - find_weakness
+        - practice
+    required:
+    - query
+    - course_id
+  outputs:
+    type: object
+    properties:
+      response_markdown:
+        type: string
+      citations:
+        type: array
+        items:
+          type: string
+      follow_ups:
+        type: array
+        items:
+          type: string
+      suggested_nodes:
+        type: array
+        items:
+          type: string
+    required:
+    - response_markdown
+  mcp_tools:
+  - content.retrieve
+  - content.search
+  - roster.get_student_context
+  - assessments.list_recent_evidence
+  - graph.neighbors
+  - graph.path_to_mastery
+  composable_with:
+  - content_generator
+  - assessment
+  requires_human_approval: false
+  example_queries:
+  - Can you help me understand recursion?
+  - Quiz me on last week's material.
+  - What am I weakest at in this course?
