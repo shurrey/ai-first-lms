@@ -1,33 +1,50 @@
 [project]
-name = "lms-agents"
+name = "ai-first-lms-engine"
 version = "0.1.0"
-description = "AI-First LMS sub-agents"
+description = "AI-First LMS Orchestrator Engine"
 requires-python = ">=3.12"
 dependencies = [
-    "pydantic>=2.0,<3",
-    "anthropic>=0.40",
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.29",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.2",
+    "sse-starlette>=2.0",
     "pyyaml>=6.0",
+    "langgraph>=0.2",
+    "anthropic>=0.30",
+    "structlog>=24.0",
+    "opentelemetry-api>=1.24",
+    "opentelemetry-sdk>=1.24",
+    "opentelemetry-instrumentation-fastapi>=0.45b0",
+    "opentelemetry-exporter-otlp>=1.24",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8",
-    "pytest-asyncio>=0.24",
-    "ruff>=0.8",
-    "mypy>=1.13",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "httpx>=0.27",
+    "ruff>=0.4",
+    "mypy>=1.10",
 ]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/engine"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["src/agents/tests"]
-pythonpath = ["."]
+testpaths = ["src/engine/tests"]
 
 [tool.ruff]
 target-version = "py312"
 line-length = 99
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
+select = ["E", "F", "I", "N", "UP", "B", "SIM"]
 
 [tool.mypy]
 python_version = "3.12"
