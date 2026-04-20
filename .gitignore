@@ -1,9 +1,45 @@
-__pycache__/
-*.pyc
-.venv/
-*.egg-info/
-.pytest_cache/
-.mypy_cache/
+# Environment and secrets
 .env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+.uv/
+*.egg-info/
 dist/
 build/
+
+# Node / Frontend
+node_modules/
+.next/
+out/
+.turbo/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+*.log
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+
+# Worktree markers (each worktree has one; not shared)
+.workstream
