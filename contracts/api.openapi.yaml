@@ -1,0 +1,152 @@
+openapi: 3.1.0
+info:
+  title: AI-First LMS Prototype — Orchestrator API
+  version: 0.1.0
+  description: |
+    Contract between the frontend and the orchestrator. Source of truth.
+    Do not edit without a T-C-* contract-change task.
+
+    The frontend calls only these endpoints. Sub-agents and MCP servers are
+    NOT exposed through this API.
+
+servers:
+  - url: http://localhost:8000
+    description: Local dev
+  - url: https://demo.ailms.internal
+    description: Demo VM
+
+paths:
+  /healthz:
+    get:
+      summary: Liveness probe
+      responses:
+        "200": {description: ok}
+
+  /api/session:
+    post:
+      summary: Create a session for a given persona and course
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [persona, course_id]
+              properties:
+                persona: {type: string, enum: [student, faculty, advisor, admin]}
+                person_id: {type: string}
+                course_id: {type: string}
+      responses:
+        "201":
+          description: created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  session_id: {type: string}
+
+  /api/converse:
+    post:
+      summary: Submit a user message and begin a turn
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [session_id, message]
+              properties:
+                session_id: {type: string}
+                message: {type: string}
+                context_override: {type: object, nullable: true}
+      responses:
+        "202":
+          description: |
+            Turn accepted. Caller must open a GET /api/stream for the returned turn_id
+            to receive events.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  turn_id: {type: string}
+                  stream_url: {type: string}
+
+  /api/stream:
+    get:
+      summary: SSE stream of events for an in-progress turn
+      parameters:
+        - in: query
+          name: session_id
+          required: true
+          schema: {type: string}
+        - in: query
+          name: turn_id
+          required: true
+          schema: {type: string}
+        - in: query
+          name: since_sequence
+          description: Resume from this sequence (inclusive). Supports reconnect.
+          schema: {type: integer}
+      responses:
+        "200":
+          description: |
+            text/event-stream of envelopes per contracts/events.md.
+          content:
+            text/event-stream: {}
+
+  /api/approval:
+    post:
+      summary: Submit a human approval/edit/rejection for a pending step
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [session_id, turn_id, approval_id, decision]
+              properties:
+                session_id: {type: string}
+                turn_id: {type: string}
+                approval_id: {type: string}
+                decision: {type: string, enum: [approve, edit, reject]}
+                edited_payload: {type: object, nullable: true}
+                note: {type: string, nullable: true}
+      responses:
+        "202": {description: accepted; orchestrator will resume the turn}
+
+  /api/clarify:
+    post:
+      summary: Answer a clarification request; resume the turn
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [session_id, turn_id, answer]
+              properties:
+                session_id: {type: string}
+                turn_id: {type: string}
+                answer: {type: string}
+      responses:
+        "202": {description: accepted}
+
+  /api/sessions/{session_id}/history:
+    get:
+      summary: Conversation history for a session
+      parameters:
+        - in: path
+          name: session_id
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  turns: {type: array}

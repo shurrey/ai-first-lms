@@ -1,0 +1,331 @@
+# agent-manifests.yaml
+# Source of truth for the ten sub-agents. DO NOT EDIT without a T-C-* contract-change task.
+# Each agent has a local copy at src/agents/<name>/manifest.yaml that CI verifies matches.
+
+version: 1
+
+agents:
+
+  - name: tutor
+    version: "0.1.0"
+    description: |
+      Socratic tutoring over course content for students. Explains concepts,
+      offers worked examples, runs adaptive quizzes, identifies weak spots from
+      recent evidence, and generates practice when asked.
+    persona_scope: [student, faculty]    # faculty may use in a "preview as student" mode
+    model: claude-sonnet-4-6              # can downshift to haiku for small-talk
+    requires_pii: []                      # works with pseudonymous context
+    inputs:
+      type: object
+      properties:
+        query:           {type: string}
+        course_id:       {type: string}
+        student_id:      {type: string, nullable: true}
+        mode:            {type: string, enum: [explain, quiz_me, find_weakness, practice]}
+      required: [query, course_id]
+    outputs:
+      type: object
+      properties:
+        response_markdown: {type: string}
+        citations:         {type: array, items: {type: string}}
+        follow_ups:        {type: array, items: {type: string}}
+        suggested_nodes:   {type: array, items: {type: string}}   # graph nodes to study next
+      required: [response_markdown]
+    mcp_tools:
+      - content.retrieve
+      - content.search
+      - roster.get_student_context
+      - assessments.list_recent_evidence
+      - graph.neighbors
+      - graph.path_to_mastery
+    composable_with: [content_generator, assessment]
+    requires_human_approval: false
+    example_queries:
+      - "Can you help me understand recursion?"
+      - "Quiz me on last week's material."
+      - "What am I weakest at in this course?"
+
+  - name: course_architect
+    version: "0.1.0"
+    description: |
+      Drafts course structures — outcomes, modules, standards alignment, syllabi.
+      Always produces drafts for faculty approval.
+    persona_scope: [faculty, instructional_designer]
+    model: claude-sonnet-4-6
+    requires_pii: []
+    inputs:
+      type: object
+      properties:
+        topic:          {type: string}
+        audience:       {type: string}
+        duration_weeks: {type: integer}
+        standards:      {type: array, items: {type: string}}
+        constraints:    {type: string, nullable: true}
+      required: [topic, audience, duration_weeks]
+    outputs:
+      type: object
+      properties:
+        outcomes:    {type: array}            # each with text, bloom_level, standards
+        modules:     {type: array}            # each with title, duration, outcomes
+        syllabus_md: {type: string}
+        alignment:   {type: array}            # outcome_id × assessment_id matrix
+      required: [outcomes, modules, syllabus_md]
+    mcp_tools:
+      - standards.lookup
+      - content.library_search
+      - graph.subgraph_for_outcomes
+      - content.save_draft
+    composable_with: [content_generator, assessment]
+    requires_human_approval: true
+
+  - name: content_generator
+    version: "0.1.0"
+    description: |
+      Generates learning materials — summaries, worked examples, study guides,
+      reading guides, slide drafts, practice problems. Serves both faculty and
+      students directly; also invoked by orchestrator on behalf of other agents.
+    persona_scope: [student, faculty, instructional_designer]
+    model: claude-haiku-4-5-20251001       # cheap by default; orchestrator can upgrade
+    requires_pii: []
+    inputs:
+      type: object
+      properties:
+        topic_or_nodes:  {type: array, items: {type: string}}
+        format:          {type: string, enum: [summary, study_guide, worked_example, reading_guide, slide_deck_outline, practice_problems]}
+        reading_level:   {type: string, enum: [middle_school, high_school, intro_undergrad, undergrad, graduate], default: intro_undergrad}
+        length:          {type: string, enum: [brief, standard, long], default: standard}
+        audience:        {type: string, enum: [student, faculty], default: student}
+      required: [topic_or_nodes, format]
+    outputs:
+      type: object
+      properties:
+        content_md:  {type: string}
+        citations:   {type: array, items: {type: string}}
+        draft_id:    {type: string}
+      required: [content_md]
+    mcp_tools:
+      - content.retrieve
+      - content.search
+      - content.save_draft
+      - standards.lookup
+      - graph.subgraph
+    composable_with: [tutor, course_architect, assessment, communication]
+    requires_human_approval: false
+
+  - name: assessment
+    version: "0.1.0"
+    description: |
+      Generates and validates assessments — quiz/exam questions, rubrics, item analysis.
+    persona_scope: [faculty, instructional_designer]
+    model: claude-sonnet-4-6
+    requires_pii: []
+    inputs:
+      type: object
+      properties:
+        topic_or_nodes:   {type: array, items: {type: string}}
+        question_types:   {type: array, items: {type: string, enum: [mcq, short_answer, essay, code]}}
+        count:            {type: integer, minimum: 1, maximum: 50}
+        difficulty:       {type: string, enum: [intro, moderate, advanced, mixed]}
+        include_rubric:   {type: boolean, default: false}
+      required: [topic_or_nodes, question_types, count]
+    outputs:
+      type: object
+      properties:
+        questions: {type: array}    # each: stem, type, options/distractors, answer, bloom, difficulty, alignment
+        rubric:    {type: object, nullable: true}
+        warnings:  {type: array, items: {type: string}}   # weak items, overlapping distractors, etc.
+      required: [questions]
+    mcp_tools:
+      - questions.search_bank
+      - questions.create
+      - standards.lookup
+      - content.retrieve
+      - graph.node_for_outcome
+    composable_with: [content_generator]
+    requires_human_approval: true     # saving to question bank requires approval
+
+  - name: grading_assistant
+    version: "0.1.0"
+    description: |
+      Drafts rubric-based scores and feedback for student submissions.
+      Always drafts; never commits without explicit faculty approval.
+    persona_scope: [faculty]
+    model: claude-sonnet-4-6
+    requires_pii: [display_name]            # needed for personalized feedback
+    inputs:
+      type: object
+      properties:
+        submission_ids: {type: array, items: {type: string}}
+        rubric_id:      {type: string}
+        exemplars:      {type: array, items: {type: string}, nullable: true}
+      required: [submission_ids, rubric_id]
+    outputs:
+      type: object
+      properties:
+        drafts: {type: array}
+        # each draft: submission_id, scores{criterion: n}, feedback{criterion: md}, holistic_md, confidence, flags
+      required: [drafts]
+    mcp_tools:
+      - submissions.get
+      - rubrics.get
+      - grades.draft
+      - grades.commit                       # gated, requires approval
+    composable_with: []
+    requires_human_approval: true
+
+  - name: early_alert
+    version: "0.1.0"
+    description: |
+      Detects at-risk students with explanations and recommends interventions.
+      Explains every risk score. Recommends — never acts.
+    persona_scope: [faculty, advisor, admin]
+    model: claude-sonnet-4-6
+    requires_pii: [display_name]
+    inputs:
+      type: object
+      properties:
+        scope:           {type: object}   # {course_id?, section_id?, program_id?}
+        window_days:     {type: integer, default: 14}
+        risk_threshold:  {type: number, default: 0.5}
+      required: [scope]
+    outputs:
+      type: object
+      properties:
+        at_risk: {type: array}
+        # each: student_id, name, risk_score, confidence, factors[], recommended_interventions[]
+        methodology_note: {type: string}
+      required: [at_risk]
+    mcp_tools:
+      - analytics.query
+      - roster.get
+      - interventions.playbook
+      - graph.evidence_summary
+    composable_with: [engagement_analyst, communication, content_generator]
+    requires_human_approval: false
+
+  - name: advising
+    version: "0.1.0"
+    description: |
+      Academic planning — degree audit, course recommendations, prerequisites,
+      pathway mapping. In AI-native deployment also serves as Learning Path Navigator.
+    persona_scope: [student, advisor]
+    model: claude-sonnet-4-6
+    requires_pii: [email, display_name]    # for personalized audit
+    inputs:
+      type: object
+      properties:
+        student_id:  {type: string}
+        intent:      {type: string, enum: [next_term, degree_plan, pathway_explore, learning_path]}
+        constraints: {type: object, nullable: true}   # max_credits, work_hours, preferences
+      required: [student_id, intent]
+    outputs:
+      type: object
+      properties:
+        audit:             {type: object}
+        recommendations:   {type: array}            # courses or nodes
+        alternatives:      {type: array}
+        risks:             {type: array}            # e.g. missing prerequisite, time-to-graduation slip
+        path_visualization: {type: object, nullable: true}  # learning graph projection
+      required: [audit, recommendations]
+    mcp_tools:
+      - sis.get_transcript
+      - sis.degree_audit
+      - sis.check_prerequisites
+      - catalog.search
+      - schedule.availability
+      - graph.path_to_mastery
+    composable_with: [tutor, content_generator]
+    requires_human_approval: false
+
+  - name: accessibility
+    version: "0.1.0"
+    description: |
+      WCAG compliance scanning and content adaptation — alt-text, captions,
+      readability simplification, translation.
+    persona_scope: [faculty, instructional_designer, student, admin]
+    model: claude-sonnet-4-6
+    requires_pii: []
+    inputs:
+      type: object
+      properties:
+        scope:     {type: object}   # {course_id?, module_id?, document_id?}
+        actions:   {type: array, items: {type: string, enum: [scan, alt_text, captions, simplify, translate]}}
+        target_language: {type: string, nullable: true}
+        target_reading_level: {type: string, nullable: true}
+      required: [scope, actions]
+    outputs:
+      type: object
+      properties:
+        report:     {type: object, nullable: true}   # WCAG findings
+        proposals:  {type: array}                    # draft changes for approval
+      required: [proposals]
+    mcp_tools:
+      - content.retrieve
+      - content.save_draft
+      - media.process
+      - translation.translate
+      - compliance.check_wcag
+    composable_with: [content_generator]
+    requires_human_approval: true
+
+  - name: engagement_analyst
+    version: "0.1.0"
+    description: |
+      Answers natural-language questions over learning analytics.
+      Produces narratives and charts with caveats.
+    persona_scope: [faculty, admin, advisor]
+    model: claude-sonnet-4-6
+    requires_pii: []                       # aggregate data only
+    inputs:
+      type: object
+      properties:
+        question:    {type: string}
+        scope:       {type: object}
+        window:      {type: object}        # {start, end}
+      required: [question]
+    outputs:
+      type: object
+      properties:
+        narrative_md: {type: string}
+        charts:       {type: array}        # each: type, title, data_ref
+        caveats:      {type: array, items: {type: string}}
+        query_used:   {type: string, nullable: true}   # shown to the user for transparency
+      required: [narrative_md]
+    mcp_tools:
+      - analytics.query
+      - analytics.describe_schema
+      - charts.render
+      - graph.aggregate
+    composable_with: []
+    requires_human_approval: false
+
+  - name: communication
+    version: "0.1.0"
+    description: |
+      Drafts and sends messages — announcements, reminders, personalized outreach.
+      Never sends without explicit human approval.
+    persona_scope: [faculty, advisor, admin]
+    model: claude-haiku-4-5-20251001
+    requires_pii: [display_name, email]
+    inputs:
+      type: object
+      properties:
+        audience:  {type: object}          # course/section/student_id list
+        intent:    {type: string}
+        tone:      {type: string, enum: [supportive, directive, neutral, celebratory]}
+        channel:   {type: string, enum: [announcement, inbox, email]}
+        personalize: {type: boolean, default: false}
+      required: [audience, intent, channel]
+    outputs:
+      type: object
+      properties:
+        drafts: {type: array}              # per-recipient if personalized
+        send_ready_payload: {type: object} # staged; not sent until approval
+      required: [drafts]
+    mcp_tools:
+      - roster.get
+      - messages.draft
+      - messages.send                      # gated
+      - templates.list
+    composable_with: []
+    requires_human_approval: true
