@@ -23,3 +23,5 @@ class CreateSessionRequest(BaseModel):
 
 class CreateSessionResponse(BaseModel):
     session_id: str
+    brief_turn_id: str | None = None
+    stream_url: str | None = None
