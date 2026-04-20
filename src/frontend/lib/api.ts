@@ -40,3 +40,49 @@ export async function converse(
   }
   return res.json();
 }
+
+export type ApprovalDecision = "approve" | "edit" | "reject";
+
+export async function submitApproval(params: {
+  sessionId: string;
+  turnId: string;
+  approvalId: string;
+  decision: ApprovalDecision;
+  editedPayload?: Record<string, unknown>;
+  note?: string;
+}): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/approval`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      session_id: params.sessionId,
+      turn_id: params.turnId,
+      approval_id: params.approvalId,
+      decision: params.decision,
+      ...(params.editedPayload && { edited_payload: params.editedPayload }),
+      ...(params.note && { note: params.note }),
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to submit approval: ${res.status}`);
+  }
+}
+
+export async function submitClarification(params: {
+  sessionId: string;
+  turnId: string;
+  answer: string;
+}): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/clarify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      session_id: params.sessionId,
+      turn_id: params.turnId,
+      answer: params.answer,
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to submit clarification: ${res.status}`);
+  }
+}
