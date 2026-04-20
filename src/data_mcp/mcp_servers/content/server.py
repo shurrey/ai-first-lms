@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import asyncpg
 import uvicorn
@@ -17,7 +19,7 @@ from data_mcp.settings import settings
 
 sse = SseServerTransport("/messages/")
 
-server: object = None  # set at startup
+server: object = None
 pool: asyncpg.Pool | None = None
 
 
@@ -30,10 +32,14 @@ async def healthz(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "server": "content"})
 
 
-async def on_startup():
+@asynccontextmanager
+async def lifespan(app: Starlette) -> AsyncIterator[None]:
     global server, pool
     pool = await asyncpg.create_pool(settings.database_url, min_size=2, max_size=10)
     server = create_mcp_server("content", get_tools(pool))
+    yield
+    if pool:
+        await pool.close()
 
 
 app = Starlette(
@@ -42,7 +48,7 @@ app = Starlette(
         Route("/sse", endpoint=handle_sse),
         Mount("/messages/", app=sse.handle_post_message),
     ],
-    on_startup=[on_startup],
+    lifespan=lifespan,
 )
 
 if __name__ == "__main__":
