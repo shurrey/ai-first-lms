@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# install-hooks — copies git hooks into .git/hooks/
+# Safe to re-run (idempotent).
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+HOOKS_DIR="$SCRIPT_DIR/../git-hooks"
+
+# Find the .git directory (works with worktrees too)
+GIT_DIR=$(git rev-parse --git-dir 2>/dev/null)
+if [ -z "$GIT_DIR" ]; then
+  echo "ERROR: Not in a git repository"
+  exit 1
+fi
+
+HOOKS_DEST="$GIT_DIR/hooks"
+mkdir -p "$HOOKS_DEST"
+
+for hook in pre-commit commit-msg pre-push; do
+  if [ -f "$HOOKS_DIR/$hook" ]; then
+    cp "$HOOKS_DIR/$hook" "$HOOKS_DEST/$hook"
+    chmod +x "$HOOKS_DEST/$hook"
+    echo "Installed: $hook"
+  else
+    echo "WARNING: $HOOKS_DIR/$hook not found, skipping"
+  fi
+done
+
+echo "Hooks installed."
