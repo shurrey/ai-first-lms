@@ -1,0 +1,16 @@
+id: 8
+name: "Syllabus drafting: Intro to Data Ethics"
+persona: faculty
+course_id: "cs-101"
+
+user_turns:
+  - message: "Help me draft a syllabus for Intro to Data Ethics."
+    approvals:
+      - decision: approve
+
+expected:
+  final_event: final
+  artifacts_of_type:
+    - syllabus_draft
+  min_agent_invocations: 1
+  max_wall_time_ms: 20000

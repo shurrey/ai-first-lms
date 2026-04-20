@@ -1,0 +1,14 @@
+id: 6
+name: "Accessibility: WCAG compliance check"
+persona: faculty
+course_id: "cs-101"
+
+user_turns:
+  - message: "Is my Intro to Biology course WCAG compliant?"
+
+expected:
+  final_event: final
+  artifacts_of_type:
+    - compliance_report
+  min_agent_invocations: 1
+  max_wall_time_ms: 20000

@@ -1,0 +1,14 @@
+id: 11
+name: "AI-native: build a writing improvement path"
+persona: student
+course_id: "cs-101"
+
+user_turns:
+  - message: "I want to get better at writing. Help me build a path."
+
+expected:
+  final_event: final
+  artifacts_of_type:
+    - learning_path
+  min_agent_invocations: 1
+  max_wall_time_ms: 20000

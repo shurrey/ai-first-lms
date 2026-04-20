@@ -1,0 +1,16 @@
+id: 5
+name: "Communication: draft announcement with approval"
+persona: faculty
+course_id: "cs-101"
+
+user_turns:
+  - message: "Draft an announcement about Monday's midterm."
+    approvals:
+      - decision: approve
+
+expected:
+  final_event: final
+  artifacts_of_type:
+    - message
+  min_agent_invocations: 1
+  max_wall_time_ms: 15000

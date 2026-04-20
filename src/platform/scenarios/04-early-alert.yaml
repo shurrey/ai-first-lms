@@ -1,0 +1,14 @@
+id: 4
+name: "Early alert: at-risk students with explanations"
+persona: faculty
+course_id: "cs-101"
+
+user_turns:
+  - message: "Who in my class is at risk and why?"
+
+expected:
+  final_event: final
+  artifacts_of_type:
+    - risk_report
+  min_agent_invocations: 1
+  max_wall_time_ms: 20000
