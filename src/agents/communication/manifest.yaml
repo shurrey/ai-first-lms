@@ -1,0 +1,57 @@
+version: 1
+agent:
+  name: communication
+  version: 0.1.0
+  description: "Drafts and sends messages \u2014 announcements, reminders, personalized outreach.\nNever sends without explicit\
+    \ human approval.\n"
+  persona_scope:
+  - faculty
+  - advisor
+  - admin
+  model: claude-haiku-4-5-20251001
+  requires_pii:
+  - display_name
+  - email
+  inputs:
+    type: object
+    properties:
+      audience:
+        type: object
+      intent:
+        type: string
+      tone:
+        type: string
+        enum:
+        - supportive
+        - directive
+        - neutral
+        - celebratory
+      channel:
+        type: string
+        enum:
+        - announcement
+        - inbox
+        - email
+      personalize:
+        type: boolean
+        default: false
+    required:
+    - audience
+    - intent
+    - channel
+  outputs:
+    type: object
+    properties:
+      drafts:
+        type: array
+      send_ready_payload:
+        type: object
+    required:
+    - drafts
+  mcp_tools:
+  - roster.get
+  - messages.draft
+  - messages.send
+  - templates.list
+  composable_with: []
+  requires_human_approval: true

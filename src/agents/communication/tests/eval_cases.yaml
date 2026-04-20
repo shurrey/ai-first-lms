@@ -1,0 +1,63 @@
+cases:
+  - id: comm-midterm-announcement
+    inputs:
+      audience: {course_id: "cs101"}
+      intent: "Midterm exam on Monday at 9am in Room 201"
+      channel: announcement
+      tone: directive
+    expected:
+      output_schema_version: v1
+      assertions:
+        - has_draft: true
+        - includes_date_time: true
+        - tone_matches: directive
+        - requires_approval_before_send: true
+
+  - id: comm-personalized-encouragement
+    inputs:
+      audience: {student_ids: ["stu-001", "stu-002"]}
+      intent: "Great work on the midterm!"
+      channel: inbox
+      tone: celebratory
+      personalize: true
+    expected:
+      output_schema_version: v1
+      assertions:
+        - draft_per_recipient: true
+        - uses_student_name: true
+        - tone_matches: celebratory
+
+  - id: comm-reminder-email
+    inputs:
+      audience: {course_id: "cs101"}
+      intent: "Assignment 3 is due Friday"
+      channel: email
+      tone: supportive
+    expected:
+      output_schema_version: v1
+      assertions:
+        - has_draft: true
+        - channel_correct: email
+
+  - id: comm-no-send-without-approval
+    inputs:
+      audience: {course_id: "cs101"}
+      intent: "Class cancelled tomorrow"
+      channel: announcement
+    expected:
+      output_schema_version: v1
+      assertions:
+        - does_not_auto_send: true
+        - send_ready_payload_staged: true
+
+  - id: comm-batch-outreach
+    inputs:
+      audience: {student_ids: ["stu-001", "stu-002", "stu-003"]}
+      intent: "Please visit office hours this week"
+      channel: inbox
+      personalize: true
+    expected:
+      output_schema_version: v1
+      assertions:
+        - draft_count: 3
+        - each_draft_personalized: true

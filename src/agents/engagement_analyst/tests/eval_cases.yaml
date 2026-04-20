@@ -1,0 +1,55 @@
+cases:
+  - id: ea-engagement-trends
+    inputs:
+      question: "Show me engagement trends in CS 101 this month."
+      scope: {course_id: "cs101"}
+      window: {start: "2026-04-01", end: "2026-04-30"}
+    expected:
+      output_schema_version: v1
+      assertions:
+        - has_narrative: true
+        - has_chart: true
+        - chart_type: line
+        - includes_caveats: true
+
+  - id: ea-section-comparison
+    inputs:
+      question: "Compare Section A vs Section B completion rates"
+      scope: {course_id: "cs101"}
+    expected:
+      output_schema_version: v1
+      assertions:
+        - has_narrative: true
+        - chart_type: bar
+        - mentions_sample_size: true
+
+  - id: ea-at-risk-correlation
+    inputs:
+      question: "Is there a correlation between video watch time and quiz scores?"
+      scope: {course_id: "cs101"}
+    expected:
+      output_schema_version: v1
+      assertions:
+        - warns_about_causation: true
+        - includes_caveats: true
+        - has_chart: true
+
+  - id: ea-small-sample
+    inputs:
+      question: "How are the 5 students in the honors section doing?"
+      scope: {section_id: "honors-01"}
+    expected:
+      output_schema_version: v1
+      assertions:
+        - warns_small_sample: true
+        - includes_caveats: true
+
+  - id: ea-methodology-transparency
+    inputs:
+      question: "What's the average assignment score this week?"
+      scope: {course_id: "cs101"}
+    expected:
+      output_schema_version: v1
+      assertions:
+        - shows_query_used: true
+        - has_narrative: true
