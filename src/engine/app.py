@@ -4,6 +4,7 @@ from fastapi import FastAPI
 
 from engine.api.converse import router as converse_router
 from engine.api.session import router as session_router
+from engine.api.stream import router as stream_router
 from engine.db import SessionStore, TurnStore
 
 
@@ -23,5 +24,6 @@ def create_app() -> FastAPI:
 
     app.include_router(session_router)
     app.include_router(converse_router)
+    app.include_router(stream_router)
 
     return app
