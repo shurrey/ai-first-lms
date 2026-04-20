@@ -50,6 +50,7 @@ class OrchestratorState(TypedDict, total=False):
     session_id: str
     turn_id: str
     persona: str
+    person_id: str
     course_id: str
     conversation: list[Turn]
     current_message: str
