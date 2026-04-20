@@ -70,7 +70,7 @@ async def _event_generator(
                 "id": str(sequence_counter),
             }
             sequence_counter += 1
-            last_seen = len(await turn_store.get_events(turn_id))
+            last_seen += 1
 
         # If turn is completed or errored, stop streaming
         if turn.status in ("completed", "error"):

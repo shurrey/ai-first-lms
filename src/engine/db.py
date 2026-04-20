@@ -48,4 +48,4 @@ class TurnStore:
         turn = self._turns.get(turn_id)
         if not turn:
             return []
-        return [e for e in turn.events if e.get("sequence", 0) >= since_sequence]
+        return turn.events[since_sequence:]

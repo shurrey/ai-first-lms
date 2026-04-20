@@ -69,15 +69,21 @@ async def _run_graph(app, session, turn: Turn) -> None:  # type: ignore[no-untyp
             "needs_clarification": False,
         }
 
-        result = await compiled.ainvoke(initial_state)
-
-        # Store events from the graph run
-        events = result.get("events_emitted", [])
+        # Stream intermediate states to push events incrementally
         turn_store = app.state.turn_store
-        await turn_store.add_events(turn.id, events)
-        await turn_store.update_status(turn.id, "completed")
+        last_event_count = 0
 
-        logger.info("Turn %s completed with %d events", turn.id, len(events))
+        async for state_chunk in compiled.astream(initial_state):
+            # Each chunk is a dict of {node_name: updated_state}
+            for _node_name, node_state in state_chunk.items():
+                events = node_state.get("events_emitted", [])
+                new_events = events[last_event_count:]
+                if new_events:
+                    await turn_store.add_events(turn.id, new_events)
+                    last_event_count = len(events)
+
+        await turn_store.update_status(turn.id, "completed")
+        logger.info("Turn %s completed with %d events", turn.id, last_event_count)
 
     except Exception:
         logger.exception("Graph run failed for turn %s", turn.id)

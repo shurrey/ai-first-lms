@@ -28,8 +28,23 @@ assessment, grading_assistant, early_alert, advising, accessibility, engagement_
 - needs_clarification: boolean — true if the intent is ambiguous
 - clarification_reason: string | null — why clarification is needed
 
+Agent routing guide:
+- tutor: explaining concepts, Socratic tutoring, quizzing, practice problems, study help
+- assessment: assignments, submissions, quizzes, grades, rubrics, due dates, evidence of learning
+- grading_assistant: grading submissions, providing feedback on student work
+- advising: degree requirements, course planning, prerequisites, graduation timelines
+- course_architect: course design, module structure, learning objectives
+- content_generator: creating learning materials, practice problems, examples
+- early_alert: at-risk students, engagement warnings, intervention recommendations
+- accessibility: accessibility audits, accommodations, WCAG compliance
+- engagement_analyst: participation analytics, engagement metrics, trends
+- communication: messages, announcements, notifications
+
+Key distinction: "What assignments do I have?" → assessment (not advising). \
+"What courses should I take next semester?" → advising (not assessment).
+
 Consider the persona when choosing the agent. Students typically interact with tutor, \
-content_generator, and advising. Faculty interact with all agents.
+assessment, content_generator, and advising. Faculty interact with all agents.
 
 Return ONLY valid JSON, no markdown fences.
 """
@@ -84,9 +99,10 @@ async def interpret(state: OrchestratorState) -> OrchestratorState:
     """Extract structured intent from user message using Claude."""
     message = state.get("current_message", "")
     persona = state.get("persona", "student")
+    course_id = state.get("course_id", "")
 
     client = get_llm_client()
-    user_prompt = f"Persona: {persona}\nMessage: {message}"
+    user_prompt = f"Persona: {persona}\nCourse: {course_id}\nMessage: {message}"
 
     raw_response = await client.create_message(
         model="claude-sonnet-4-6",
@@ -109,7 +125,10 @@ async def interpret(state: OrchestratorState) -> OrchestratorState:
         }
 
     confidence = parsed.get("confidence", 0.0)
-    needs_clarification = parsed.get("needs_clarification", False) or confidence < CONFIDENCE_THRESHOLD
+    # Only clarify if confidence is genuinely low. If the LLM is >threshold
+    # confident, proceed even if it suggests clarification — otherwise the
+    # graph loops because there's no user input to break the cycle.
+    needs_clarification = confidence < CONFIDENCE_THRESHOLD
 
     interpretation = {
         "action": parsed.get("action", "unknown"),
