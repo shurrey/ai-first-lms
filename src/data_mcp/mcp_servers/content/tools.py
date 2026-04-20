@@ -49,12 +49,14 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
             }
 
     async def search(args: dict[str, Any]) -> dict[str, Any]:
+        from data_mcp.embeddings.pipeline import embed_text
+
         query = args.get("query", "")
         course_id = args.get("course_id")
         top_k = args.get("top_k", 10)
 
         async with pool.acquire() as conn:
-            # Text search using ILIKE (pgvector semantic search requires embeddings)
+            # Step 1: keyword search via ILIKE
             conditions = ["(ci.title ILIKE $1 OR ci.body_md ILIKE $1)"]
             params: list[Any] = [f"%{query}%"]
             idx = 2
@@ -65,21 +67,65 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                 idx += 1
 
             where = " AND ".join(conditions)
-            rows = await conn.fetch(
+            keyword_rows = await conn.fetch(
                 f"""SELECT ci.id, ci.title,
                            LEFT(ci.body_md, 200) AS snippet,
                            1.0 AS score
                     FROM content_items ci
                     WHERE {where}
-                    LIMIT ${ idx }""",
+                    LIMIT ${idx}""",
                 *params, top_k,
             )
-            return {
-                "results": [
-                    {"id": str(r["id"]), "title": r["title"], "snippet": r["snippet"] or "", "score": r["score"]}
-                    for r in rows
-                ]
-            }
+
+            results = [
+                {"id": str(r["id"]), "title": r["title"], "snippet": r["snippet"] or "", "score": float(r["score"])}
+                for r in keyword_rows
+            ]
+
+            # Step 2: if keyword results < top_k, supplement with semantic search
+            if len(results) < top_k and query:
+                query_vec = embed_text(query)
+                remaining = top_k - len(results)
+                seen_ids = {r["id"] for r in results}
+
+                sem_conditions = ["n.embedding IS NOT NULL"]
+                sem_params: list[Any] = [str(query_vec)]
+                sem_idx = 2
+
+                if course_id:
+                    sem_conditions.append(f"n.metadata->>'course_id' = ${sem_idx}")
+                    sem_params.append(str(course_id))
+                    sem_idx += 1
+
+                sem_where = " AND ".join(sem_conditions)
+                sem_rows = await conn.fetch(
+                    f"""SELECT ci.id, ci.title,
+                               LEFT(ci.body_md, 200) AS snippet,
+                               1 - (n.embedding <=> $1::vector) AS score
+                        FROM content_items ci
+                        JOIN nodes n ON n.id = ci.node_id
+                        WHERE {sem_where}
+                        ORDER BY n.embedding <=> $1::vector
+                        LIMIT ${sem_idx}""",
+                    *sem_params, remaining + len(seen_ids),  # fetch extra to account for dedup
+                )
+
+                for r in sem_rows:
+                    rid = str(r["id"])
+                    if rid not in seen_ids:
+                        results.append({
+                            "id": rid,
+                            "title": r["title"],
+                            "snippet": r["snippet"] or "",
+                            "score": round(float(r["score"]), 4),
+                        })
+                        seen_ids.add(rid)
+                        if len(results) >= top_k:
+                            break
+
+            # Sort by score descending
+            results.sort(key=lambda r: r["score"], reverse=True)
+            return {"results": results[:top_k]}
 
     async def save_draft(args: dict[str, Any]) -> dict[str, Any]:
         node_id = args.get("node_id")
