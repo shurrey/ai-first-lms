@@ -1,9 +1,10 @@
 [project]
-name = "ai-first-lms-engine"
+name = "ai-first-lms"
 version = "0.1.0"
-description = "AI-First LMS Orchestrator Engine"
+description = "AI-First LMS Prototype — Engine + Data/MCP"
 requires-python = ">=3.12"
 dependencies = [
+    # Engine
     "fastapi>=0.111",
     "uvicorn[standard]>=0.29",
     "pydantic>=2.7",
@@ -17,6 +18,15 @@ dependencies = [
     "opentelemetry-sdk>=1.24",
     "opentelemetry-instrumentation-fastapi>=0.45b0",
     "opentelemetry-exporter-otlp>=1.24",
+    # Data / MCP
+    "asyncpg>=0.29.0",
+    "sqlalchemy[asyncio]>=2.0.30",
+    "alembic>=1.13.0",
+    "pgvector>=0.3.0",
+    "mcp>=1.0.0",
+    "psycopg2-binary>=2.9.9",
+    # MCP SSE transport (uses starlette internally)
+    "starlette>=0.37",
 ]
 
 [project.optional-dependencies]
@@ -33,18 +43,18 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/engine"]
+packages = ["src/engine", "src/data_mcp"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["src/engine/tests"]
+testpaths = ["src/engine/tests", "src/data_mcp/tests"]
 
 [tool.ruff]
 target-version = "py312"
-line-length = 99
+line-length = 100
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "UP", "B", "SIM"]
+select = ["E", "F", "I", "N", "W", "UP", "B", "SIM"]
 
 [tool.mypy]
 python_version = "3.12"
