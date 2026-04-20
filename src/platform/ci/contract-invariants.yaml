@@ -1,0 +1,27 @@
+# CI workflow: validate contract files remain consistent
+# Triggers on pushes touching contracts/*
+name: Contract Invariants
+
+on:
+  push:
+    paths:
+      - "contracts/**"
+    branches: [main]
+  pull_request:
+    paths:
+      - "contracts/**"
+    branches: [main]
+
+jobs:
+  check-contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+
+      - name: Install PyYAML
+        run: uv pip install --system pyyaml
+
+      - name: Run contract invariant checks
+        run: python src/platform/ci/scripts/check_contracts.py

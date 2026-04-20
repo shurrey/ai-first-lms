@@ -1,0 +1,16 @@
+id: 2
+name: "Quiz generation: 10-question photosynthesis quiz"
+persona: faculty
+course_id: "cs-101"
+
+user_turns:
+  - message: "Build me a 10-question quiz on photosynthesis."
+    approvals:
+      - decision: approve
+
+expected:
+  final_event: final
+  artifacts_of_type:
+    - quiz
+  min_agent_invocations: 1
+  max_wall_time_ms: 20000

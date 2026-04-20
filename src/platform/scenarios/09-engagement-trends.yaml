@@ -1,0 +1,14 @@
+id: 9
+name: "Engagement trends: CS 101 this month"
+persona: faculty
+course_id: "cs-101"
+
+user_turns:
+  - message: "Show me engagement trends in CS 101 this month."
+
+expected:
+  final_event: final
+  artifacts_of_type:
+    - chart
+  min_agent_invocations: 1
+  max_wall_time_ms: 20000

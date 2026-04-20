@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Demo CLI: run one or all scenarios against the live stack.
+
+Usage:
+  scripts/demo <id>          Run a single scenario
+  scripts/demo all           Run all 11 scenarios
+  scripts/demo <id> --check  Run and validate (exit 1 on failure)
+  scripts/demo all --check   Run all and validate
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+# Add project root to path
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT))
+
+from src.platform.scenarios.executor import ScenarioExecutor, load_scenario, load_all_scenarios, ScenarioResult
+
+SCENARIOS_DIR = ROOT / "src" / "platform" / "scenarios"
+DEFAULT_BASE_URL = "http://localhost:8000"
+
+
+def print_result(result: ScenarioResult) -> None:
+    status = "PASS" if result.passed else "FAIL"
+    print(f"  [{status}] Scenario {result.scenario_id}: {result.scenario_name}")
+    print(f"         Wall time: {result.wall_time_ms:.0f}ms")
+    print(f"         Agents invoked: {result.agent_invocations}")
+    if result.artifacts:
+        print(f"         Artifacts: {', '.join(result.artifacts)}")
+    if result.errors:
+        for err in result.errors:
+            print(f"         ERROR: {err}")
+    print()
+
+
+def main() -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="AI-First LMS Demo Runner")
+    parser.add_argument("target", help="Scenario ID (1-11) or 'all'")
+    parser.add_argument("--check", action="store_true", help="Validate and exit 1 on failure")
+    parser.add_argument("--url", default=DEFAULT_BASE_URL, help="Orchestrator base URL")
+    args = parser.parse_args()
+
+    executor = ScenarioExecutor(base_url=args.url)
+
+    if args.target == "all":
+        scenarios = load_all_scenarios(SCENARIOS_DIR)
+    else:
+        scenario_id = int(args.target)
+        # Find the scenario file by ID
+        found = None
+        for yaml_file in SCENARIOS_DIR.glob("*.yaml"):
+            s = load_scenario(yaml_file)
+            if s.id == scenario_id:
+                found = s
+                break
+        if found is None:
+            print(f"ERROR: No scenario with id={scenario_id}")
+            return 1
+        scenarios = [found]
+
+    print(f"=== AI-First LMS Demo: running {len(scenarios)} scenario(s) ===\n")
+
+    results: list[ScenarioResult] = []
+    for scenario in scenarios:
+        print(f"Running scenario {scenario.id}: {scenario.name}...")
+        result = executor.run(scenario)
+        results.append(result)
+        print_result(result)
+
+    # Summary
+    passed = sum(1 for r in results if r.passed)
+    failed = len(results) - passed
+    print(f"=== Summary: {passed} passed, {failed} failed out of {len(results)} ===")
+
+    if args.check and failed > 0:
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,58 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "legend": { "displayMode": "table", "placement": "right" } },
+      "title": "Error Rate by Type",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (error_type) (rate(lms_errors_total[5m]))",
+          "legendFormat": "{{error_type}}"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "id": 2,
+      "options": { "colorMode": "value", "graphMode": "area" },
+      "title": "Total Errors (1h)",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(increase(lms_errors_total[1h]))"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "id": 3,
+      "options": { "pieType": "donut" },
+      "title": "Error Distribution",
+      "type": "piechart",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (error_type) (increase(lms_errors_total[1h]))",
+          "legendFormat": "{{error_type}}"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["lms", "errors"],
+  "time": { "from": "now-1h", "to": "now" },
+  "title": "Error Rate",
+  "uid": "lms-errors"
+}

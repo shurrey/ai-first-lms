@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# Deploy the compose bundle to the demo VM.
+#
+# Usage:
+#   scripts/deploy demo          Deploy to the demo VM
+#   scripts/deploy demo --dry    Show what would be deployed without executing
+#
+# Requires: DEMO_HOST and DEMO_USER env vars (or set in .env on your machine).
+# Secrets (.env) live on the VM, never in the repo.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+
+TARGET="${1:-}"
+DRY_RUN=false
+if [[ "${2:-}" == "--dry" ]]; then
+  DRY_RUN=true
+fi
+
+if [[ "$TARGET" != "demo" ]]; then
+  echo "Usage: scripts/deploy demo [--dry]"
+  exit 1
+fi
+
+# Load deployment config
+DEMO_HOST="${DEMO_HOST:-}"
+DEMO_USER="${DEMO_USER:-ubuntu}"
+DEMO_PATH="${DEMO_PATH:-/opt/lms}"
+
+if [[ -z "$DEMO_HOST" ]]; then
+  echo "ERROR: DEMO_HOST not set. Export it or add to .env"
+  exit 1
+fi
+
+REMOTE="${DEMO_USER}@${DEMO_HOST}"
+
+echo "=== Deploying to ${REMOTE}:${DEMO_PATH} ==="
+
+# Files to sync
+FILES=(
+  docker-compose.yaml
+  contracts/db-schema.sql
+  src/platform/stubs/
+  src/platform/otel/
+  src/platform/scenarios/
+  src/platform/scripts/demo
+)
+
+if $DRY_RUN; then
+  echo "[DRY RUN] Would sync:"
+  for f in "${FILES[@]}"; do
+    echo "  $f"
+  done
+  echo "[DRY RUN] Would run: docker compose pull && docker compose up -d"
+  exit 0
+fi
+
+# Ensure remote directory exists
+ssh "$REMOTE" "mkdir -p ${DEMO_PATH}"
+
+# Sync files
+for f in "${FILES[@]}"; do
+  src="${REPO_ROOT}/${f}"
+  dest="${DEMO_PATH}/${f}"
+  if [[ -d "$src" ]]; then
+    ssh "$REMOTE" "mkdir -p ${dest}"
+    rsync -avz --delete "$src/" "${REMOTE}:${dest}/"
+  else
+    ssh "$REMOTE" "mkdir -p $(dirname ${dest})"
+    rsync -avz "$src" "${REMOTE}:${dest}"
+  fi
+done
+
+# Pull and restart on the VM
+echo "Pulling images and restarting services..."
+ssh "$REMOTE" "cd ${DEMO_PATH} && docker compose pull && docker compose up -d"
+
+echo "=== Deployment complete ==="
+echo "Grafana: https://${DEMO_HOST}:3001"
+echo "Frontend: https://${DEMO_HOST}"

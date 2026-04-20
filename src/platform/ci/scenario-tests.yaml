@@ -1,0 +1,51 @@
+# CI workflow: run all 11 scenarios end-to-end against the full stack
+# Only triggers on pushes to main (expensive — full compose up)
+name: Scenario Integration Tests
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  scenario-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+
+      - name: Install Python dependencies
+        run: uv pip install --system pyyaml pydantic httpx
+
+      - name: Start full stack
+        run: |
+          docker compose up -d --build
+          echo "Waiting for services to be healthy..."
+          # Wait up to 120s for all services
+          for i in $(seq 1 24); do
+            UNHEALTHY=$(docker compose ps --format json | python3 -c "
+          import json, sys
+          services = [json.loads(line) for line in sys.stdin if line.strip()]
+          unhealthy = [s['Name'] for s in services if 'healthy' not in s.get('Status', '')]
+          print(len(unhealthy))
+          " 2>/dev/null || echo "99")
+            if [ "$UNHEALTHY" = "0" ]; then
+              echo "All services healthy"
+              break
+            fi
+            echo "  Waiting... ($UNHEALTHY services not yet healthy)"
+            sleep 5
+          done
+
+      - name: Run all scenarios
+        run: python3 src/platform/scripts/demo all --check
+
+      - name: Collect logs on failure
+        if: failure()
+        run: docker compose logs --tail=50
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

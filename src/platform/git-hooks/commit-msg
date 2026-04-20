@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# commit-msg hook: enforces conventional commit format with task ID reference
+# Installed by src/platform/scripts/install-hooks
+set -e
+
+COMMIT_MSG_FILE="$1"
+COMMIT_MSG=$(cat "$COMMIT_MSG_FILE")
+
+# Allow merge commits
+if echo "$COMMIT_MSG" | grep -qE '^Merge '; then
+  exit 0
+fi
+
+# Allow revert commits
+if echo "$COMMIT_MSG" | grep -qE '^Revert '; then
+  exit 0
+fi
+
+# Require conventional commit format: type(scope): T-<id> — summary
+# Or simpler forms: claim: T-<id>, done: T-<id>
+if echo "$COMMIT_MSG" | grep -qE '^(claim|done|blocked): T-[A-Z]+-[0-9]+'; then
+  exit 0
+fi
+
+if echo "$COMMIT_MSG" | grep -qE '^(feat|fix|refactor|test|docs|chore|contract)\([a-z-]+\): T-[A-Z]+-[0-9]+'; then
+  exit 0
+fi
+
+# Allow Co-Authored-By only commits (amends)
+if echo "$COMMIT_MSG" | grep -qE '^Co-Authored-By:'; then
+  exit 0
+fi
+
+echo "ERROR: Commit message does not follow the required format."
+echo ""
+echo "Expected formats:"
+echo "  <type>(<scope>): T-<id> — <summary>"
+echo "  claim: T-<id>"
+echo "  done: T-<id>"
+echo ""
+echo "Types: feat, fix, refactor, test, docs, chore, contract"
+echo "Scopes: engine, agents, data-mcp, frontend, platform, contracts"
+echo ""
+echo "Got: $COMMIT_MSG"
+exit 1

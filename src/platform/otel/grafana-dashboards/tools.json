@@ -1,0 +1,58 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "legend": { "displayMode": "table", "placement": "right" } },
+      "title": "Tool Call Rate (by tool)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (tool) (rate(lms_tool_calls_total[5m]))",
+          "legendFormat": "{{tool}}"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 10 },
+      "id": 2,
+      "options": { "legend": { "displayMode": "table" } },
+      "title": "Tool Calls per Turn (avg)",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(rate(lms_tool_calls_total[5m])) / sum(rate(lms_turns_total[5m]))"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 },
+      "id": 3,
+      "options": { "pieType": "donut" },
+      "title": "Tool Call Distribution",
+      "type": "piechart",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (tool) (increase(lms_tool_calls_total[1h]))",
+          "legendFormat": "{{tool}}"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["lms", "tools"],
+  "time": { "from": "now-1h", "to": "now" },
+  "title": "Tool Call Counts",
+  "uid": "lms-tools"
+}

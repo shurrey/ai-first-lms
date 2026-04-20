@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# pre-push hook: runs workstream's fast tests before allowing push
+# Installed by src/platform/scripts/install-hooks
+set -e
+
+if [ ! -f .workstream ]; then
+  # No .workstream = integration repo, skip tests
+  exit 0
+fi
+
+WORKSTREAM=$(cat .workstream | tr -d '[:space:]')
+
+if [ -z "$WORKSTREAM" ]; then
+  exit 0
+fi
+
+echo "=== Pre-push: running $WORKSTREAM tests ==="
+
+case "$WORKSTREAM" in
+  engine)
+    if [ -d "src/engine/tests" ]; then
+      uv run pytest src/engine/tests/ -x -q 2>&1 || {
+        echo "BLOCKED: Engine tests failed. Fix before pushing."
+        exit 1
+      }
+    fi
+    ;;
+  agents)
+    if [ -d "src/agents" ]; then
+      uv run pytest src/agents/ -x -q --ignore=src/agents/*/tests/eval_cases.yaml 2>&1 || {
+        echo "BLOCKED: Agent tests failed. Fix before pushing."
+        exit 1
+      }
+    fi
+    ;;
+  data-mcp)
+    if [ -d "src/data-mcp/tests" ]; then
+      uv run pytest src/data-mcp/tests/ -x -q 2>&1 || {
+        echo "BLOCKED: Data & MCP tests failed. Fix before pushing."
+        exit 1
+      }
+    fi
+    ;;
+  frontend)
+    if [ -d "src/frontend" ] && [ -f "src/frontend/package.json" ]; then
+      cd src/frontend && pnpm test --run 2>&1 || {
+        echo "BLOCKED: Frontend tests failed. Fix before pushing."
+        exit 1
+      }
+    fi
+    ;;
+  platform)
+    if [ -d "src/platform/smoke-tests" ]; then
+      echo "Running smoke tests..."
+      for test_script in src/platform/smoke-tests/test_*.sh; do
+        if [ -f "$test_script" ]; then
+          bash "$test_script" 2>&1 || {
+            echo "BLOCKED: Smoke test $test_script failed. Fix before pushing."
+            exit 1
+          }
+        fi
+      done
+    fi
+    ;;
+  *)
+    echo "WARNING: Unknown workstream '$WORKSTREAM', skipping pre-push tests"
+    ;;
+esac
+
+echo "=== Pre-push: all tests passed ==="

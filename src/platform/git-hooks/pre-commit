@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# pre-commit hook: path guard + contract guard
+# Installed by src/platform/scripts/install-hooks
+set -e
+
+# --- Path guard ---
+# Reads .workstream to determine which paths this worktree may touch.
+
+if [ ! -f .workstream ]; then
+  # No .workstream file means we're in the main repo (integration), allow everything
+  exit 0
+fi
+
+WORKSTREAM=$(cat .workstream | tr -d '[:space:]')
+
+if [ -z "$WORKSTREAM" ]; then
+  echo "ERROR: .workstream file is empty"
+  exit 1
+fi
+
+# Allowed path prefixes for this workstream
+ALLOWED_PREFIXES=(
+  "src/${WORKSTREAM}/"
+  "tasks/open/"
+  "tasks/claimed/${WORKSTREAM}/"
+  "tasks/done/"
+  "tasks/blocked/"
+  ".workstream"
+  "CLAUDE.md"
+)
+
+# Platform workstream also owns docker-compose.yaml and .env.example at repo root
+if [ "$WORKSTREAM" = "platform" ]; then
+  ALLOWED_PREFIXES+=(
+    "docker-compose.yaml"
+    ".env.example"
+    ".gitignore"
+  )
+fi
+
+FILES=$(git diff --cached --name-only)
+
+for f in $FILES; do
+  ok=0
+  for p in "${ALLOWED_PREFIXES[@]}"; do
+    if [[ "$f" == "$p"* ]] || [[ "$f" == "$p" ]]; then
+      ok=1
+      break
+    fi
+  done
+  if [[ $ok -eq 0 ]]; then
+    echo "BLOCKED: '$f' is outside workstream '$WORKSTREAM'"
+    echo "Allowed prefixes: ${ALLOWED_PREFIXES[*]}"
+    exit 1
+  fi
+done
+
+# --- Contract guard ---
+# Reject changes to contracts/* unless commit references a T-C-* task
+
+CONTRACTS_CHANGED=$(git diff --cached --name-only | grep '^contracts/' || true)
+
+if [ -n "$CONTRACTS_CHANGED" ]; then
+  echo "ERROR: Changes to contracts/ detected but contract changes require a T-C-* task."
+  echo "Changed files:"
+  echo "$CONTRACTS_CHANGED"
+  echo ""
+  echo "To make a contract change:"
+  echo "  1. Create tasks/open/T-C-<id>.md describing the change"
+  echo "  2. Get human approval"
+  echo "  3. Reference T-C-<id> in the commit message"
+  exit 1
+fi

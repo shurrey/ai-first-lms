@@ -1,0 +1,13 @@
+id: 1
+name: "Socratic tutoring: understanding recursion"
+persona: student
+course_id: "cs-101"
+
+user_turns:
+  - message: "Can you help me understand recursion?"
+
+expected:
+  final_event: final
+  artifacts_of_type: []
+  min_agent_invocations: 1
+  max_wall_time_ms: 15000

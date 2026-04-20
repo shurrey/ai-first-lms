@@ -1,0 +1,64 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "options": {},
+      "title": "Trace Search",
+      "type": "traces",
+      "targets": [
+        {
+          "datasource": { "type": "tempo", "uid": "tempo" },
+          "queryType": "traceql",
+          "query": "{resource.service.name=\"orchestrator\"}"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 8 },
+      "id": 2,
+      "options": { "enableNodeGraph": true },
+      "title": "Trace Detail — Node Graph",
+      "type": "nodeGraph",
+      "targets": [
+        {
+          "datasource": { "type": "tempo", "uid": "tempo" },
+          "queryType": "traceql",
+          "query": "{resource.service.name=\"orchestrator\"}"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 20 },
+      "id": 3,
+      "options": {},
+      "title": "Recent Traces",
+      "type": "table",
+      "targets": [
+        {
+          "datasource": { "type": "tempo", "uid": "tempo" },
+          "queryType": "traceql",
+          "query": "{} | rate() by (resource.service.name)"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["lms", "traces"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "title": "Per-Turn Traces",
+  "uid": "lms-traces"
+}
