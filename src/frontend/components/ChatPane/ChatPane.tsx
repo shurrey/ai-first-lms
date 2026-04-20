@@ -1,6 +1,6 @@
 export function ChatPane() {
   return (
-    <main className="flex h-full flex-col">
+    <main className="flex h-full flex-col overflow-hidden">
       <div className="flex-1 overflow-y-auto p-4">
         <div className="mx-auto max-w-2xl space-y-4">
           <p className="text-center text-sm text-muted-foreground">
@@ -8,7 +8,7 @@ export function ChatPane() {
           </p>
         </div>
       </div>
-      <div className="border-t border-border p-4">
+      <div className="shrink-0 border-t border-border p-4">
         <div className="mx-auto max-w-2xl">
           <div className="flex gap-2">
             <input

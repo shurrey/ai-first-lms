@@ -1,7 +1,7 @@
 export function ContextPane() {
   return (
-    <aside className="flex h-full flex-col border-r border-border bg-muted/30 p-4">
-      <h2 className="mb-4 text-sm font-semibold text-muted-foreground uppercase tracking-wide">
+    <nav className="flex h-full flex-col overflow-y-auto border-r border-border bg-muted/30 p-4">
+      <h2 className="mb-4 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
         Context
       </h2>
       <div className="flex-1 space-y-4">
@@ -14,6 +14,6 @@ export function ContextPane() {
           <p className="text-sm font-medium">Select a course...</p>
         </div>
       </div>
-    </aside>
+    </nav>
   );
 }
