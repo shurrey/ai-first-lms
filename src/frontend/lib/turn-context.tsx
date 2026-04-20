@@ -18,12 +18,18 @@ export function TurnProvider({ children }: { children: React.ReactNode }) {
   const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
   const [briefCardData, setBriefCardData] = useState<BriefCardPayload | null>(null);
 
-  // When briefTurnId arrives, start streaming it
+  // When session changes, reset everything
   useEffect(() => {
-    if (briefTurnId && !activeTurnId) {
+    setActiveTurnId(null);
+    setBriefCardData(null);
+  }, [sessionId]);
+
+  // When briefTurnId arrives (new session), start streaming it
+  useEffect(() => {
+    if (briefTurnId && (!activeTurnId || activeTurnId.startsWith("brief-"))) {
       setActiveTurnId(briefTurnId);
     }
-  }, [briefTurnId, activeTurnId]);
+  }, [briefTurnId]);
 
   const turnState = useEventStream(sessionId, activeTurnId);
 

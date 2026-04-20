@@ -16,6 +16,11 @@ export function ChatPane() {
   const turnState = useTurn();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
 
+  // Clear messages when session changes (course switch)
+  useEffect(() => {
+    setMessages([]);
+  }, [sessionId]);
+
   // When the SSE stream produces a final result, add the assistant message
   useEffect(() => {
     if (turnState.status === "done" && turnState.finalResult && turnState.activeTurnId) {
