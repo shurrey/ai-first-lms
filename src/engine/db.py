@@ -49,3 +49,21 @@ class TurnStore:
         if not turn:
             return []
         return turn.events[since_sequence:]
+
+    async def get_conversation_history(self, session_id: str) -> list[dict[str, str]]:
+        """Build conversation history from completed turns in this session."""
+        history: list[dict[str, str]] = []
+        for turn in self._turns.values():
+            if turn.session_id != session_id or turn.status != "completed":
+                continue
+            # Add user message (skip brief synthetic messages)
+            if turn.message and turn.message != "__brief__":
+                history.append({"role": "user", "content": turn.message})
+            # Find the final event's answer_markdown for the assistant response
+            for event in reversed(turn.events):
+                if event.get("event") == "final":
+                    answer = event.get("payload", {}).get("answer_markdown", "")
+                    if answer:
+                        history.append({"role": "assistant", "content": answer})
+                    break
+        return history

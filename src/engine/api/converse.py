@@ -48,13 +48,16 @@ async def _run_graph(app, session, turn: Turn) -> None:  # type: ignore[no-untyp
         graph = build_graph()
         compiled = graph.compile()
 
+        # Build conversation history from prior turns
+        conversation = await app.state.turn_store.get_conversation_history(session.id)
+
         initial_state = {
             "session_id": session.id,
             "turn_id": turn.id,
             "persona": session.persona,
             "person_id": session.person_id or "",
             "course_id": session.course_id,
-            "conversation": [],
+            "conversation": conversation,
             "current_message": turn.message,
             "interpretation": None,
             "clarification": None,

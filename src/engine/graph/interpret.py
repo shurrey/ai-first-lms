@@ -104,9 +104,28 @@ async def interpret(state: OrchestratorState) -> OrchestratorState:
     message = state.get("current_message", "")
     persona = state.get("persona", "student")
     course_id = state.get("course_id", "")
+    conversation = state.get("conversation", [])
 
     client = get_llm_client()
-    user_prompt = f"Persona: {persona}\nCourse: {course_id}\nMessage: {message}"
+
+    # Build conversation context for short/ambiguous messages like "yes"
+    context_lines = []
+    if conversation:
+        # Include last 2 exchanges for context
+        recent = conversation[-4:]
+        for turn in recent:
+            role = turn.get("role", "")
+            content = turn.get("content", "")
+            # Truncate long messages to keep prompt small
+            if len(content) > 300:
+                content = content[:300] + "..."
+            context_lines.append(f"[{role}]: {content}")
+
+    context_block = "\n".join(context_lines)
+    user_prompt = f"Persona: {persona}\nCourse: {course_id}"
+    if context_block:
+        user_prompt += f"\n\nRecent conversation:\n{context_block}"
+    user_prompt += f"\n\nCurrent message: {message}"
 
     raw_response = await client.create_message(
         model="claude-sonnet-4-6",
