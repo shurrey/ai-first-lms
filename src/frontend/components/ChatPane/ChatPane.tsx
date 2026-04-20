@@ -16,20 +16,27 @@ export function ChatPane() {
   const turnState = useTurn();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
 
+  // Track which turn IDs have had their final result rendered
+  const [renderedTurns, setRenderedTurns] = useState<Set<string>>(new Set());
+
   // When the SSE stream produces a final result, add the assistant message
   useEffect(() => {
-    if (turnState.status === "done" && turnState.finalResult) {
-      const msgId = `assistant-${turnState.activeTurnId}`;
+    if (
+      turnState.status === "done" &&
+      turnState.finalResult &&
+      turnState.activeTurnId &&
+      !renderedTurns.has(turnState.activeTurnId)
+    ) {
+      const turnId = turnState.activeTurnId;
+      setRenderedTurns((prev) => new Set(prev).add(turnId));
       setMessages((prev) => {
-        // Deduplicate: don't add if this message ID already exists
-        if (prev.some((m) => m.id === msgId)) return prev;
         const withoutPlaceholder = prev.filter(
-          (m) => m.id !== `streaming-${turnState.activeTurnId}`
+          (m) => m.id !== `streaming-${turnId}`
         );
         return [
           ...withoutPlaceholder,
           {
-            id: msgId,
+            id: `assistant-${turnId}`,
             role: "assistant" as const,
             content: turnState.finalResult!.answer_markdown,
             timestamp: new Date().toISOString(),
@@ -37,7 +44,7 @@ export function ChatPane() {
         ];
       });
     }
-  }, [turnState.status, turnState.finalResult, turnState.activeTurnId]);
+  }, [turnState.status, turnState.finalResult, turnState.activeTurnId, renderedTurns]);
 
   // While streaming, show accumulated agent tokens as a live message
   useEffect(() => {
