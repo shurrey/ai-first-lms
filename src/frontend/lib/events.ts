@@ -10,6 +10,7 @@ export const EventType = z.enum([
   "agent_result",
   "clarify",
   "approval_request",
+  "brief_card",
   "final",
   "error",
 ]);
@@ -89,6 +90,35 @@ export const ApprovalRequestPayload = z.object({
   ]),
 });
 
+export const BriefAssignment = z.object({
+  title: z.string(),
+  status: z.string(),
+  score: z.number().nullable(),
+});
+
+export const BriefSuggestedAction = z.object({
+  label: z.string(),
+  prompt: z.string(),
+});
+
+export const BriefCardPayload = z.object({
+  persona: z.string(),
+  student_name: z.string(),
+  course_title: z.string(),
+  current_module: z.object({
+    title: z.string(),
+    index: z.number(),
+    total: z.number(),
+  }),
+  assignments: z.array(BriefAssignment),
+  stats: z.object({
+    avg_score: z.number(),
+    submissions_count: z.number(),
+    total_assignments: z.number(),
+  }),
+  suggested_actions: z.array(BriefSuggestedAction),
+});
+
 export const Artifact = z.object({
   artifact_id: z.string(),
   type: z.enum([
@@ -152,6 +182,7 @@ const PAYLOAD_SCHEMAS: Record<string, z.ZodType> = {
   agent_result: AgentResultPayload,
   clarify: ClarifyPayload,
   approval_request: ApprovalRequestPayload,
+  brief_card: BriefCardPayload,
   final: FinalPayload,
   error: ErrorPayload,
 };
@@ -174,5 +205,8 @@ export type AgentToolCallPayload = z.infer<typeof AgentToolCallPayload>;
 export type AgentResultPayload = z.infer<typeof AgentResultPayload>;
 export type ClarifyPayload = z.infer<typeof ClarifyPayload>;
 export type ApprovalRequestPayload = z.infer<typeof ApprovalRequestPayload>;
+export type BriefCardPayload = z.infer<typeof BriefCardPayload>;
+export type BriefAssignment = z.infer<typeof BriefAssignment>;
+export type BriefSuggestedAction = z.infer<typeof BriefSuggestedAction>;
 export type FinalPayload = z.infer<typeof FinalPayload>;
 export type ErrorPayload = z.infer<typeof ErrorPayload>;
