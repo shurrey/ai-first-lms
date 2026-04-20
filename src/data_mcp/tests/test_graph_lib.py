@@ -34,16 +34,8 @@ async def graph_data(pool: asyncpg.Pool) -> dict:
     ids: dict = {}
 
     async with pool.acquire() as conn:
-        # Clean up
-        await conn.execute("DELETE FROM attestations")
-        await conn.execute("DELETE FROM evidence")
-        await conn.execute("DELETE FROM grades")
-        await conn.execute("DELETE FROM submissions")
-        await conn.execute("DELETE FROM enrollments")
-        await conn.execute("DELETE FROM edges")
-        await conn.execute("DELETE FROM content_items")
-        await conn.execute("DELETE FROM nodes")
-        await conn.execute("DELETE FROM persons")
+        # Insert test data alongside existing seed data (no truncation)
+        # We use unique UUIDs so there are no conflicts
 
         # Nodes: A -> B -> C (prerequisite chain)
         a = uuid.uuid4()

@@ -15,10 +15,14 @@ def _run(coro):  # noqa: ANN001, ANN202
 
 def test_seed_produces_expected_counts() -> None:
     """Verify the seed creates the expected number of entities."""
+    import random
+    from data_mcp.seed.cs101 import seed
 
     async def _check() -> None:
         conn = await asyncpg.connect(DB_URL)
         try:
+            # Re-seed to ensure clean state
+            await seed(conn, random.Random(42))
             # Students
             row = await conn.fetchrow("SELECT COUNT(*) AS c FROM persons WHERE roles @> '{student}'")
             assert row["c"] == 50, f"Expected 50 students, got {row['c']}"

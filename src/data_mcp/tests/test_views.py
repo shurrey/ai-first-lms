@@ -23,15 +23,8 @@ def seed_data() -> dict:
     async def _seed() -> None:
         conn = await asyncpg.connect(DB_URL)
         try:
-            # Clean up any previous test data
-            await conn.execute("DELETE FROM grades")
-            await conn.execute("DELETE FROM submissions")
-            await conn.execute("DELETE FROM enrollments")
-            await conn.execute("DELETE FROM evidence")
-            await conn.execute("DELETE FROM edges")
-            await conn.execute("DELETE FROM content_items")
-            await conn.execute("DELETE FROM nodes WHERE kind IN ('course', 'module', 'assessment_item')")
-            await conn.execute("DELETE FROM persons")
+            # Insert test data alongside existing seed data (no truncation)
+            # We use unique UUIDs so there are no conflicts
 
             # Create a course node
             course_id = uuid.uuid4()
@@ -83,7 +76,7 @@ def seed_data() -> dict:
             ids["person_id"] = person_id
             await conn.execute(
                 """INSERT INTO persons (id, roles, display_name, email)
-                   VALUES ($1, $2, 'Alice Student', 'alice@example.com')""",
+                   VALUES ($1, $2, 'Alice View-Test', 'alice.viewtest@example.com')""",
                 person_id, ["student"],
             )
             await conn.execute(
