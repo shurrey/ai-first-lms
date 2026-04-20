@@ -192,6 +192,31 @@ _AGENT_TOOLS: dict[str, list[str]] = {
 }
 
 
+def _parse_agent_output(text: str) -> dict[str, Any]:
+    """Parse agent response text into a structured output dict.
+
+    If the text is valid JSON with a response_markdown field, extract it.
+    Otherwise treat the whole text as the response_markdown.
+    """
+    # Try parsing as JSON (agent may return structured output)
+    stripped = text.strip()
+    # Handle markdown code fences around JSON
+    if stripped.startswith("```"):
+        lines = stripped.split("\n")
+        # Remove first and last fence lines
+        lines = [l for l in lines[1:] if not l.strip().startswith("```")]
+        stripped = "\n".join(lines).strip()
+
+    try:
+        parsed = json.loads(stripped)
+        if isinstance(parsed, dict) and "response_markdown" in parsed:
+            return parsed
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    return {"response_markdown": text}
+
+
 class ClaudeAgentRunner:
     """Agent runner with full tool-use loop connected to real MCP servers."""
 
@@ -328,8 +353,11 @@ class ClaudeAgentRunner:
                 agent_name, elapsed_ms, total_tokens, len(tool_call_records), cost_usd,
             )
 
+            # If the agent returned structured JSON, extract the markdown
+            output = _parse_agent_output(final_text)
+
             return {
-                "output": {"response_markdown": final_text},
+                "output": output,
                 "cost_usd": round(cost_usd, 6),
                 "tokens": total_tokens,
                 "success": True,
