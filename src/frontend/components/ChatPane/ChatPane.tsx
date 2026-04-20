@@ -7,6 +7,8 @@ import { useTurn } from "@/lib/turn-context";
 import { converse } from "@/lib/api";
 import { MessageList } from "./MessageList";
 import { ChatInput } from "./ChatInput";
+import { ClarifyPrompt } from "./ClarifyPrompt";
+import { ErrorDisplay } from "./ErrorDisplay";
 import type { ChatMessage } from "./MessageBubble";
 
 export function ChatPane() {
@@ -117,6 +119,38 @@ export function ChatPane() {
   return (
     <main className="flex h-full flex-col overflow-hidden">
       <MessageList messages={messages} />
+
+      {/* Clarification prompt */}
+      {turnState.clarify && (
+        <div className="shrink-0 px-4 pb-2">
+          <div className="mx-auto max-w-2xl">
+            <ClarifyPrompt clarify={turnState.clarify} />
+          </div>
+        </div>
+      )}
+
+      {/* Error with retry */}
+      {turnState.status === "error" && turnState.error && (
+        <div className="shrink-0 px-4 pb-2">
+          <div className="mx-auto max-w-2xl">
+            <ErrorDisplay
+              error={turnState.error}
+              onRetry={
+                turnState.error.retriable
+                  ? () => {
+                      // Resend the last user message
+                      const lastUserMsg = [...messages]
+                        .reverse()
+                        .find((m) => m.role === "user");
+                      if (lastUserMsg) handleSend(lastUserMsg.content);
+                    }
+                  : undefined
+              }
+            />
+          </div>
+        </div>
+      )}
+
       <ChatInput
         onSend={handleSend}
         disabled={!sessionId}

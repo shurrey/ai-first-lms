@@ -86,3 +86,15 @@ export async function submitClarification(params: {
     throw new Error(`Failed to submit clarification: ${res.status}`);
   }
 }
+
+export async function getSessionHistory(
+  sessionId: string
+): Promise<{ turns: unknown[] }> {
+  const res = await fetch(
+    `${API_BASE}/api/sessions/${encodeURIComponent(sessionId)}/history`
+  );
+  if (!res.ok) {
+    throw new Error(`Failed to fetch history: ${res.status}`);
+  }
+  return res.json();
+}
