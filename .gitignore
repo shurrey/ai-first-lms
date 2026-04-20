@@ -40,6 +40,7 @@ Thumbs.db
 htmlcov/
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
 
 # Worktree markers (each worktree has one; not shared)
 .workstream
