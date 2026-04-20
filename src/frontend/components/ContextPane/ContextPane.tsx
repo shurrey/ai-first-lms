@@ -1,19 +1,29 @@
+"use client";
+
+import { PersonaSwitcher } from "./PersonaSwitcher";
+import { CourseSelector } from "./CourseSelector";
+import { useSession } from "@/lib/session-context";
+
 export function ContextPane() {
+  const { sessionId } = useSession();
+
   return (
     <nav className="flex h-full flex-col overflow-y-auto border-r border-border bg-muted/30 p-4">
       <h2 className="mb-4 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
         Context
       </h2>
-      <div className="flex-1 space-y-4">
-        <div className="rounded-lg border border-border bg-card p-3">
-          <p className="text-xs text-muted-foreground">Persona</p>
-          <p className="text-sm font-medium">Student</p>
-        </div>
-        <div className="rounded-lg border border-border bg-card p-3">
-          <p className="text-xs text-muted-foreground">Course</p>
-          <p className="text-sm font-medium">Select a course...</p>
-        </div>
+      <div className="space-y-4">
+        <PersonaSwitcher />
+        <CourseSelector />
       </div>
+      {sessionId && (
+        <div className="mt-4 rounded-lg border border-border bg-card p-3">
+          <p className="text-xs text-muted-foreground">Session</p>
+          <p className="truncate text-xs font-mono text-foreground/70">
+            {sessionId}
+          </p>
+        </div>
+      )}
     </nav>
   );
 }
