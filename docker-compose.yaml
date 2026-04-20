@@ -24,13 +24,17 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  # --- MCP servers (stubs until Data & MCP workstream delivers real implementations) ---
+  # --- MCP servers (real implementations via SSE transport) ---
 
   mcp-content:
-    build: src/platform/stubs/mcp-stub
+    build:
+      context: .
+      dockerfile: src/data_mcp/Dockerfile
+    command: ["uvicorn", "data_mcp.mcp_servers.content.server:app", "--host", "0.0.0.0", "--port", "7001"]
     container_name: lms-mcp-content
     environment:
       PORT: "7001"
+      LMS_DATABASE_URL: postgresql://${POSTGRES_USER:-lms}:${POSTGRES_PASSWORD:-lms_dev}@postgres:5432/${POSTGRES_DB:-lms_db}
     ports:
       - "${MCP_CONTENT_PORT:-7001}:7001"
     depends_on:
@@ -44,10 +48,14 @@ services:
     restart: unless-stopped
 
   mcp-roster:
-    build: src/platform/stubs/mcp-stub
+    build:
+      context: .
+      dockerfile: src/data_mcp/Dockerfile
+    command: ["uvicorn", "data_mcp.mcp_servers.roster.server:app", "--host", "0.0.0.0", "--port", "7002"]
     container_name: lms-mcp-roster
     environment:
       PORT: "7002"
+      LMS_DATABASE_URL: postgresql://${POSTGRES_USER:-lms}:${POSTGRES_PASSWORD:-lms_dev}@postgres:5432/${POSTGRES_DB:-lms_db}
     ports:
       - "${MCP_ROSTER_PORT:-7002}:7002"
     depends_on:
@@ -61,10 +69,14 @@ services:
     restart: unless-stopped
 
   mcp-assessments:
-    build: src/platform/stubs/mcp-stub
+    build:
+      context: .
+      dockerfile: src/data_mcp/Dockerfile
+    command: ["uvicorn", "data_mcp.mcp_servers.assessments.server:app", "--host", "0.0.0.0", "--port", "7003"]
     container_name: lms-mcp-assessments
     environment:
       PORT: "7003"
+      LMS_DATABASE_URL: postgresql://${POSTGRES_USER:-lms}:${POSTGRES_PASSWORD:-lms_dev}@postgres:5432/${POSTGRES_DB:-lms_db}
     ports:
       - "${MCP_ASSESSMENTS_PORT:-7003}:7003"
     depends_on:
@@ -78,10 +90,14 @@ services:
     restart: unless-stopped
 
   mcp-analytics:
-    build: src/platform/stubs/mcp-stub
+    build:
+      context: .
+      dockerfile: src/data_mcp/Dockerfile
+    command: ["uvicorn", "data_mcp.mcp_servers.analytics.server:app", "--host", "0.0.0.0", "--port", "7004"]
     container_name: lms-mcp-analytics
     environment:
       PORT: "7004"
+      LMS_DATABASE_URL: postgresql://${POSTGRES_USER:-lms}:${POSTGRES_PASSWORD:-lms_dev}@postgres:5432/${POSTGRES_DB:-lms_db}
     ports:
       - "${MCP_ANALYTICS_PORT:-7004}:7004"
     depends_on:
@@ -95,10 +111,14 @@ services:
     restart: unless-stopped
 
   mcp-sis:
-    build: src/platform/stubs/mcp-stub
+    build:
+      context: .
+      dockerfile: src/data_mcp/Dockerfile
+    command: ["uvicorn", "data_mcp.mcp_servers.sis.server:app", "--host", "0.0.0.0", "--port", "7005"]
     container_name: lms-mcp-sis
     environment:
       PORT: "7005"
+      LMS_DATABASE_URL: postgresql://${POSTGRES_USER:-lms}:${POSTGRES_PASSWORD:-lms_dev}@postgres:5432/${POSTGRES_DB:-lms_db}
     ports:
       - "${MCP_SIS_PORT:-7005}:7005"
     depends_on:
@@ -112,10 +132,14 @@ services:
     restart: unless-stopped
 
   mcp-communications:
-    build: src/platform/stubs/mcp-stub
+    build:
+      context: .
+      dockerfile: src/data_mcp/Dockerfile
+    command: ["uvicorn", "data_mcp.mcp_servers.communications.server:app", "--host", "0.0.0.0", "--port", "7006"]
     container_name: lms-mcp-communications
     environment:
       PORT: "7006"
+      LMS_DATABASE_URL: postgresql://${POSTGRES_USER:-lms}:${POSTGRES_PASSWORD:-lms_dev}@postgres:5432/${POSTGRES_DB:-lms_db}
     ports:
       - "${MCP_COMMUNICATIONS_PORT:-7006}:7006"
     depends_on:
@@ -129,10 +153,14 @@ services:
     restart: unless-stopped
 
   mcp-standards:
-    build: src/platform/stubs/mcp-stub
+    build:
+      context: .
+      dockerfile: src/data_mcp/Dockerfile
+    command: ["uvicorn", "data_mcp.mcp_servers.standards.server:app", "--host", "0.0.0.0", "--port", "7007"]
     container_name: lms-mcp-standards
     environment:
       PORT: "7007"
+      LMS_DATABASE_URL: postgresql://${POSTGRES_USER:-lms}:${POSTGRES_PASSWORD:-lms_dev}@postgres:5432/${POSTGRES_DB:-lms_db}
     ports:
       - "${MCP_STANDARDS_PORT:-7007}:7007"
     depends_on:
@@ -145,10 +173,12 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # --- Orchestrator (stub until Engine workstream delivers) ---
+  # --- Orchestrator (real Engine implementation) ---
 
   orchestrator:
-    build: src/platform/stubs/orchestrator-stub
+    build:
+      context: .
+      dockerfile: src/engine/Dockerfile
     container_name: lms-orchestrator
     environment:
       PORT: "8000"
@@ -166,10 +196,10 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # --- Frontend (stub until Frontend workstream delivers) ---
+  # --- Frontend (real Next.js implementation) ---
 
   frontend:
-    build: src/platform/stubs/frontend-stub
+    build: src/frontend
     container_name: lms-frontend
     environment:
       PORT: "3000"
@@ -180,11 +210,26 @@ services:
       orchestrator:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:3000/healthz')\""]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/ || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 5
     restart: unless-stopped
+
+  # --- Database seed (one-shot) ---
+
+  db-seed:
+    build:
+      context: .
+      dockerfile: src/data_mcp/Dockerfile
+    container_name: lms-db-seed
+    command: ["python", "-m", "data_mcp.seed.cs101", "--seed", "42"]
+    environment:
+      LMS_DATABASE_URL: postgresql://${POSTGRES_USER:-lms}:${POSTGRES_PASSWORD:-lms_dev}@postgres:5432/${POSTGRES_DB:-lms_db}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
 
   # --- Observability ---
 
