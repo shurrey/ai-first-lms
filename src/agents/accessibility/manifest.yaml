@@ -1,0 +1,56 @@
+version: 1
+agent:
+  name: accessibility
+  version: 0.1.0
+  description: "WCAG compliance scanning and content adaptation \u2014 alt-text, captions,\n\
+    readability simplification, translation.\n"
+  persona_scope:
+  - faculty
+  - instructional_designer
+  - student
+  - admin
+  model: claude-sonnet-4-6
+  requires_pii: []
+  inputs:
+    type: object
+    properties:
+      scope:
+        type: object
+      actions:
+        type: array
+        items:
+          type: string
+          enum:
+          - scan
+          - alt_text
+          - captions
+          - simplify
+          - translate
+      target_language:
+        type: string
+        nullable: true
+      target_reading_level:
+        type: string
+        nullable: true
+    required:
+    - scope
+    - actions
+  outputs:
+    type: object
+    properties:
+      report:
+        type: object
+        nullable: true
+      proposals:
+        type: array
+    required:
+    - proposals
+  mcp_tools:
+  - content.retrieve
+  - content.save_draft
+  - media.process
+  - translation.translate
+  - compliance.check_wcag
+  composable_with:
+  - content_generator
+  requires_human_approval: true

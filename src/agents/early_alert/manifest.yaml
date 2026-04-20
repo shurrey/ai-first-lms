@@ -1,0 +1,45 @@
+version: 1
+agent:
+  name: early_alert
+  version: 0.1.0
+  description: "Detects at-risk students with explanations and recommends interventions.\n\
+    Explains every risk score. Recommends \u2014 never acts.\n"
+  persona_scope:
+  - faculty
+  - advisor
+  - admin
+  model: claude-sonnet-4-6
+  requires_pii:
+  - display_name
+  inputs:
+    type: object
+    properties:
+      scope:
+        type: object
+      window_days:
+        type: integer
+        default: 14
+      risk_threshold:
+        type: number
+        default: 0.5
+    required:
+    - scope
+  outputs:
+    type: object
+    properties:
+      at_risk:
+        type: array
+      methodology_note:
+        type: string
+    required:
+    - at_risk
+  mcp_tools:
+  - analytics.query
+  - roster.get
+  - interventions.playbook
+  - graph.evidence_summary
+  composable_with:
+  - engagement_analyst
+  - communication
+  - content_generator
+  requires_human_approval: false

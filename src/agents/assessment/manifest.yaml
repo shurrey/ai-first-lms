@@ -1,0 +1,68 @@
+version: 1
+agent:
+  name: assessment
+  version: 0.1.0
+  description: "Generates and validates assessments \u2014 quiz/exam questions, rubrics,\
+    \ item analysis.\n"
+  persona_scope:
+  - faculty
+  - instructional_designer
+  model: claude-sonnet-4-6
+  requires_pii: []
+  inputs:
+    type: object
+    properties:
+      topic_or_nodes:
+        type: array
+        items:
+          type: string
+      question_types:
+        type: array
+        items:
+          type: string
+          enum:
+          - mcq
+          - short_answer
+          - essay
+          - code
+      count:
+        type: integer
+        minimum: 1
+        maximum: 50
+      difficulty:
+        type: string
+        enum:
+        - intro
+        - moderate
+        - advanced
+        - mixed
+      include_rubric:
+        type: boolean
+        default: false
+    required:
+    - topic_or_nodes
+    - question_types
+    - count
+  outputs:
+    type: object
+    properties:
+      questions:
+        type: array
+      rubric:
+        type: object
+        nullable: true
+      warnings:
+        type: array
+        items:
+          type: string
+    required:
+    - questions
+  mcp_tools:
+  - questions.search_bank
+  - questions.create
+  - standards.lookup
+  - content.retrieve
+  - graph.node_for_outcome
+  composable_with:
+  - content_generator
+  requires_human_approval: true

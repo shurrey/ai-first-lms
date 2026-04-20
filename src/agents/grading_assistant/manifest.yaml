@@ -1,0 +1,45 @@
+version: 1
+agent:
+  name: grading_assistant
+  version: 0.1.0
+  description: 'Drafts rubric-based scores and feedback for student submissions.
+
+    Always drafts; never commits without explicit faculty approval.
+
+    '
+  persona_scope:
+  - faculty
+  model: claude-sonnet-4-6
+  requires_pii:
+  - display_name
+  inputs:
+    type: object
+    properties:
+      submission_ids:
+        type: array
+        items:
+          type: string
+      rubric_id:
+        type: string
+      exemplars:
+        type: array
+        items:
+          type: string
+        nullable: true
+    required:
+    - submission_ids
+    - rubric_id
+  outputs:
+    type: object
+    properties:
+      drafts:
+        type: array
+    required:
+    - drafts
+  mcp_tools:
+  - submissions.get
+  - rubrics.get
+  - grades.draft
+  - grades.commit
+  composable_with: []
+  requires_human_approval: true
