@@ -7,6 +7,7 @@ import logging
 from typing import Any, Protocol
 
 import anthropic
+import httpx
 
 from engine.graph.state import OrchestratorState
 
@@ -46,7 +47,9 @@ class AnthropicLLMClient:
     """Real Anthropic API client."""
 
     def __init__(self) -> None:
-        self._client = anthropic.AsyncAnthropic()
+        self._client = anthropic.AsyncAnthropic(
+            http_client=httpx.AsyncClient(verify=False),
+        )
 
     async def create_message(
         self, model: str, system: str, messages: list[dict[str, str]], max_tokens: int
