@@ -1,0 +1,28 @@
+# docker-compose.yaml — AI-First LMS Prototype
+# Owned by Platform workstream (T-P-*)
+# Usage: docker compose up
+# Docs: src/platform/README.md
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: lms-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-lms}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lms_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-lms_db}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./contracts/db-schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-lms} -d ${POSTGRES_DB:-lms_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  pgdata:
