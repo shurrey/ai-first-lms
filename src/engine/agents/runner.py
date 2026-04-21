@@ -54,6 +54,10 @@ IMPORTANT RULES FOR RESPONSE FORMAT:
 - Return your response as plain markdown text. Do NOT wrap it in JSON.
 - Do NOT append a JSON block with response_markdown, citations, follow_ups, etc.
 - If you want to suggest follow-up questions, include them naturally in your response text.
+- Your FINAL response must be a complete, user-facing answer — NOT a status update about what you just did or are about to do.
+- BAD final response: "Quiz saved. Now saving the study guide."
+- GOOD final response: "Here's your recursion quiz with 5 questions covering base cases, recursive thinking, and memoization. I've also created a study guide covering the key concepts."
+- If you used tools to create or save something, summarize WHAT you created for the user, don't narrate the process.
 """
 
 
@@ -402,7 +406,7 @@ class ClaudeAgentRunner:
 
         try:
             return await asyncio.wait_for(
-                self._tool_loop(agent_name, system_prompt, messages, claude_tools, tool_name_map, tool_call_records, start),
+                self._tool_loop(agent_name, system_prompt, messages, claude_tools, tool_name_map, tool_call_records, start, on_event),
                 timeout=90.0,
             )
         except asyncio.TimeoutError:
@@ -435,6 +439,7 @@ class ClaudeAgentRunner:
         tool_name_map: dict[str, str],
         tool_call_records: list[dict[str, Any]],
         start: float,
+        on_event: Any = None,
     ) -> dict[str, Any]:
         total_input_tokens = 0
         total_output_tokens = 0
