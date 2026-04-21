@@ -40,6 +40,18 @@ IMPORTANT RULES FOR TOOL USE:
 - If multiple tools return empty or error results, conclude that this course may not have data set up yet. Tell the user honestly: "It looks like this course doesn't have [assignments/content/etc.] set up yet. You may want to check with your instructor."
 - Never make more than 2 attempts at any single tool. If data isn't there, it isn't there.
 - Always respond to the user even if you couldn't find data. A helpful "no data found" message is better than silence.
+
+IMPORTANT RULES FOR PERSONA CONTEXT:
+- The Person ID in the context header identifies WHO IS ASKING, not who to look up.
+- If the persona is "faculty", "advisor", or "admin", do NOT use their Person ID to look up student evidence. Their Person ID is the instructor/advisor/admin — they have no student evidence.
+- For faculty asking about class performance: use roster.list_by_course to get student IDs, then query evidence for those students. Or use analytics tools (analytics.query, analytics.trend, analytics.cohort_compare) for course-level metrics.
+- For faculty asking about a specific student: ask for the student's name, then look them up via roster tools.
+- Only use the Person ID for student-data lookups when the persona is "student".
+
+IMPORTANT RULES FOR RESPONSE FORMAT:
+- Return your response as plain markdown text. Do NOT wrap it in JSON.
+- Do NOT append a JSON block with response_markdown, citations, follow_ups, etc.
+- If you want to suggest follow-up questions, include them naturally in your response text.
 """
 
 
@@ -196,6 +208,7 @@ _AGENT_TOOLS: dict[str, list[str]] = {
     ],
     "engagement_analyst": [
         "roster.list_by_course", "assessments.list_recent_evidence",
+        "analytics.query", "analytics.trend", "analytics.cohort_compare",
     ],
     "communication": [
         "roster.list_by_course", "roster.get_student_context",
