@@ -550,6 +550,7 @@ async def seed(conn: asyncpg.Connection, rng: random.Random) -> dict[str, Any]:
     semester_start = datetime(2026, 8, 24, tzinfo=timezone.utc)
     total_modules = 0
     total_concepts = 0
+    all_concept_ids_global: list[uuid.UUID] = []  # collect across all courses
     total_skills = 0
     total_assignments = 0
     total_questions = 0
@@ -627,6 +628,7 @@ async def seed(conn: asyncpg.Connection, rng: random.Random) -> dict[str, Any]:
 
         total_modules += len(module_ids)
         total_concepts += len(all_concept_ids)
+        all_concept_ids_global.extend(all_concept_ids)
 
         # ── Prerequisite edges between modules (sequential) ──
         for mi in range(1, len(module_ids)):
@@ -908,6 +910,97 @@ async def seed(conn: asyncpg.Connection, rng: random.Random) -> dict[str, Any]:
             '{"actions": ["schedule_advisor_meeting", "send_personalized_outreach", "create_intervention_plan"]}'::jsonb)"""
     )
 
+    # ── Grades for submissions ──
+    grade_count = 0
+    draft_count = 0
+    for course_def in COURSES:
+        c_id = course_ids[course_def["slug"]]
+        # Get the first faculty member for this course
+        faculty_id = None
+        for fdef in course_def["faculty"]:
+            username = fdef[1]
+            if username in faculty_by_username:
+                faculty_id = faculty_by_username[username]
+                break
+        if not faculty_id:
+            continue
+
+        # Get all submissions for this course's assignments
+        subs = await conn.fetch(
+            """SELECT s.id, s.person_id, s.assignment_node
+               FROM submissions s
+               JOIN nodes n ON n.id = s.assignment_node
+               WHERE n.metadata->>'course_id' = $1""",
+            str(c_id),
+        )
+
+        for sub in subs:
+            is_draft = rng.random() < 0.3  # 30% are draft (pending review)
+            # Generate rubric-aligned scores
+            score_correctness = rng.randint(15, 40)
+            score_style = rng.randint(10, 30)
+            score_completeness = rng.randint(10, 30)
+            total = score_correctness + score_style + score_completeness
+
+            import json as _json
+            grade_id = _uuid(rng)
+
+            # Find rubric for this assignment's course
+            rubric_row = await conn.fetchrow(
+                "SELECT id FROM rubrics WHERE owner_id = $1 LIMIT 1",
+                faculty_id,
+            )
+            rubric_id = rubric_row["id"] if rubric_row else None
+
+            feedback = {
+                "correctness": f"Score: {score_correctness}/40",
+                "style": f"Score: {score_style}/30",
+                "completeness": f"Score: {score_completeness}/30",
+                "overall": f"Total: {total}/100",
+            }
+
+            committed_at = None if is_draft else datetime(2026, 10, 15, tzinfo=timezone.utc) + timedelta(days=rng.randint(0, 30))
+
+            await conn.execute(
+                """INSERT INTO grades (id, submission_id, rubric_id, scores, feedback, graded_by, is_draft, committed_at)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8)""",
+                grade_id, sub["id"], rubric_id,
+                _json.dumps({"correctness": score_correctness, "style": score_style, "completeness": score_completeness}),
+                _json.dumps(feedback),
+                faculty_id,
+                is_draft,
+                committed_at,
+            )
+            grade_count += 1
+            if is_draft:
+                draft_count += 1
+
+    summary["grade_count"] = grade_count
+    summary["draft_grades"] = draft_count
+    summary["committed_grades"] = grade_count - draft_count
+
+    # ── Standards alignment edges ──
+    alignment_count = 0
+    bloom_standards = await conn.fetch(
+        "SELECT id, code FROM standards WHERE framework_id = $1",
+        bloom_id,
+    )
+    if bloom_standards:
+        # Align concepts to Bloom levels
+        for ci, concept_id in enumerate(all_concept_ids_global):
+            if rng.random() < 0.4:  # 40% of concepts aligned
+                std = rng.choice(bloom_standards)
+                try:
+                    await conn.execute(
+                        "INSERT INTO edges (from_node, to_node, kind) VALUES ($1, $2, 'aligned_with')",
+                        concept_id, std["id"],
+                    )
+                    alignment_count += 1
+                except Exception:
+                    pass  # skip duplicates
+
+    summary["alignment_edges"] = alignment_count
+
     # ── Summary ──
     summary["total_modules"] = total_modules
     summary["total_concepts"] = total_concepts
@@ -949,6 +1042,8 @@ async def main(seed_value: int = 42) -> None:
         print(f"  Questions: {summary['total_questions']}")
         print(f"  Evidence records: {summary['total_evidence']}")
         print(f"  Submissions: {summary['total_submissions']}")
+        print(f"  Grades: {summary['grade_count']} ({summary['committed_grades']} committed, {summary['draft_grades']} draft)")
+        print(f"  Alignment edges: {summary['alignment_edges']}")
         print(f"  Graph edges: {summary['total_edges']}")
     finally:
         await conn.close()
