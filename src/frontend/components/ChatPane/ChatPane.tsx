@@ -46,6 +46,7 @@ export function ChatPane() {
             role: "assistant" as const,
             content: turnState.finalResult!.answer_markdown,
             timestamp: new Date().toISOString(),
+            followUps: turnState.finalResult!.follow_ups,
           },
         ];
       });

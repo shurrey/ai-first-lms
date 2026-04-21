@@ -138,6 +138,7 @@ export const Artifact = z.object({
 export const FinalPayload = z.object({
   answer_markdown: z.string(),
   artifacts: z.array(Artifact),
+  follow_ups: z.array(z.string()).optional(),
   cost_usd: z.number(),
   tokens: z.number(),
   wall_time_ms: z.number(),

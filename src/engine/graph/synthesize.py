@@ -18,11 +18,12 @@ async def synthesize(state: OrchestratorState) -> OrchestratorState:
     start_time = state.get("_start_time", time.monotonic())
     events: list[dict[str, Any]] = list(state.get("events_emitted", []))
 
+    follow_ups: list[str] = []
     if not results:
         answer = "I wasn't able to produce a response. Please try again."
         artifacts: list[dict[str, Any]] = []
     elif len(results) == 1:
-        answer, artifacts = _synthesize_single(results[0])
+        answer, artifacts, follow_ups = _synthesize_single(results[0])
     else:
         answer, artifacts = _synthesize_multi(results)
 
@@ -46,6 +47,7 @@ async def synthesize(state: OrchestratorState) -> OrchestratorState:
         "payload": {
             "answer_markdown": answer,
             "artifacts": artifacts,
+            "follow_ups": follow_ups,
             "cost_usd": total_cost,
             "tokens": total_tokens,
             "wall_time_ms": wall_time_ms,
@@ -61,7 +63,7 @@ async def synthesize(state: OrchestratorState) -> OrchestratorState:
     }
 
 
-def _synthesize_single(result: AgentResult) -> tuple[str, list[dict[str, Any]]]:
+def _synthesize_single(result: AgentResult) -> tuple[str, list[dict[str, Any]], list[str]]:
     """For single-agent results, pass through with minimal wrapping."""
     output = result.get("output", {})
     answer = output.get("response_markdown") or output.get("content_md") or ""
@@ -71,7 +73,8 @@ def _synthesize_single(result: AgentResult) -> tuple[str, list[dict[str, Any]]]:
         answer = _format_output(output)
 
     artifacts = _extract_artifacts(result)
-    return answer, artifacts
+    follow_ups = output.get("follow_ups", [])
+    return answer, artifacts, follow_ups
 
 
 def _synthesize_multi(results: list[AgentResult]) -> tuple[str, list[dict[str, Any]]]:

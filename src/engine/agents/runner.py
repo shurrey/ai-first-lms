@@ -203,55 +203,68 @@ _AGENT_TOOLS: dict[str, list[str]] = {
 }
 
 
+_AGENT_META_KEYS = {"response_markdown", "citations", "follow_ups", "suggested_nodes"}
+
+
 def _parse_agent_output(text: str) -> dict[str, Any]:
     """Parse agent response text into a structured output dict.
 
-    Handles three cases:
-    1. Pure JSON with response_markdown → extract fields
-    2. Markdown text followed by a JSON block → use the markdown, extract metadata from JSON
-    3. Plain text → wrap as response_markdown
+    Strips trailing JSON metadata blocks that agents append after their
+    markdown response. Extracts follow_ups and citations from the JSON.
     """
     stripped = text.strip()
 
-    # Case 1: entire response is JSON (possibly in code fences)
-    json_text = stripped
-    if json_text.startswith("```"):
-        lines = json_text.split("\n")
-        lines = [l for l in lines[1:] if not l.strip().startswith("```")]
-        json_text = "\n".join(lines).strip()
+    # Case 1: entire response is valid JSON
     try:
-        parsed = json.loads(json_text)
+        parsed = json.loads(stripped)
         if isinstance(parsed, dict) and "response_markdown" in parsed:
             return parsed
     except (json.JSONDecodeError, ValueError):
         pass
 
-    # Case 2: markdown text with a trailing JSON block
-    # Look for a JSON object starting with { at the end, possibly in code fences
-    import re
-    # Match a JSON block at the end, optionally wrapped in ```json ... ```
-    trailing_json = re.search(
-        r'(?:```(?:json)?\s*\n)?\s*(\{[^{}]*"response_markdown"[^{}]*\})\s*(?:\n\s*```)?$',
-        stripped,
-        re.DOTALL,
-    )
-    if trailing_json:
-        # The markdown is everything before the JSON block
-        json_start = stripped.rfind("```", 0, trailing_json.start() + 10)
-        if json_start == -1:
-            json_start = trailing_json.start()
-        markdown_part = stripped[:json_start].rstrip()
+    # Case 2: markdown followed by a JSON block (fenced or bare)
+    # Find the last occurrence of a JSON object in the text
+    last_brace = stripped.rfind("}")
+    if last_brace > 0:
+        # Walk backwards to find the matching opening brace
+        depth = 0
+        start = -1
+        for i in range(last_brace, -1, -1):
+            if stripped[i] == "}":
+                depth += 1
+            elif stripped[i] == "{":
+                depth -= 1
+                if depth == 0:
+                    start = i
+                    break
 
-        try:
-            json_data = json.loads(trailing_json.group(1))
-            result: dict[str, Any] = {"response_markdown": markdown_part}
-            # Preserve citations, follow_ups, suggested_nodes from the JSON
-            for key in ("citations", "follow_ups", "suggested_nodes"):
-                if key in json_data:
-                    result[key] = json_data[key]
-            return result
-        except (json.JSONDecodeError, ValueError):
-            pass
+        if start > 0:
+            json_candidate = stripped[start:last_brace + 1]
+            try:
+                json_data = json.loads(json_candidate)
+                if isinstance(json_data, dict) and _AGENT_META_KEYS & json_data.keys():
+                    # Found agent metadata — strip it from the markdown
+                    # Also strip any code fence wrapper before the JSON
+                    pre = stripped[:start].rstrip()
+                    if pre.endswith("```json") or pre.endswith("```"):
+                        pre = pre[:pre.rfind("```")].rstrip()
+
+                    # Strip trailing ``` after the JSON
+                    post_check = stripped[last_brace + 1:].strip()
+                    # pre is the clean markdown
+
+                    md = json_data.get("response_markdown", "")
+                    # Use the real markdown if response_markdown is a placeholder
+                    if not md or md in ("...", "...(above)...", "..."):
+                        md = pre
+
+                    result: dict[str, Any] = {"response_markdown": md}
+                    for key in ("citations", "follow_ups", "suggested_nodes"):
+                        if key in json_data:
+                            result[key] = json_data[key]
+                    return result
+            except (json.JSONDecodeError, ValueError):
+                pass
 
     # Case 3: plain text
     return {"response_markdown": text}
