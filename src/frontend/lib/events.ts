@@ -118,6 +118,7 @@ export const BriefCardPayload = z.object({
     total_assignments: z.number(),
   }),
   suggested_actions: z.array(BriefSuggestedAction),
+  extra: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const ThinkingPayload = z.object({

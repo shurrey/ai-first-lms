@@ -157,28 +157,77 @@ class FacultyBriefGatherer:
             "roster", "roster.list_by_course",
             {"course_id": course_id},
         )
-        evidence = await _call_mcp(
-            "assessments", "assessments.list_recent_evidence",
-            {"person_id": person_id, "course_id": course_id},
-        )
         modules = await _call_mcp(
             "content", "content.list_modules",
             {"course_id": course_id},
         )
+
+        # Gather evidence for all students to compute class-level stats
+        persons = roster.get("persons", [])
+        students = [p for p in persons if "student" in p.get("roles", [])]
+        all_evidence: list[dict[str, Any]] = []
+        # Sample up to 10 students for evidence (avoid 50 MCP calls)
+        import random
+        sample = random.sample(students, min(10, len(students))) if students else []
+        for student in sample:
+            ev = await _call_mcp(
+                "assessments", "assessments.list_recent_evidence",
+                {"person_id": student["id"], "course_id": course_id},
+            )
+            evidence_list = ev.get("evidence", ev.get("recent_evidence", []))
+            for e in evidence_list:
+                e["student_name"] = student.get("display_name", "Unknown")
+            all_evidence.extend(evidence_list)
+
         return {
             "roster": roster,
-            "evidence": evidence,
             "modules": modules,
+            "all_evidence": all_evidence,
+            "student_count": len(students),
+            "faculty_count": len([p for p in persons if "faculty" in p.get("roles", [])]),
             "persona": "faculty",
         }
 
     def build_card(self, raw_data: dict[str, Any]) -> dict[str, Any]:
-        roster = raw_data.get("roster", {})
         modules_data = raw_data.get("modules", {})
-
-        students = roster.get("persons", roster.get("students", roster.get("enrollments", [])))
-        student_count = len(students) if isinstance(students, list) else 0
+        all_evidence = raw_data.get("all_evidence", [])
+        student_count = raw_data.get("student_count", 0)
+        faculty_count = raw_data.get("faculty_count", 0)
         module_list = modules_data.get("modules", [])
+
+        # Compute score distribution from sampled evidence
+        student_avgs: dict[str, list[float]] = {}
+        for ev in all_evidence:
+            score = ev.get("score")
+            name = ev.get("student_name", "Unknown")
+            if score is not None:
+                student_avgs.setdefault(name, []).append(score)
+
+        # Tier distribution
+        high = medium = low = at_risk = 0
+        all_scores: list[float] = []
+        for name, scores in student_avgs.items():
+            avg = sum(scores) / len(scores)
+            all_scores.append(avg)
+            if avg >= 0.8:
+                high += 1
+            elif avg >= 0.5:
+                medium += 1
+            elif avg >= 0.3:
+                low += 1
+            else:
+                at_risk += 1
+
+        class_avg = round(sum(all_scores) / len(all_scores), 2) if all_scores else 0
+        sampled = len(student_avgs)
+
+        # Find struggling students
+        struggling = [
+            {"name": name, "avg": round(sum(scores) / len(scores), 2)}
+            for name, scores in student_avgs.items()
+            if sum(scores) / len(scores) < 0.5
+        ]
+        struggling.sort(key=lambda s: s["avg"])
 
         return {
             "persona": "faculty",
@@ -191,7 +240,7 @@ class FacultyBriefGatherer:
             },
             "assignments": [],
             "stats": {
-                "avg_score": 0,
+                "avg_score": class_avg,
                 "submissions_count": student_count,
                 "total_assignments": 0,
             },
@@ -200,6 +249,18 @@ class FacultyBriefGatherer:
                 {"label": "Check at-risk students", "prompt": "Which students are at risk of falling behind?"},
                 {"label": "Review pending submissions", "prompt": "Are there any submissions I need to grade?"},
             ],
+            "extra": {
+                "faculty_count": faculty_count,
+                "score_distribution": {
+                    "high": high,
+                    "medium": medium,
+                    "low": low,
+                    "at_risk": at_risk,
+                    "sampled": sampled,
+                },
+                "struggling_students": struggling[:5],
+                "class_avg": class_avg,
+            },
         }
 
 
