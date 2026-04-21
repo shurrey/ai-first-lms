@@ -42,8 +42,11 @@ export function Header() {
   const handlePersonaChange = (newPersona: Persona) => {
     setPersona(newPersona);
     resetSession();
-    if (courseId) {
-      createSessionMutation.mutate({ p: newPersona, c: courseId });
+    // For advisor/admin, auto-select first course if none selected
+    const effectiveCourse = courseId ?? ((newPersona === "advisor" || newPersona === "admin") ? COURSES[0].id : null);
+    if (effectiveCourse) {
+      if (!courseId) setCourseId(effectiveCourse);
+      createSessionMutation.mutate({ p: newPersona, c: effectiveCourse });
     }
   };
 
