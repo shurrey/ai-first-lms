@@ -55,11 +55,11 @@ export function AdvisorPanel({ data }: { data: BriefCardPayload | null }) {
       <section>
         <SectionLabel>Caseload Overview</SectionLabel>
         <div className="rounded-lg border border-border bg-card p-3 space-y-1">
-          <StatRow label="Students" value={`${data.stats.submissions_count}`} />
-          {extra.faculty && extra.faculty.length > 0 && (
-            <StatRow label="Instructors" value={extra.faculty.join(", ")} />
+          <StatRow label="Total Students" value={`${data.stats.submissions_count}`} />
+          {extra.course_stats && extra.course_stats.length > 1 && (
+            <StatRow label="Courses" value={`${extra.course_stats.length}`} />
           )}
-          <StatRow label="Class Avg" value={`${Math.round(classAvg * 100)}%`} />
+          <StatRow label="Overall Avg" value={`${Math.round(classAvg * 100)}%`} />
         </div>
       </section>
 
@@ -67,13 +67,16 @@ export function AdvisorPanel({ data }: { data: BriefCardPayload | null }) {
       {extra.course_stats && extra.course_stats.length > 1 && (
         <section>
           <SectionLabel>Course Health</SectionLabel>
-          <div className="rounded-lg border border-border bg-card p-3 space-y-1">
+          <div className="rounded-lg border border-border bg-card p-3 space-y-1.5">
             {extra.course_stats.map((cs, i) => (
-              <div key={i} className="flex items-center justify-between text-xs">
-                <span className="truncate pr-2">{cs.name}</span>
-                <span className="shrink-0 text-muted-foreground">
-                  {cs.students}s · {Math.round(cs.avg_score * 100)}%
-                </span>
+              <div key={i} className="text-xs">
+                <div className="flex justify-between font-medium">
+                  <span>{cs.name}</span>
+                  <span>{Math.round(cs.avg_score * 100)}%</span>
+                </div>
+                <div className="text-[9px] text-muted-foreground">
+                  {cs.students} students
+                </div>
               </div>
             ))}
           </div>
