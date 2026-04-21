@@ -87,10 +87,14 @@ export function FacultyPanel({ data }: { data: BriefCardPayload | null }) {
           <SectionLabel>Needs Attention</SectionLabel>
           <div className="rounded-lg border border-border bg-card p-3 space-y-1">
             {struggling.map((s, i) => (
-              <div key={i} className="flex items-center justify-between text-xs">
+              <button
+                key={i}
+                onClick={() => sendPrompt(`Tell me about ${s.name}'s performance. Why do they need attention?`)}
+                className="flex w-full items-center justify-between text-xs hover:bg-muted rounded px-1 py-0.5 -mx-1 transition-colors text-left"
+              >
                 <span className="truncate pr-2">{s.name}</span>
                 <span className="shrink-0 font-mono text-destructive">{Math.round(s.avg * 100)}%</span>
-              </div>
+              </button>
             ))}
           </div>
         </section>
