@@ -202,9 +202,11 @@ _AGENT_TOOLS: dict[str, list[str]] = {
         "roster.get_student_context", "assessments.list_recent_evidence",
         "roster.list_by_course",
         "analytics.query", "analytics.trend", "analytics.cohort_compare",
+        "sis.get_transcript", "sis.catalog_search",
     ],
     "advising": [
         "roster.get_student_context", "roster.get_student",
+        "sis.get_transcript", "sis.degree_audit", "sis.catalog_search",
     ],
     "accessibility": [
         "content.retrieve", "content.search",
@@ -342,7 +344,18 @@ class ClaudeAgentRunner:
         course_id = inputs.get("course_id", "")
         conversation = inputs.get("conversation", [])
 
-        context_prefix = f"[Persona: {persona} | Person ID: {person_id} | Course ID: {course_id}]"
+        if course_id == "all":
+            context_prefix = (
+                f"[Persona: {persona} | Person ID: {person_id} | Mode: ALL COURSES]\n"
+                f"IMPORTANT: You are in cross-course mode. The course_id is 'all', which is NOT a valid UUID.\n"
+                f"Do NOT pass 'all' as a course_id to any tool. Instead:\n"
+                f"- Use sis.get_transcript(student_id) to get a student's cross-course performance\n"
+                f"- Use sis.catalog_search() to discover available courses\n"
+                f"- Use roster.list_by_course with specific course UUIDs (discover them first via sis.catalog_search)\n"
+                f"- Use assessments.list_recent_evidence(person_id) without a course_id filter"
+            )
+        else:
+            context_prefix = f"[Persona: {persona} | Person ID: {person_id} | Course ID: {course_id}]"
 
         # Get this agent's allowed tools
         mcp_tool_names = _AGENT_TOOLS.get(agent_name, [])
