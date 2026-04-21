@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 
@@ -73,8 +74,14 @@ async def _run_graph(app, session, turn: Turn) -> None:  # type: ignore[no-untyp
             "needs_clarification": False,
         }
 
-        # Stream intermediate states to push events incrementally
+        # Set up real-time event streaming from sub-agents
         turn_store = app.state.turn_store
+        from engine.graph.dispatch import set_live_event_sink
+
+        async def live_sink(event: dict[str, Any]) -> None:
+            await turn_store.add_events(turn.id, [event])
+
+        set_live_event_sink(live_sink)
         last_event_count = 0
 
         async for state_chunk in compiled.astream(initial_state):
@@ -86,10 +93,12 @@ async def _run_graph(app, session, turn: Turn) -> None:  # type: ignore[no-untyp
                     await turn_store.add_events(turn.id, new_events)
                     last_event_count = len(events)
 
+        set_live_event_sink(None)  # Clean up
         await turn_store.update_status(turn.id, "completed")
         logger.info("Turn %s completed with %d events", turn.id, last_event_count)
 
     except Exception:
         logger.exception("Graph run failed for turn %s", turn.id)
+        set_live_event_sink(None)
         turn_store = app.state.turn_store
         await turn_store.update_status(turn.id, "error")

@@ -332,6 +332,7 @@ class ClaudeAgentRunner:
     async def run(
         self, agent_name: str, inputs: dict[str, Any]
     ) -> dict[str, Any]:
+        on_event = inputs.pop("_on_event", None)
         logger.info("ClaudeAgentRunner: invoking %s with tools", agent_name)
         start = time.monotonic()
 
@@ -344,18 +345,31 @@ class ClaudeAgentRunner:
         course_id = inputs.get("course_id", "")
         conversation = inputs.get("conversation", [])
 
+        # Build context prefix — tell the agent who they are and who they're NOT
+        persona_note = ""
+        if persona in ("advisor", "admin", "faculty"):
+            persona_note = (
+                f"\nIMPORTANT: Person ID {person_id} is YOUR account (the {persona}), NOT a student. "
+                f"Do NOT look up evidence or transcripts for this ID — it will return {persona} data, not student data. "
+                f"When asked about a specific student, find their ID first via roster tools, then use THEIR ID."
+            )
+
         if course_id == "all":
             context_prefix = (
-                f"[Persona: {persona} | Person ID: {person_id} | Mode: ALL COURSES]\n"
-                f"IMPORTANT: You are in cross-course mode. The course_id is 'all', which is NOT a valid UUID.\n"
+                f"[Persona: {persona} | Your ID (do not use for student lookups): {person_id} | Mode: ALL COURSES]"
+                f"{persona_note}\n"
+                f"You are in cross-course mode. The course_id is 'all', which is NOT a valid UUID.\n"
                 f"Do NOT pass 'all' as a course_id to any tool. Instead:\n"
                 f"- Use sis.get_transcript(student_id) to get a student's cross-course performance\n"
                 f"- Use sis.catalog_search() to discover available courses\n"
-                f"- Use roster.list_by_course with specific course UUIDs (discover them first via sis.catalog_search)\n"
-                f"- Use assessments.list_recent_evidence(person_id) without a course_id filter"
+                f"- Use roster.list_by_course with specific course UUIDs (discover them first)\n"
+                f"- Use assessments.list_recent_evidence(person_id) for a specific student"
             )
         else:
-            context_prefix = f"[Persona: {persona} | Person ID: {person_id} | Course ID: {course_id}]"
+            context_prefix = (
+                f"[Persona: {persona} | Your ID (do not use for student lookups): {person_id} | Course ID: {course_id}]"
+                f"{persona_note}"
+            )
 
         # Get this agent's allowed tools
         mcp_tool_names = _AGENT_TOOLS.get(agent_name, [])
@@ -451,13 +465,19 @@ class ClaudeAgentRunner:
                     # Capture any text blocks as thinking/status messages
                     for block in response.content:
                         if block.type == "text" and block.text.strip():
-                            tool_call_records.append({
+                            record = {
                                 "tool": "__thinking__",
                                 "arguments": {},
                                 "result_summary": block.text.strip()[:200],
                                 "latency_ms": 0,
                                 "success": True,
-                            })
+                            }
+                            tool_call_records.append(record)
+                            if on_event:
+                                await on_event({"event": "thinking", "payload": {
+                                    "step_id": "", "agent": agent_name,
+                                    "text": record["result_summary"],
+                                }})
 
                     # Execute each tool call
                     tool_results = []
@@ -472,13 +492,23 @@ class ClaudeAgentRunner:
                                 "Tool %s returned in %.0fms", mcp_name, tool_ms
                             )
 
-                            tool_call_records.append({
+                            record = {
                                 "tool": mcp_name,
                                 "arguments": block.input,
                                 "result_summary": result_text[:200],
                                 "latency_ms": round(tool_ms, 1),
                                 "success": "error" not in result_text.lower()[:50],
-                            })
+                            }
+                            tool_call_records.append(record)
+                            if on_event:
+                                await on_event({"event": "agent_tool_call", "payload": {
+                                    "step_id": "", "agent": agent_name,
+                                    "tool": mcp_name,
+                                    "arguments": block.input,
+                                    "result_summary": result_text[:200],
+                                    "latency_ms": round(tool_ms, 1),
+                                    "success": record["success"],
+                                }})
 
                             tool_results.append({
                                 "type": "tool_result",

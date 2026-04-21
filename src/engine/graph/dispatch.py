@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any
+from typing import Any, Callable, Coroutine
 
 from engine.agents.runner import AgentRunner, ClaudeAgentRunner
 from engine.graph.state import AgentResult, OrchestratorState
@@ -14,6 +14,15 @@ logger = logging.getLogger(__name__)
 
 # Module-level agent runner, replaceable for testing
 _agent_runner: AgentRunner | None = None
+
+# Module-level event sink for real-time streaming
+# Set by converse._run_graph before invoking the graph
+_live_event_sink: Callable[[dict[str, Any]], Coroutine[Any, Any, None]] | None = None
+
+
+def set_live_event_sink(sink: Callable[[dict[str, Any]], Coroutine[Any, Any, None]] | None) -> None:
+    global _live_event_sink
+    _live_event_sink = sink
 
 
 def set_agent_runner(runner: AgentRunner | None) -> None:
@@ -139,6 +148,15 @@ async def _execute_step(
         },
     })
 
+    # Create real-time event callback if sink is available
+    async def on_agent_event(event: dict[str, Any]) -> None:
+        # Fill in step_id if missing
+        payload = event.get("payload", {})
+        if not payload.get("step_id"):
+            payload["step_id"] = step_id
+        if _live_event_sink:
+            await _live_event_sink(event)
+
     start_time = time.monotonic()
     result = await runner.run(agent, {
         "message": message,
@@ -146,6 +164,7 @@ async def _execute_step(
         "person_id": person_id,
         "course_id": course_id,
         "conversation": conversation or [],
+        "_on_event": on_agent_event,
     })
     elapsed_ms = (time.monotonic() - start_time) * 1000
 
