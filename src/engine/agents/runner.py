@@ -206,25 +206,54 @@ _AGENT_TOOLS: dict[str, list[str]] = {
 def _parse_agent_output(text: str) -> dict[str, Any]:
     """Parse agent response text into a structured output dict.
 
-    If the text is valid JSON with a response_markdown field, extract it.
-    Otherwise treat the whole text as the response_markdown.
+    Handles three cases:
+    1. Pure JSON with response_markdown → extract fields
+    2. Markdown text followed by a JSON block → use the markdown, extract metadata from JSON
+    3. Plain text → wrap as response_markdown
     """
-    # Try parsing as JSON (agent may return structured output)
     stripped = text.strip()
-    # Handle markdown code fences around JSON
-    if stripped.startswith("```"):
-        lines = stripped.split("\n")
-        # Remove first and last fence lines
-        lines = [l for l in lines[1:] if not l.strip().startswith("```")]
-        stripped = "\n".join(lines).strip()
 
+    # Case 1: entire response is JSON (possibly in code fences)
+    json_text = stripped
+    if json_text.startswith("```"):
+        lines = json_text.split("\n")
+        lines = [l for l in lines[1:] if not l.strip().startswith("```")]
+        json_text = "\n".join(lines).strip()
     try:
-        parsed = json.loads(stripped)
+        parsed = json.loads(json_text)
         if isinstance(parsed, dict) and "response_markdown" in parsed:
             return parsed
     except (json.JSONDecodeError, ValueError):
         pass
 
+    # Case 2: markdown text with a trailing JSON block
+    # Look for a JSON object starting with { at the end, possibly in code fences
+    import re
+    # Match a JSON block at the end, optionally wrapped in ```json ... ```
+    trailing_json = re.search(
+        r'(?:```(?:json)?\s*\n)?\s*(\{[^{}]*"response_markdown"[^{}]*\})\s*(?:\n\s*```)?$',
+        stripped,
+        re.DOTALL,
+    )
+    if trailing_json:
+        # The markdown is everything before the JSON block
+        json_start = stripped.rfind("```", 0, trailing_json.start() + 10)
+        if json_start == -1:
+            json_start = trailing_json.start()
+        markdown_part = stripped[:json_start].rstrip()
+
+        try:
+            json_data = json.loads(trailing_json.group(1))
+            result: dict[str, Any] = {"response_markdown": markdown_part}
+            # Preserve citations, follow_ups, suggested_nodes from the JSON
+            for key in ("citations", "follow_ups", "suggested_nodes"):
+                if key in json_data:
+                    result[key] = json_data[key]
+            return result
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Case 3: plain text
     return {"response_markdown": text}
 
 
