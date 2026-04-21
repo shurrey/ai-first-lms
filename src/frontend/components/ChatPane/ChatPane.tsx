@@ -123,13 +123,6 @@ export function ChatPane() {
     [converseMutation]
   );
 
-  // Handle pending actions from the brief card pills
-  useEffect(() => {
-    if (turnState.pendingAction) {
-      handleSend(turnState.pendingAction);
-      turnState.clearPendingAction();
-    }
-  }, [turnState.pendingAction, handleSend, turnState.clearPendingAction]);
 
   return (
     <main className="flex h-full flex-col overflow-hidden">
@@ -170,6 +163,8 @@ export function ChatPane() {
         onSend={handleSend}
         disabled={!sessionId}
         loading={converseMutation.isPending || turnState.status === "streaming"}
+        prefill={turnState.pendingAction}
+        onPrefillConsumed={turnState.clearPendingAction}
       />
     </main>
   );

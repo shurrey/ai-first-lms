@@ -7,10 +7,18 @@ interface ChatInputProps {
   onSend: (message: string) => void;
   disabled: boolean;
   loading: boolean;
+  prefill?: string | null;
+  onPrefillConsumed?: () => void;
 }
 
-export function ChatInput({ onSend, disabled, loading }: ChatInputProps) {
+export function ChatInput({ onSend, disabled, loading, prefill, onPrefillConsumed }: ChatInputProps) {
   const [text, setText] = useState("");
+
+  // Pre-fill text from brief card action buttons
+  if (prefill && prefill !== text) {
+    setText(prefill);
+    onPrefillConsumed?.();
+  }
 
   const handleSubmit = useCallback(
     (e: FormEvent) => {
