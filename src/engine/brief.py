@@ -261,70 +261,197 @@ class FacultyBriefGatherer:
 
 
 class AdvisorBriefGatherer:
-    """Gathers brief data for an advisor persona."""
+    """Gathers brief data for an advisor — focuses on student risk and performance."""
 
     async def gather(self, person_id: str, course_id: str) -> dict[str, Any]:
         roster = await _call_mcp(
             "roster", "roster.list_by_course",
             {"course_id": course_id},
         )
-        return {"roster": roster, "persona": "advisor"}
+        modules = await _call_mcp(
+            "content", "content.list_modules",
+            {"course_id": course_id},
+        )
+
+        persons = roster.get("persons", [])
+        students = [p for p in persons if p.get("role") == "student"]
+        faculty = [p for p in persons if p.get("role") == "faculty"]
+
+        # Get evidence for all students
+        student_evidence: dict[str, dict[str, Any]] = {}
+        for student in students:
+            ev = await _call_mcp(
+                "assessments", "assessments.list_recent_evidence",
+                {"person_id": student["id"], "course_id": course_id},
+            )
+            evidence_list = ev.get("evidence", ev.get("recent_evidence", []))
+            scores = [e["score"] for e in evidence_list if e.get("score") is not None]
+            avg = round(sum(scores) / len(scores), 2) if scores else 0
+            student_evidence[student["id"]] = {
+                "name": student.get("display_name", "Unknown"),
+                "avg_score": avg,
+                "evidence_count": len(evidence_list),
+                "scores": scores,
+            }
+
+        return {
+            "roster": roster,
+            "modules": modules,
+            "student_evidence": student_evidence,
+            "student_count": len(students),
+            "faculty": [f.get("display_name", "Unknown") for f in faculty],
+            "persona": "advisor",
+        }
 
     def build_card(self, raw_data: dict[str, Any]) -> dict[str, Any]:
-        roster = raw_data.get("roster", {})
-        students = roster.get("persons", roster.get("students", roster.get("enrollments", [])))
-        student_count = len(students) if isinstance(students, list) else 0
+        student_evidence = raw_data.get("student_evidence", {})
+        student_count = raw_data.get("student_count", 0)
+        faculty = raw_data.get("faculty", [])
+        modules_data = raw_data.get("modules", {})
+        module_list = modules_data.get("modules", [])
+
+        # Categorize students by risk level
+        at_risk = []
+        low = []
+        for sid, data in student_evidence.items():
+            if data["avg_score"] < 0.3 and data["evidence_count"] > 0:
+                at_risk.append({"name": data["name"], "avg": data["avg_score"]})
+            elif data["avg_score"] < 0.5 and data["evidence_count"] > 0:
+                low.append({"name": data["name"], "avg": data["avg_score"]})
+        at_risk.sort(key=lambda s: s["avg"])
+        low.sort(key=lambda s: s["avg"])
+
+        # Disengaged: students with 0 evidence
+        disengaged = [
+            {"name": data["name"], "avg": 0}
+            for data in student_evidence.values()
+            if data["evidence_count"] == 0
+        ]
+
+        all_avgs = [d["avg_score"] for d in student_evidence.values() if d["evidence_count"] > 0]
+        class_avg = round(sum(all_avgs) / len(all_avgs), 2) if all_avgs else 0
 
         return {
             "persona": "advisor",
             "student_name": "Advisor View",
             "course_title": "",
-            "current_module": {"title": "", "index": 0, "total": 0},
+            "current_module": {
+                "title": module_list[0]["title"] if module_list else "",
+                "index": 0,
+                "total": len(module_list),
+            },
             "assignments": [],
             "stats": {
-                "avg_score": 0,
+                "avg_score": class_avg,
                 "submissions_count": student_count,
                 "total_assignments": 0,
             },
             "suggested_actions": [
                 {"label": "At-risk students", "prompt": "Which students in this course need attention?"},
-                {"label": "Engagement overview", "prompt": "Show me engagement trends for this course"},
+                {"label": "Engagement trends", "prompt": "Show me engagement trends for this course"},
                 {"label": "Degree progress", "prompt": "Which students are behind on degree requirements?"},
             ],
+            "extra": {
+                "faculty": faculty,
+                "at_risk_students": at_risk[:5],
+                "low_performing": low[:5],
+                "disengaged": disengaged[:5],
+                "class_avg": class_avg,
+                "risk_summary": {
+                    "at_risk": len(at_risk),
+                    "low": len(low),
+                    "disengaged": len(disengaged),
+                    "on_track": student_count - len(at_risk) - len(low) - len(disengaged),
+                },
+            },
         }
 
 
 class AdminBriefGatherer:
-    """Gathers brief data for an admin persona."""
+    """Gathers brief data for an admin — platform/course health overview."""
 
     async def gather(self, person_id: str, course_id: str) -> dict[str, Any]:
         roster = await _call_mcp(
             "roster", "roster.list_by_course",
             {"course_id": course_id},
         )
-        return {"roster": roster, "persona": "admin"}
+        modules = await _call_mcp(
+            "content", "content.list_modules",
+            {"course_id": course_id},
+        )
+
+        persons = roster.get("persons", [])
+        students = [p for p in persons if p.get("role") == "student"]
+        faculty = [p for p in persons if p.get("role") == "faculty"]
+        advisors = [p for p in persons if p.get("role") == "advisor"]
+
+        # Get evidence for all students
+        all_scores: list[float] = []
+        for student in students:
+            ev = await _call_mcp(
+                "assessments", "assessments.list_recent_evidence",
+                {"person_id": student["id"], "course_id": course_id},
+            )
+            evidence_list = ev.get("evidence", ev.get("recent_evidence", []))
+            for e in evidence_list:
+                if e.get("score") is not None:
+                    all_scores.append(e["score"])
+
+        return {
+            "roster": roster,
+            "modules": modules,
+            "student_count": len(students),
+            "faculty": [{"name": f.get("display_name", ""), "id": f.get("id", "")} for f in faculty],
+            "advisor_count": len(advisors),
+            "total_evidence": len(all_scores),
+            "avg_score": round(sum(all_scores) / len(all_scores), 2) if all_scores else 0,
+            "persona": "admin",
+        }
 
     def build_card(self, raw_data: dict[str, Any]) -> dict[str, Any]:
-        roster = raw_data.get("roster", {})
-        students = roster.get("persons", roster.get("students", roster.get("enrollments", [])))
-        student_count = len(students) if isinstance(students, list) else 0
+        student_count = raw_data.get("student_count", 0)
+        faculty = raw_data.get("faculty", [])
+        advisor_count = raw_data.get("advisor_count", 0)
+        modules_data = raw_data.get("modules", {})
+        module_list = modules_data.get("modules", [])
+        avg_score = raw_data.get("avg_score", 0)
+        total_evidence = raw_data.get("total_evidence", 0)
 
         return {
             "persona": "admin",
             "student_name": "Admin View",
             "course_title": "",
-            "current_module": {"title": "", "index": 0, "total": 0},
+            "current_module": {
+                "title": module_list[0]["title"] if module_list else "",
+                "index": 0,
+                "total": len(module_list),
+            },
             "assignments": [],
             "stats": {
-                "avg_score": 0,
+                "avg_score": avg_score,
                 "submissions_count": student_count,
                 "total_assignments": 0,
             },
             "suggested_actions": [
-                {"label": "Course overview", "prompt": "Give me an overview of this course's health"},
+                {"label": "Course health", "prompt": "Give me an overview of this course's health"},
                 {"label": "Enrollment stats", "prompt": "What are the enrollment numbers for this course?"},
+                {"label": "Grading pipeline", "prompt": "What's the status of the grading pipeline?"},
                 {"label": "Accessibility audit", "prompt": "Are there any accessibility concerns in this course?"},
             ],
+            "extra": {
+                "faculty": [f["name"] for f in faculty],
+                "faculty_details": faculty,
+                "advisor_count": advisor_count,
+                "total_evidence": total_evidence,
+                "avg_score": avg_score,
+                "roster_breakdown": {
+                    "students": student_count,
+                    "faculty": len(faculty),
+                    "advisors": advisor_count,
+                    "total": student_count + len(faculty) + advisor_count + 1,
+                },
+                "modules": len(module_list),
+            },
         }
 
 
