@@ -21,10 +21,13 @@ export function CoursePanel() {
 
   return (
     <aside className="flex h-full flex-col overflow-y-auto border-l border-border bg-muted/30 p-4">
-      {persona === "student" && <StudentPanel data={briefCardData} />}
-      {persona === "faculty" && <FacultyPanel data={briefCardData} />}
-      {persona === "advisor" && <AdvisorPanel data={briefCardData} />}
-      {persona === "admin" && <AdminPanel data={briefCardData} />}
+      <div className="flex-1">
+        {persona === "student" && <StudentPanel data={briefCardData} />}
+        {persona === "faculty" && <FacultyPanel data={briefCardData} />}
+        {persona === "advisor" && <AdvisorPanel data={briefCardData} />}
+        {persona === "admin" && <AdminPanel data={briefCardData} />}
+      </div>
+      <p className="mt-4 text-center text-[9px] text-muted-foreground/50">{sessionId.slice(0, 8)}</p>
     </aside>
   );
 }

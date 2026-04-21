@@ -143,7 +143,7 @@ export function ChatPane() {
 
   return (
     <main className="flex h-full flex-col overflow-hidden">
-      <div className="flex-1 overflow-y-auto p-4 space-y-2">
+      <div className="flex-1 overflow-y-auto p-4"><div className="mx-auto max-w-3xl space-y-2">
         {messages.length === 0 && turnState.status === "idle" && (
           <div className="flex h-full items-center justify-center">
             <p className="text-sm text-muted-foreground">Start a conversation with the AI-First LMS.</p>
@@ -161,7 +161,7 @@ export function ChatPane() {
             toolCallCount={thinkingSteps.filter(s => s.type === "tool_call").length}
           />
         )}
-      </div>
+      </div></div>
 
       {/* Clarification prompt */}
       {turnState.clarify && (

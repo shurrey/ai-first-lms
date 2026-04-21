@@ -164,7 +164,9 @@ class FacultyBriefGatherer:
 
         # Gather evidence for all students to compute class-level stats
         persons = roster.get("persons", [])
-        students = [p for p in persons if "student" in p.get("roles", [])]
+        # list_by_course returns "role" (singular, from enrollment), not "roles"
+        students = [p for p in persons if p.get("role") == "student"]
+        faculty = [p for p in persons if p.get("role") == "faculty"]
         all_evidence: list[dict[str, Any]] = []
         # Sample up to 10 students for evidence (avoid 50 MCP calls)
         import random
@@ -184,7 +186,7 @@ class FacultyBriefGatherer:
             "modules": modules,
             "all_evidence": all_evidence,
             "student_count": len(students),
-            "faculty_count": len([p for p in persons if "faculty" in p.get("roles", [])]),
+            "faculty_count": len(faculty),
             "persona": "faculty",
         }
 

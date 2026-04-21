@@ -74,11 +74,6 @@ export function Header() {
           ))}
         </select>
 
-        {sessionId && (
-          <span className="text-xs text-muted-foreground truncate max-w-[120px]">
-            {sessionId.slice(0, 8)}...
-          </span>
-        )}
       </div>
     </header>
   );
