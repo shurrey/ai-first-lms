@@ -4,10 +4,9 @@ import type { BriefCardPayload } from "@/lib/events";
 
 interface BriefCardProps {
   data: BriefCardPayload;
-  onAction?: (prompt: string) => void;
 }
 
-export function BriefCard({ data, onAction }: BriefCardProps) {
+export function BriefCard({ data }: BriefCardProps) {
   return (
     <div className="space-y-3 rounded-lg border border-border bg-card p-3">
       {/* Header */}
@@ -30,7 +29,25 @@ export function BriefCard({ data, onAction }: BriefCardProps) {
           {data.suggested_actions.map((action, i) => (
             <button
               key={i}
-              onClick={() => onAction?.(action.prompt)}
+              onClick={() => {
+                console.log("[BriefCard] Pill clicked:", action.prompt);
+                const input = document.querySelector<HTMLInputElement>('form input[type="text"]');
+                const form = input?.closest("form");
+                if (input && form) {
+                  const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+                  nativeSetter?.call(input, action.prompt);
+                  // React 16+ listens for 'input' events via its synthetic system
+                  input.dispatchEvent(new Event("input", { bubbles: true }));
+                  // Also dispatch 'change' for good measure
+                  input.dispatchEvent(new Event("change", { bubbles: true }));
+                  // Wait for React to process, then submit
+                  requestAnimationFrame(() => {
+                    requestAnimationFrame(() => {
+                      form.requestSubmit();
+                    });
+                  });
+                }
+              }}
               className="rounded-md border border-border bg-background px-2 py-1 text-xs hover:bg-muted transition-colors"
             >
               {action.label}

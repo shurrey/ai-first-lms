@@ -9,9 +9,6 @@ interface TurnContextValue extends TurnState {
   activeTurnId: string | null;
   briefCardData: BriefCardPayload | null;
   startTurn: (turnId: string) => void;
-  pendingAction: string | null;
-  clearPendingAction: () => void;
-  setPendingAction: (prompt: string) => void;
 }
 
 const TurnContext = createContext<TurnContextValue | null>(null);
@@ -20,8 +17,6 @@ export function TurnProvider({ children }: { children: React.ReactNode }) {
   const { sessionId, briefTurnId } = useSession();
   const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
   const [briefCardData, setBriefCardData] = useState<BriefCardPayload | null>(null);
-  const [pendingAction, setPendingAction] = useState<string | null>(null);
-  const clearPendingAction = useCallback(() => setPendingAction(null), []);
 
   // When session or brief changes, reset and start the new brief
   useEffect(() => {
@@ -50,7 +45,7 @@ export function TurnProvider({ children }: { children: React.ReactNode }) {
   }, [turnState.reset]);
 
   return (
-    <TurnContext.Provider value={{ ...turnState, activeTurnId, briefCardData, startTurn, pendingAction, clearPendingAction, setPendingAction }}>
+    <TurnContext.Provider value={{ ...turnState, activeTurnId, briefCardData, startTurn }}>
       {children}
     </TurnContext.Provider>
   );

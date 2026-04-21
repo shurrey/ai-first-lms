@@ -18,7 +18,7 @@ export function ActivityPane() {
       <div className="flex-1 space-y-4">
         {/* Course brief card */}
         {turn.briefCardData && (
-          <BriefCard data={turn.briefCardData} onAction={turn.setPendingAction} />
+          <BriefCard data={turn.briefCardData} />
         )}
 
         <ActivityTree />
