@@ -203,7 +203,7 @@ _AGENT_TOOLS: dict[str, list[str]] = {
 }
 
 
-_AGENT_META_KEYS = {"response_markdown", "citations", "follow_ups", "suggested_nodes"}
+_AGENT_META_KEYS = {"response_markdown", "narrative_md", "citations", "follow_ups", "suggested_nodes", "charts", "caveats", "query_used"}
 
 
 def _parse_agent_output(text: str) -> dict[str, Any]:
@@ -217,7 +217,10 @@ def _parse_agent_output(text: str) -> dict[str, Any]:
     # Case 1: entire response is valid JSON
     try:
         parsed = json.loads(stripped)
-        if isinstance(parsed, dict) and "response_markdown" in parsed:
+        if isinstance(parsed, dict) and _AGENT_META_KEYS & parsed.keys():
+            # Normalize: narrative_md → response_markdown
+            if "narrative_md" in parsed and "response_markdown" not in parsed:
+                parsed["response_markdown"] = parsed.pop("narrative_md")
             return parsed
     except (json.JSONDecodeError, ValueError):
         pass
@@ -253,7 +256,7 @@ def _parse_agent_output(text: str) -> dict[str, Any]:
                     post_check = stripped[last_brace + 1:].strip()
                     # pre is the clean markdown
 
-                    md = json_data.get("response_markdown", "")
+                    md = json_data.get("response_markdown") or json_data.get("narrative_md") or ""
                     # Use the real markdown if response_markdown is a placeholder
                     if not md or md in ("...", "...(above)...", "..."):
                         md = pre
