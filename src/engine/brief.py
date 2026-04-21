@@ -12,7 +12,12 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-_MCP_SERVERS["sis"] = "http://mcp-sis:7005"
+_MCP_SERVERS = {
+    "roster": "http://mcp-roster:7002",
+    "assessments": "http://mcp-assessments:7003",
+    "content": "http://mcp-content:7001",
+    "sis": "http://mcp-sis:7005",
+}
 
 
 async def _discover_courses() -> list[dict[str, str]]:
@@ -22,12 +27,6 @@ async def _discover_courses() -> list[dict[str, str]]:
         {"id": c.get("id", ""), "title": c.get("title", "")}
         for c in result.get("courses", [])
     ]
-
-_MCP_SERVERS = {
-    "roster": "http://mcp-roster:7002",
-    "assessments": "http://mcp-assessments:7003",
-    "content": "http://mcp-content:7001",
-}
 
 COACHING_SYSTEM_PROMPT = """\
 You are the Tutor in an AI-native LMS. A student just opened their course.
