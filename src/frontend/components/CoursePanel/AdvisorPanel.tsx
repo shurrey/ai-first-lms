@@ -33,10 +33,13 @@ export function AdvisorPanel({ data }: { data: BriefCardPayload | null }) {
 
   const extra = (data.extra ?? {}) as {
     faculty?: string[];
+    course_stats?: Array<{ course_id: string; name: string; students: number; avg_score: number }>;
     at_risk_students?: FlaggedStudent[];
     low_performing?: FlaggedStudent[];
     disengaged?: FlaggedStudent[];
     class_avg?: number;
+    overall_avg?: number;
+    is_cross_course?: boolean;
     risk_summary?: RiskSummary;
   };
 
@@ -59,6 +62,23 @@ export function AdvisorPanel({ data }: { data: BriefCardPayload | null }) {
           <StatRow label="Class Avg" value={`${Math.round(classAvg * 100)}%`} />
         </div>
       </section>
+
+      {/* Course Health (cross-course view) */}
+      {extra.course_stats && extra.course_stats.length > 1 && (
+        <section>
+          <SectionLabel>Course Health</SectionLabel>
+          <div className="rounded-lg border border-border bg-card p-3 space-y-1">
+            {extra.course_stats.map((cs, i) => (
+              <div key={i} className="flex items-center justify-between text-xs">
+                <span className="truncate pr-2">{cs.name}</span>
+                <span className="shrink-0 text-muted-foreground">
+                  {cs.students}s · {Math.round(cs.avg_score * 100)}%
+                </span>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* Risk Overview */}
       {risk && (

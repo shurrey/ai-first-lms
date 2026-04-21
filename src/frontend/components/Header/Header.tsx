@@ -42,8 +42,8 @@ export function Header() {
   const handlePersonaChange = (newPersona: Persona) => {
     setPersona(newPersona);
     resetSession();
-    // For advisor/admin, auto-select first course if none selected
-    const effectiveCourse = courseId ?? ((newPersona === "advisor" || newPersona === "admin") ? COURSES[0].id : null);
+    // For advisor/admin, default to "all" courses
+    const effectiveCourse = courseId ?? ((newPersona === "advisor" || newPersona === "admin") ? "all" : null);
     if (effectiveCourse) {
       if (!courseId) setCourseId(effectiveCourse);
       createSessionMutation.mutate({ p: newPersona, c: effectiveCourse });
@@ -61,6 +61,9 @@ export function Header() {
         className="rounded-md border border-input bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-ring"
       >
         <option value="">Select a course...</option>
+        {(persona === "advisor" || persona === "admin") && (
+          <option value="all">All Courses</option>
+        )}
         {COURSES.map((c) => (
           <option key={c.id} value={c.id}>{c.name}</option>
         ))}

@@ -12,11 +12,20 @@ router = APIRouter()
 VALID_PERSONAS = {"student", "faculty", "advisor", "admin"}
 
 _COURSE_SLUG_TO_UUID: dict[str, str] = {
+    "all": "all",  # Cross-course view for advisor/admin
     "cs101": "bdd640fb-0667-4ad1-9c80-317fa3b1799d",
     "math201": "23b8c1e9-3924-46de-beb1-3b9046685257",
     "eng102": "bd9c66b3-ad3c-4d6d-9a3d-1fa7bc8960a9",
     "bio150": "972a8469-1641-4f82-8b9d-2434e465e150",
 }
+
+# All course UUIDs for cross-course queries
+_ALL_COURSE_IDS = [
+    "bdd640fb-0667-4ad1-9c80-317fa3b1799d",
+    "23b8c1e9-3924-46de-beb1-3b9046685257",
+    "bd9c66b3-ad3c-4d6d-9a3d-1fa7bc8960a9",
+    "972a8469-1641-4f82-8b9d-2434e465e150",
+]
 
 # Demo person mappings per persona per course
 _DEMO_PERSONS: dict[str, dict[str, tuple[str, str]]] = {
@@ -33,12 +42,14 @@ _DEMO_PERSONS: dict[str, dict[str, tuple[str, str]]] = {
         "972a8469-1641-4f82-8b9d-2434e465e150": ("c241330b-01a9-471f-9e8a-774bcf36d58b", "Dr. Michael Patel"),
     },
     "advisor": {
+        "all": ("371ecd7b-27cd-4130-8722-9389571aa876", "Ms. Adaeze Okafor"),
         "bdd640fb-0667-4ad1-9c80-317fa3b1799d": ("371ecd7b-27cd-4130-8722-9389571aa876", "Ms. Adaeze Okafor"),
         "23b8c1e9-3924-46de-beb1-3b9046685257": ("371ecd7b-27cd-4130-8722-9389571aa876", "Ms. Adaeze Okafor"),
         "bd9c66b3-ad3c-4d6d-9a3d-1fa7bc8960a9": ("371ecd7b-27cd-4130-8722-9389571aa876", "Ms. Adaeze Okafor"),
         "972a8469-1641-4f82-8b9d-2434e465e150": ("371ecd7b-27cd-4130-8722-9389571aa876", "Ms. Adaeze Okafor"),
     },
     "admin": {
+        "all": ("1a2a73ed-562b-4f79-8374-59eef50bea63", "Dr. Richard Hayes"),
         "bdd640fb-0667-4ad1-9c80-317fa3b1799d": ("1a2a73ed-562b-4f79-8374-59eef50bea63", "Dr. Richard Hayes"),
         "23b8c1e9-3924-46de-beb1-3b9046685257": ("1a2a73ed-562b-4f79-8374-59eef50bea63", "Dr. Richard Hayes"),
         "bd9c66b3-ad3c-4d6d-9a3d-1fa7bc8960a9": ("1a2a73ed-562b-4f79-8374-59eef50bea63", "Dr. Richard Hayes"),

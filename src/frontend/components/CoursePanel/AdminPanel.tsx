@@ -28,16 +28,19 @@ export function AdminPanel({ data }: { data: BriefCardPayload | null }) {
 
   const extra = (data.extra ?? {}) as {
     faculty?: string[];
-    faculty_details?: Array<{ name: string; id: string }>;
+    faculty_details?: Array<{ name: string; id: string; courses?: string[] }>;
+    course_details?: Array<{ course_id: string; name: string; students: number; faculty: string[]; modules: number; avg_score: number }>;
     advisor_count?: number;
     total_evidence?: number;
     avg_score?: number;
-    roster_breakdown?: RosterBreakdown;
+    is_cross_course?: boolean;
+    roster_breakdown?: RosterBreakdown & { courses?: number };
     modules?: number;
   };
 
   const breakdown = extra.roster_breakdown;
   const faculty = extra.faculty_details ?? [];
+  const courseDetails = extra.course_details ?? [];
   const avgScore = extra.avg_score ?? 0;
 
   return (
@@ -63,6 +66,26 @@ export function AdminPanel({ data }: { data: BriefCardPayload | null }) {
           )}
         </div>
       </section>
+
+      {/* Course Health Table (cross-course) */}
+      {courseDetails.length > 1 && (
+        <section>
+          <SectionLabel>Course Health</SectionLabel>
+          <div className="rounded-lg border border-border bg-card p-3 space-y-1.5">
+            {courseDetails.map((cd, i) => (
+              <div key={i} className="text-xs">
+                <div className="flex justify-between font-medium">
+                  <span>{cd.name}</span>
+                  <span>{Math.round(cd.avg_score * 100)}%</span>
+                </div>
+                <div className="text-[9px] text-muted-foreground">
+                  {cd.students} students · {cd.modules} modules · {cd.faculty.join(", ")}
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* Faculty */}
       {faculty.length > 0 && (
