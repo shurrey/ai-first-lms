@@ -176,7 +176,7 @@ class FacultyBriefGatherer:
         roster = raw_data.get("roster", {})
         modules_data = raw_data.get("modules", {})
 
-        students = roster.get("students", roster.get("enrollments", []))
+        students = roster.get("persons", roster.get("students", roster.get("enrollments", [])))
         student_count = len(students) if isinstance(students, list) else 0
         module_list = modules_data.get("modules", [])
 
@@ -215,7 +215,7 @@ class AdvisorBriefGatherer:
 
     def build_card(self, raw_data: dict[str, Any]) -> dict[str, Any]:
         roster = raw_data.get("roster", {})
-        students = roster.get("students", roster.get("enrollments", []))
+        students = roster.get("persons", roster.get("students", roster.get("enrollments", [])))
         student_count = len(students) if isinstance(students, list) else 0
 
         return {
@@ -249,7 +249,7 @@ class AdminBriefGatherer:
 
     def build_card(self, raw_data: dict[str, Any]) -> dict[str, Any]:
         roster = raw_data.get("roster", {})
-        students = roster.get("students", roster.get("enrollments", []))
+        students = roster.get("persons", roster.get("students", roster.get("enrollments", [])))
         student_count = len(students) if isinstance(students, list) else 0
 
         return {
