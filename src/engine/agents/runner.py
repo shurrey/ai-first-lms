@@ -435,6 +435,17 @@ class ClaudeAgentRunner:
                     # Add assistant message with all content blocks
                     messages.append({"role": "assistant", "content": response.content})
 
+                    # Capture any text blocks as thinking/status messages
+                    for block in response.content:
+                        if block.type == "text" and block.text.strip():
+                            tool_call_records.append({
+                                "tool": "__thinking__",
+                                "arguments": {},
+                                "result_summary": block.text.strip()[:200],
+                                "latency_ms": 0,
+                                "success": True,
+                            })
+
                     # Execute each tool call
                     tool_results = []
                     for block in response.content:
