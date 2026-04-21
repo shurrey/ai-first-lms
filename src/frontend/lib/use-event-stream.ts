@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useCallback, useReducer } from "react";
+import { useEffect, useCallback, useReducer, useRef } from "react";
 import { createSSEClient } from "./sse";
 import type {
   EventEnvelope,
@@ -152,10 +152,21 @@ export function useEventStream(
 ) {
   const [state, dispatch] = useReducer(turnReducer, initialState);
 
+  // Reset state synchronously during render when turnId changes
+  // This ensures ChatPane sees "idle" status BEFORE any effects run
+  const prevKeyRef = useRef<string>("");
+  const key = `${sessionId}:${turnId}`;
+  if (key !== prevKeyRef.current) {
+    prevKeyRef.current = key;
+    if (sessionId && turnId) {
+      dispatch({ type: "start" });
+    } else {
+      dispatch({ type: "reset" });
+    }
+  }
+
   useEffect(() => {
     if (!sessionId || !turnId) return;
-
-    dispatch({ type: "start" });
 
     const cleanup = createSSEClient({
       sessionId,

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { useSession } from "@/lib/session-context";
 import { useTurn } from "@/lib/turn-context";
@@ -16,17 +16,26 @@ export function ChatPane() {
   const turnState = useTurn();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
 
-  // Clear messages when session changes (course switch)
+  // Track which turn IDs we've already rendered messages for
+  const renderedRef = useRef(new Set<string>());
+
+  // Clear messages and rendered set when session changes
   useEffect(() => {
     setMessages([]);
+    renderedRef.current = new Set();
   }, [sessionId]);
 
   // When the SSE stream produces a final result, add the assistant message
   useEffect(() => {
-    if (turnState.status === "done" && turnState.finalResult && turnState.activeTurnId) {
+    if (
+      turnState.status === "done" &&
+      turnState.finalResult &&
+      turnState.activeTurnId &&
+      !renderedRef.current.has(turnState.activeTurnId)
+    ) {
+      renderedRef.current.add(turnState.activeTurnId);
       const msgId = `assistant-${turnState.activeTurnId}`;
       setMessages((prev) => {
-        if (prev.some((m) => m.id === msgId)) return prev;
         const withoutPlaceholder = prev.filter(
           (m) => m.id !== `streaming-${turnState.activeTurnId}`
         );
@@ -123,7 +132,6 @@ export function ChatPane() {
     [converseMutation]
   );
 
-
   return (
     <main className="flex h-full flex-col overflow-hidden">
       <MessageList messages={messages} />
@@ -146,7 +154,6 @@ export function ChatPane() {
               onRetry={
                 turnState.error.retriable
                   ? () => {
-                      // Resend the last user message
                       const lastUserMsg = [...messages]
                         .reverse()
                         .find((m) => m.role === "user");
