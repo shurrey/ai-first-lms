@@ -149,11 +149,162 @@ class StudentBriefGatherer:
         }
 
 
+class FacultyBriefGatherer:
+    """Gathers brief data for a faculty persona."""
+
+    async def gather(self, person_id: str, course_id: str) -> dict[str, Any]:
+        roster = await _call_mcp(
+            "roster", "roster.list_by_course",
+            {"course_id": course_id},
+        )
+        evidence = await _call_mcp(
+            "assessments", "assessments.list_recent_evidence",
+            {"person_id": person_id, "course_id": course_id},
+        )
+        modules = await _call_mcp(
+            "content", "content.list_modules",
+            {"course_id": course_id},
+        )
+        return {
+            "roster": roster,
+            "evidence": evidence,
+            "modules": modules,
+            "persona": "faculty",
+        }
+
+    def build_card(self, raw_data: dict[str, Any]) -> dict[str, Any]:
+        roster = raw_data.get("roster", {})
+        modules_data = raw_data.get("modules", {})
+
+        students = roster.get("students", roster.get("enrollments", []))
+        student_count = len(students) if isinstance(students, list) else 0
+        module_list = modules_data.get("modules", [])
+
+        return {
+            "persona": "faculty",
+            "student_name": "Instructor View",
+            "course_title": "",
+            "current_module": {
+                "title": module_list[0]["title"] if module_list else "Unknown",
+                "index": 1,
+                "total": len(module_list),
+            },
+            "assignments": [],
+            "stats": {
+                "avg_score": 0,
+                "submissions_count": student_count,
+                "total_assignments": 0,
+            },
+            "suggested_actions": [
+                {"label": "View class performance", "prompt": "How is my class performing overall?"},
+                {"label": "Check at-risk students", "prompt": "Which students are at risk of falling behind?"},
+                {"label": "Review pending submissions", "prompt": "Are there any submissions I need to grade?"},
+            ],
+        }
+
+
+class AdvisorBriefGatherer:
+    """Gathers brief data for an advisor persona."""
+
+    async def gather(self, person_id: str, course_id: str) -> dict[str, Any]:
+        roster = await _call_mcp(
+            "roster", "roster.list_by_course",
+            {"course_id": course_id},
+        )
+        return {"roster": roster, "persona": "advisor"}
+
+    def build_card(self, raw_data: dict[str, Any]) -> dict[str, Any]:
+        roster = raw_data.get("roster", {})
+        students = roster.get("students", roster.get("enrollments", []))
+        student_count = len(students) if isinstance(students, list) else 0
+
+        return {
+            "persona": "advisor",
+            "student_name": "Advisor View",
+            "course_title": "",
+            "current_module": {"title": "", "index": 0, "total": 0},
+            "assignments": [],
+            "stats": {
+                "avg_score": 0,
+                "submissions_count": student_count,
+                "total_assignments": 0,
+            },
+            "suggested_actions": [
+                {"label": "At-risk students", "prompt": "Which students in this course need attention?"},
+                {"label": "Engagement overview", "prompt": "Show me engagement trends for this course"},
+                {"label": "Degree progress", "prompt": "Which students are behind on degree requirements?"},
+            ],
+        }
+
+
+class AdminBriefGatherer:
+    """Gathers brief data for an admin persona."""
+
+    async def gather(self, person_id: str, course_id: str) -> dict[str, Any]:
+        roster = await _call_mcp(
+            "roster", "roster.list_by_course",
+            {"course_id": course_id},
+        )
+        return {"roster": roster, "persona": "admin"}
+
+    def build_card(self, raw_data: dict[str, Any]) -> dict[str, Any]:
+        roster = raw_data.get("roster", {})
+        students = roster.get("students", roster.get("enrollments", []))
+        student_count = len(students) if isinstance(students, list) else 0
+
+        return {
+            "persona": "admin",
+            "student_name": "Admin View",
+            "course_title": "",
+            "current_module": {"title": "", "index": 0, "total": 0},
+            "assignments": [],
+            "stats": {
+                "avg_score": 0,
+                "submissions_count": student_count,
+                "total_assignments": 0,
+            },
+            "suggested_actions": [
+                {"label": "Course overview", "prompt": "Give me an overview of this course's health"},
+                {"label": "Enrollment stats", "prompt": "What are the enrollment numbers for this course?"},
+                {"label": "Accessibility audit", "prompt": "Are there any accessibility concerns in this course?"},
+            ],
+        }
+
+
+_COACHING_PROMPTS: dict[str, str] = {
+    "student": COACHING_SYSTEM_PROMPT,
+    "faculty": """\
+You are an AI assistant in an LMS. A faculty member just opened their course dashboard.
+Write a brief, professional greeting (2-4 sentences).
+Mention class size, any pending items needing attention (submissions to grade, at-risk students).
+End with a concrete action they could take right now.
+Do NOT use JSON. Write plain markdown only.
+""",
+    "advisor": """\
+You are an AI assistant in an LMS. An academic advisor just opened a course view.
+Write a brief, professional greeting (2-3 sentences).
+Mention the number of students and any areas that might need advising attention.
+End with an offer to help identify at-risk students or review degree progress.
+Do NOT use JSON. Write plain markdown only.
+""",
+    "admin": """\
+You are an AI assistant in an LMS. An administrator just opened a course view.
+Write a brief, professional greeting (2-3 sentences).
+Provide a high-level overview of the course health.
+End with an offer to drill into enrollment, performance, or accessibility.
+Do NOT use JSON. Write plain markdown only.
+""",
+}
+
+
 class BriefGenerator:
     """Generates a course brief (card + coaching message) for any persona."""
 
     _gatherers: dict[str, BriefGatherer] = {
         "student": StudentBriefGatherer(),
+        "faculty": FacultyBriefGatherer(),
+        "advisor": AdvisorBriefGatherer(),
+        "admin": AdminBriefGatherer(),
     }
 
     def __init__(self) -> None:
@@ -171,6 +322,17 @@ class BriefGenerator:
     ) -> None:
         gatherer = self._gatherers.get(persona)
         if not gatherer:
+            # Unknown persona — still send a welcome message
+            await turn_store.add_events(turn_id, [{
+                "event": "final",
+                "payload": {
+                    "answer_markdown": "Welcome! How can I help you today?",
+                    "artifacts": [],
+                    "cost_usd": 0.0,
+                    "tokens": 0,
+                    "wall_time_ms": 0.0,
+                },
+            }])
             await turn_store.update_status(turn_id, "completed")
             return
 
@@ -178,7 +340,7 @@ class BriefGenerator:
             raw_data = await gatherer.gather(person_id, course_id)
             card = gatherer.build_card(raw_data)
 
-            chat_msg = await self._coaching_message(raw_data)
+            chat_msg = await self._coaching_message(persona, raw_data)
 
             events = [
                 {"event": "brief_card", "payload": card},
@@ -201,7 +363,7 @@ class BriefGenerator:
             await turn_store.add_events(turn_id, [{
                 "event": "final",
                 "payload": {
-                    "answer_markdown": "Welcome to your course! Ask me anything to get started.",
+                    "answer_markdown": "Welcome! Ask me anything to get started.",
                     "artifacts": [],
                     "cost_usd": 0.0,
                     "tokens": 0,
@@ -210,18 +372,19 @@ class BriefGenerator:
             }])
             await turn_store.update_status(turn_id, "completed")
 
-    async def _coaching_message(self, raw_data: dict[str, Any]) -> str:
+    async def _coaching_message(self, persona: str, raw_data: dict[str, Any]) -> str:
+        system = _COACHING_PROMPTS.get(persona, _COACHING_PROMPTS["student"])
         try:
             response = await self._client.messages.create(
                 model="claude-sonnet-4-6",
-                system=COACHING_SYSTEM_PROMPT,
+                system=system,
                 messages=[{
                     "role": "user",
-                    "content": f"Student data:\n{json.dumps(raw_data, indent=2, default=str)}",
+                    "content": f"Data:\n{json.dumps(raw_data, indent=2, default=str)}",
                 }],
                 max_tokens=300,
             )
             return response.content[0].text
         except Exception as exc:
             logger.warning("Coaching message generation failed: %s", exc)
-            return "Welcome to your course! I'm your tutor — ask me anything to get started."
+            return "Welcome! I'm here to help — ask me anything to get started."
