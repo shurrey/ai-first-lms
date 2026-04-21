@@ -47,6 +47,16 @@ Key routing rules:
 - Faculty creating quizzes or rubrics → assessment
 - "What courses should I take next semester?" → advising
 
+MULTI-AGENT actions (set action to exactly these strings when the request needs multiple agents):
+- "identify_and_help": find struggling students AND create study guides AND send messages → uses early_alert → content_generator → communication
+- "quiz_generation": create a quiz WITH supporting study materials → uses content_generator → assessment
+- "syllabus_draft": draft a course structure WITH supporting content → uses course_architect → content_generator
+- "risk_analysis": analyze at-risk students AND engagement trends simultaneously → uses early_alert + engagement_analyst
+
+For multi-agent actions, set the action to the pattern name above and include "agents" in parameters \
+listing the agents involved. Example:
+{"action": "identify_and_help", "agent": "early_alert", "parameters": {"agents": ["early_alert", "content_generator", "communication"]}, ...}
+
 Consider the persona when choosing the agent. Students typically interact with tutor, \
 assessment, content_generator, and advising. Faculty interact with all agents.
 
