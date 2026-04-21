@@ -5,11 +5,11 @@ import { useMutation } from "@tanstack/react-query";
 import { useSession } from "@/lib/session-context";
 import { useTurn } from "@/lib/turn-context";
 import { converse } from "@/lib/api";
-import { MessageList } from "./MessageList";
+import { ThinkingDrawer, buildThinkingSteps } from "./ThinkingDrawer";
+import { MessageBubble, type ChatMessage } from "./MessageBubble";
 import { ChatInput } from "./ChatInput";
 import { ClarifyPrompt } from "./ClarifyPrompt";
 import { ErrorDisplay } from "./ErrorDisplay";
-import type { ChatMessage } from "./MessageBubble";
 
 export function ChatPane() {
   const { sessionId } = useSession();
@@ -98,6 +98,13 @@ export function ChatPane() {
     }
   }, [turnState.status, turnState.error, turnState.activeTurnId]);
 
+  // Build thinking steps for the drawer
+  const thinkingSteps = buildThinkingSteps(
+    turnState.reasoning,
+    turnState.toolCalls,
+    turnState.thinkingMessages,
+  );
+
   const converseMutation = useMutation({
     mutationFn: (message: string) => {
       if (!sessionId) throw new Error("No active session");
@@ -136,7 +143,25 @@ export function ChatPane() {
 
   return (
     <main className="flex h-full flex-col overflow-hidden">
-      <MessageList messages={messages} />
+      <div className="flex-1 overflow-y-auto p-4 space-y-2">
+        {messages.length === 0 && turnState.status === "idle" && (
+          <div className="flex h-full items-center justify-center">
+            <p className="text-sm text-muted-foreground">Start a conversation with the AI-First LMS.</p>
+          </div>
+        )}
+        {messages.map((msg) => (
+          <MessageBubble key={msg.id} message={msg} />
+        ))}
+        {/* Thinking drawer: shows after the last user message, before the response */}
+        {thinkingSteps.length > 0 && (
+          <ThinkingDrawer
+            steps={thinkingSteps}
+            isStreaming={turnState.status === "streaming"}
+            tokenCount={turnState.finalResult?.tokens}
+            toolCallCount={thinkingSteps.filter(s => s.type === "tool_call").length}
+          />
+        )}
+      </div>
 
       {/* Clarification prompt */}
       {turnState.clarify && (
@@ -156,9 +181,7 @@ export function ChatPane() {
               onRetry={
                 turnState.error.retriable
                   ? () => {
-                      const lastUserMsg = [...messages]
-                        .reverse()
-                        .find((m) => m.role === "user");
+                      const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
                       if (lastUserMsg) handleSend(lastUserMsg.content);
                     }
                   : undefined
