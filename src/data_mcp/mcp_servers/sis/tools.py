@@ -85,7 +85,14 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                 JOIN nodes n ON n.id = e.course_node
                 LEFT JOIN evidence ev
                        ON ev.person_id = e.person_id
-                      AND ev.node_id   = e.course_node
+                      AND (
+                          ev.node_id = e.course_node
+                          OR ev.node_id IN (
+                              SELECT ai.id FROM nodes ai
+                              WHERE ai.kind = 'assessment_item'
+                              AND ai.metadata->>'course_id' = e.course_node::text
+                          )
+                      )
                 WHERE e.person_id = $1
                   AND n.kind = 'course'
                 GROUP BY n.title, e.enrolled_at, n.metadata->>'credits', n.metadata->>'term'
