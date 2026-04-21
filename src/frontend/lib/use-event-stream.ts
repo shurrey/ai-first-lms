@@ -15,6 +15,7 @@ import type {
   ReasoningPayload,
   PlanPayload,
   BriefCardPayload,
+  ThinkingPayload,
 } from "./events";
 
 export interface TurnState {
@@ -30,6 +31,7 @@ export interface TurnState {
   finalResult: FinalPayload | null;
   error: ErrorPayload | null;
   briefCard: BriefCardPayload | null;
+  thinkingMessages: string[];
 }
 
 type TurnAction =
@@ -50,6 +52,7 @@ const initialState: TurnState = {
   finalResult: null,
   error: null,
   briefCard: null,
+  thinkingMessages: [],
 };
 
 function turnReducer(state: TurnState, action: TurnAction): TurnState {
@@ -136,6 +139,15 @@ function turnReducer(state: TurnState, action: TurnAction): TurnState {
 
         case "brief_card":
           return { ...state, briefCard: event.payload as BriefCardPayload };
+
+        case "thinking":
+          return {
+            ...state,
+            thinkingMessages: [
+              ...state.thinkingMessages,
+              (payload as ThinkingPayload).text,
+            ],
+          };
 
         default:
           return state;

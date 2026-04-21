@@ -11,6 +11,7 @@ export const EventType = z.enum([
   "clarify",
   "approval_request",
   "brief_card",
+  "thinking",
   "final",
   "error",
 ]);
@@ -119,6 +120,12 @@ export const BriefCardPayload = z.object({
   suggested_actions: z.array(BriefSuggestedAction),
 });
 
+export const ThinkingPayload = z.object({
+  step_id: z.string(),
+  agent: z.string(),
+  text: z.string(),
+});
+
 export const Artifact = z.object({
   artifact_id: z.string(),
   type: z.enum([
@@ -184,6 +191,7 @@ const PAYLOAD_SCHEMAS: Record<string, z.ZodType> = {
   clarify: ClarifyPayload,
   approval_request: ApprovalRequestPayload,
   brief_card: BriefCardPayload,
+  thinking: ThinkingPayload,
   final: FinalPayload,
   error: ErrorPayload,
 };
@@ -208,6 +216,7 @@ export type ClarifyPayload = z.infer<typeof ClarifyPayload>;
 export type ApprovalRequestPayload = z.infer<typeof ApprovalRequestPayload>;
 export type BriefCardPayload = z.infer<typeof BriefCardPayload>;
 export type BriefAssignment = z.infer<typeof BriefAssignment>;
+export type ThinkingPayload = z.infer<typeof ThinkingPayload>;
 export type BriefSuggestedAction = z.infer<typeof BriefSuggestedAction>;
 export type FinalPayload = z.infer<typeof FinalPayload>;
 export type ErrorPayload = z.infer<typeof ErrorPayload>;
