@@ -223,7 +223,7 @@ services:
       context: .
       dockerfile: src/data_mcp/Dockerfile
     container_name: lms-db-seed
-    command: ["python", "-m", "data_mcp.seed.cs101", "--seed", "42"]
+    command: ["python", "-m", "data_mcp.seed.all_courses", "--seed", "42"]
     environment:
       LMS_DATABASE_URL: postgresql://${POSTGRES_USER:-lms}:${POSTGRES_PASSWORD:-lms_dev}@postgres:5432/${POSTGRES_DB:-lms_db}
     depends_on:
