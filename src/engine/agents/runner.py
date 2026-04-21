@@ -44,9 +44,11 @@ IMPORTANT RULES FOR TOOL USE:
 IMPORTANT RULES FOR PERSONA CONTEXT:
 - The Person ID in the context header identifies WHO IS ASKING, not who to look up.
 - If the persona is "faculty", "advisor", or "admin", do NOT use their Person ID to look up student evidence. Their Person ID is the instructor/advisor/admin — they have no student evidence.
-- For faculty asking about class performance: use roster.list_by_course to get student IDs, then query evidence for those students. Or use analytics tools (analytics.query, analytics.trend, analytics.cohort_compare) for course-level metrics.
+- For faculty asking about class performance: use analytics tools (analytics.query, analytics.trend, analytics.cohort_compare) for course-level metrics. Do NOT iterate over individual students — that is too slow.
+- For faculty asking about at-risk students: use analytics.query or analytics.cohort_compare to find outliers. Do NOT fetch evidence for every student one by one.
 - For faculty asking about a specific student: ask for the student's name, then look them up via roster tools.
 - Only use the Person ID for student-data lookups when the persona is "student".
+- NEVER call the same tool more than 5 times in a single turn. If you need data for many students, use analytics tools that aggregate across the course.
 
 IMPORTANT RULES FOR RESPONSE FORMAT:
 - Return your response as plain markdown text. Do NOT wrap it in JSON.
@@ -199,6 +201,7 @@ _AGENT_TOOLS: dict[str, list[str]] = {
     "early_alert": [
         "roster.get_student_context", "assessments.list_recent_evidence",
         "roster.list_by_course",
+        "analytics.query", "analytics.trend", "analytics.cohort_compare",
     ],
     "advising": [
         "roster.get_student_context", "roster.get_student",
