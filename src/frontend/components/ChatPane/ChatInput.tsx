@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, type FormEvent } from "react";
+import { useState, useCallback, useEffect, type FormEvent } from "react";
 import { Button } from "@/components/ui/button";
 
 interface ChatInputProps {
@@ -15,10 +15,12 @@ export function ChatInput({ onSend, disabled, loading, prefill, onPrefillConsume
   const [text, setText] = useState("");
 
   // Pre-fill text from brief card action buttons
-  if (prefill && prefill !== text) {
-    setText(prefill);
-    onPrefillConsumed?.();
-  }
+  useEffect(() => {
+    if (prefill) {
+      setText(prefill);
+      onPrefillConsumed?.();
+    }
+  }, [prefill, onPrefillConsumed]);
 
   const handleSubmit = useCallback(
     (e: FormEvent) => {
