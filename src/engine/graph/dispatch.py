@@ -149,20 +149,30 @@ async def _execute_step(
     })
     elapsed_ms = (time.monotonic() - start_time) * 1000
 
-    # Emit tool_call events
+    # Emit tool_call and thinking events
     for tc in result.get("tool_calls", []):
-        step_events.append({
-            "event": "agent_tool_call",
-            "payload": {
-                "step_id": step_id,
-                "agent": agent,
-                "tool": tc.get("tool", "unknown"),
-                "arguments": tc.get("arguments", {}),
-                "result_summary": tc.get("result_summary", ""),
-                "latency_ms": tc.get("latency_ms", 0),
-                "success": tc.get("success", True),
-            },
-        })
+        if tc.get("tool") == "__thinking__":
+            step_events.append({
+                "event": "thinking",
+                "payload": {
+                    "step_id": step_id,
+                    "agent": agent,
+                    "text": tc.get("result_summary", ""),
+                },
+            })
+        else:
+            step_events.append({
+                "event": "agent_tool_call",
+                "payload": {
+                    "step_id": step_id,
+                    "agent": agent,
+                    "tool": tc.get("tool", "unknown"),
+                    "arguments": tc.get("arguments", {}),
+                    "result_summary": tc.get("result_summary", ""),
+                    "latency_ms": tc.get("latency_ms", 0),
+                    "success": tc.get("success", True),
+                },
+            })
 
     # Emit agent_result
     agent_result: AgentResult = {
