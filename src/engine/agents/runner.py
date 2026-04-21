@@ -408,7 +408,7 @@ class ClaudeAgentRunner:
                 text_parts = [b.text for b in response.content if b.type == "text"]
                 final_text = "\n".join(text_parts) if text_parts else "Agent produced no text response."
                 break
-            else:
+        else:
             # Exhausted tool rounds
             final_text = "Agent exceeded maximum tool-use rounds."
 
