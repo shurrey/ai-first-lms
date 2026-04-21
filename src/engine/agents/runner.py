@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -30,6 +31,16 @@ _MCP_SERVERS: dict[str, str] = {
 
 # Max tool-use iterations to prevent infinite loops
 _MAX_TOOL_ROUNDS = 10
+
+_TOOL_USE_ADDENDUM = """
+
+---
+IMPORTANT RULES FOR TOOL USE:
+- If a tool returns empty results (e.g., {"results": []} or {"evidence": []}), do NOT retry the same tool with different parameters. Accept that there is no data.
+- If multiple tools return empty or error results, conclude that this course may not have data set up yet. Tell the user honestly: "It looks like this course doesn't have [assignments/content/etc.] set up yet. You may want to check with your instructor."
+- Never make more than 2 attempts at any single tool. If data isn't there, it isn't there.
+- Always respond to the user even if you couldn't find data. A helpful "no data found" message is better than silence.
+"""
 
 
 class AgentRunner(Protocol):
@@ -262,7 +273,8 @@ class ClaudeAgentRunner:
         start = time.monotonic()
 
         await _ensure_tool_schemas()
-        system_prompt = self._load_system_prompt(agent_name)
+        base_prompt = self._load_system_prompt(agent_name)
+        system_prompt = base_prompt + _TOOL_USE_ADDENDUM
         message = inputs.get("message", "")
         persona = inputs.get("persona", "student")
         person_id = inputs.get("person_id", "")
@@ -301,7 +313,45 @@ class ClaudeAgentRunner:
         tool_call_records: list[dict[str, Any]] = []
 
         try:
-            for _round in range(_MAX_TOOL_ROUNDS):
+            return await asyncio.wait_for(
+                self._tool_loop(agent_name, system_prompt, messages, claude_tools, tool_name_map, tool_call_records, start),
+                timeout=90.0,
+            )
+        except asyncio.TimeoutError:
+            elapsed_ms = (time.monotonic() - start) * 1000
+            logger.warning("Agent %s timed out after %.0fms", agent_name, elapsed_ms)
+            return {
+                "output": {"response_markdown": "I took too long processing your request. Please try a more specific question."},
+                "cost_usd": 0.0,
+                "tokens": 0,
+                "success": False,
+                "tool_calls": tool_call_records,
+            }
+        except Exception as exc:
+            elapsed_ms = (time.monotonic() - start) * 1000
+            logger.exception("Agent %s failed after %.0fms: %s", agent_name, elapsed_ms, exc)
+            return {
+                "output": {"response_markdown": f"Error from {agent_name}: {exc}"},
+                "cost_usd": 0.0,
+                "tokens": 0,
+                "success": False,
+                "tool_calls": tool_call_records,
+            }
+
+    async def _tool_loop(
+        self,
+        agent_name: str,
+        system_prompt: str,
+        messages: list[dict[str, Any]],
+        claude_tools: list[dict[str, Any]],
+        tool_name_map: dict[str, str],
+        tool_call_records: list[dict[str, Any]],
+        start: float,
+    ) -> dict[str, Any]:
+        total_input_tokens = 0
+        total_output_tokens = 0
+
+        for _round in range(_MAX_TOOL_ROUNDS):
                 response = await self._client.messages.create(
                     model=self._model,
                     system=system_prompt,
@@ -359,36 +409,24 @@ class ClaudeAgentRunner:
                 final_text = "\n".join(text_parts) if text_parts else "Agent produced no text response."
                 break
             else:
-                # Exhausted tool rounds
-                final_text = "Agent exceeded maximum tool-use rounds."
+            # Exhausted tool rounds
+            final_text = "Agent exceeded maximum tool-use rounds."
 
-            elapsed_ms = (time.monotonic() - start) * 1000
-            total_tokens = total_input_tokens + total_output_tokens
-            cost_usd = (total_input_tokens * 3.0 / 1_000_000) + (total_output_tokens * 15.0 / 1_000_000)
+        elapsed_ms = (time.monotonic() - start) * 1000
+        total_tokens = total_input_tokens + total_output_tokens
+        cost_usd = (total_input_tokens * 3.0 / 1_000_000) + (total_output_tokens * 15.0 / 1_000_000)
 
-            logger.info(
-                "Agent %s done in %.0fms (%d tokens, %d tool calls, $%.4f)",
-                agent_name, elapsed_ms, total_tokens, len(tool_call_records), cost_usd,
-            )
+        logger.info(
+            "Agent %s done in %.0fms (%d tokens, %d tool calls, $%.4f)",
+            agent_name, elapsed_ms, total_tokens, len(tool_call_records), cost_usd,
+        )
 
-            # If the agent returned structured JSON, extract the markdown
-            output = _parse_agent_output(final_text)
+        output = _parse_agent_output(final_text)
 
-            return {
-                "output": output,
-                "cost_usd": round(cost_usd, 6),
-                "tokens": total_tokens,
-                "success": True,
-                "tool_calls": tool_call_records,
-            }
-
-        except Exception as exc:
-            elapsed_ms = (time.monotonic() - start) * 1000
-            logger.exception("Agent %s failed after %.0fms: %s", agent_name, elapsed_ms, exc)
-            return {
-                "output": {"response_markdown": f"Error from {agent_name}: {exc}"},
-                "cost_usd": 0.0,
-                "tokens": 0,
-                "success": False,
-                "tool_calls": tool_call_records,
-            }
+        return {
+            "output": output,
+            "cost_usd": round(cost_usd, 6),
+            "tokens": total_tokens,
+            "success": True,
+            "tool_calls": tool_call_records,
+        }

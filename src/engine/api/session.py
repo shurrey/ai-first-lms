@@ -13,12 +13,16 @@ VALID_PERSONAS = {"student", "faculty", "advisor", "admin"}
 
 _COURSE_SLUG_TO_UUID: dict[str, str] = {
     "cs101": "bdd640fb-0667-4ad1-9c80-317fa3b1799d",
+    "math201": "23b8c1e9-3924-46de-beb1-3b9046685257",
+    "eng102": "bd9c66b3-ad3c-4d6d-9a3d-1fa7bc8960a9",
+    "bio150": "972a8469-1641-4f82-8b9d-2434e465e150",
 }
 
 _DEMO_STUDENTS: dict[str, tuple[str, str]] = {
-    "bdd640fb-0667-4ad1-9c80-317fa3b1799d": (
-        "17fc695a-07a0-4a6e-8822-e8f36c031199", "Emma Smith"
-    ),
+    "bdd640fb-0667-4ad1-9c80-317fa3b1799d": ("5be6128e-18c2-4797-a142-ea7d17be3111", "Emma Smith"),
+    "23b8c1e9-3924-46de-beb1-3b9046685257": ("5be6128e-18c2-4797-a142-ea7d17be3111", "Emma Smith"),
+    "bd9c66b3-ad3c-4d6d-9a3d-1fa7bc8960a9": ("a2bc372f-7412-4293-8729-4739614ff3d7", "Noah Brown"),
+    "972a8469-1641-4f82-8b9d-2434e465e150": ("5be6128e-18c2-4797-a142-ea7d17be3111", "Emma Smith"),
 }
 
 
