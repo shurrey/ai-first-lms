@@ -90,11 +90,18 @@ class StudentBriefGatherer:
         student_name = student_ctx.get("display_name", "Student")
         course_title = student_ctx.get("course_title", "")
 
-        evidence_list = evidence_data.get("evidence", evidence_data.get("recent_evidence", []))
+        # Prefer student_ctx evidence (has assignment titles from node join)
+        # Fall back to evidence_data if student_ctx doesn't have it
+        ctx_evidence = student_ctx.get("recent_evidence", [])
+        if ctx_evidence:
+            evidence_list = ctx_evidence
+        else:
+            evidence_list = evidence_data.get("evidence", evidence_data.get("recent_evidence", []))
+
         assignments = []
         scores = []
         for ev in evidence_list:
-            title = ev.get("title", ev.get("kind", "Unknown"))
+            title = ev.get("title") or ev.get("kind", "Unknown")
             score = ev.get("score")
             assignments.append({
                 "title": title,
