@@ -168,10 +168,7 @@ class FacultyBriefGatherer:
         students = [p for p in persons if p.get("role") == "student"]
         faculty = [p for p in persons if p.get("role") == "faculty"]
         all_evidence: list[dict[str, Any]] = []
-        # Sample up to 10 students for evidence (avoid 50 MCP calls)
-        import random
-        sample = random.sample(students, min(10, len(students))) if students else []
-        for student in sample:
+        for student in students:
             ev = await _call_mcp(
                 "assessments", "assessments.list_recent_evidence",
                 {"person_id": student["id"], "course_id": course_id},
@@ -221,8 +218,6 @@ class FacultyBriefGatherer:
                 at_risk += 1
 
         class_avg = round(sum(all_scores) / len(all_scores), 2) if all_scores else 0
-        sampled = len(student_avgs)
-
         # Find struggling students
         struggling = [
             {"name": name, "avg": round(sum(scores) / len(scores), 2)}
@@ -258,7 +253,6 @@ class FacultyBriefGatherer:
                     "medium": medium,
                     "low": low,
                     "at_risk": at_risk,
-                    "sampled": sampled,
                 },
                 "struggling_students": struggling[:5],
                 "class_avg": class_avg,

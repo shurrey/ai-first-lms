@@ -19,7 +19,6 @@ interface ScoreDistribution {
   medium: number;
   low: number;
   at_risk: number;
-  sampled: number;
 }
 
 interface StrugglingStudent {
@@ -75,9 +74,6 @@ export function FacultyPanel({ data }: { data: BriefCardPayload | null }) {
               <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-sm bg-orange-500" />{dist.low} low</span>
               <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-sm bg-red-500" />{dist.at_risk} risk</span>
             </div>
-            {dist.sampled < data.stats.submissions_count && (
-              <p className="mt-1 text-[8px] text-muted-foreground">Based on sample of {dist.sampled} students</p>
-            )}
           </div>
         </section>
       )}
