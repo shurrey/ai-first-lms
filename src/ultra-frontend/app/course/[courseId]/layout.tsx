@@ -1,6 +1,12 @@
+"use client";
+
+import { useState } from "react";
 import { CourseNav } from "@/components/CourseNav";
 import { CourseTabs } from "@/components/CourseTabs";
 import { CourseBanner } from "@/components/CourseBanner";
+import { AiFab } from "@/components/AiFab";
+import { AiPanel } from "@/components/AiPanel";
+import { use } from "react";
 
 const COURSE_TITLES: Record<string, string> = {
   "bdd640fb-0667-4ad1-9c80-317fa3b1799d": "CS 101 — Introduction to Computer Science",
@@ -9,15 +15,16 @@ const COURSE_TITLES: Record<string, string> = {
   "972a8469-1641-4f82-8b9d-2434e465e150": "BIO 150 — General Biology",
 };
 
-export default async function CourseLayout({
+export default function CourseLayout({
   children,
   params,
 }: {
   children: React.ReactNode;
   params: Promise<{ courseId: string }>;
 }) {
-  const { courseId } = await params;
+  const { courseId } = use(params);
   const title = COURSE_TITLES[courseId] ?? "Course";
+  const [aiOpen, setAiOpen] = useState(false);
 
   return (
     <div className="flex h-full flex-col">
@@ -25,6 +32,8 @@ export default async function CourseLayout({
       <CourseTabs courseId={courseId} />
       <CourseBanner courseId={courseId} title={title} />
       <div className="flex-1 overflow-auto">{children}</div>
+      <AiFab onClick={() => setAiOpen(true)} />
+      {aiOpen && <AiPanel onClose={() => setAiOpen(false)} courseTitle={title} />}
     </div>
   );
 }
