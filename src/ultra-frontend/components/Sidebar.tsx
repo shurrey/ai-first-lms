@@ -1,6 +1,7 @@
 "use client";
 
-import { BookOpen, Calendar, Globe, LayoutDashboard, LogOut, Mail, Settings, User } from "lucide-react";
+import { useState } from "react";
+import { BookOpen, Calendar, ChevronDown, Globe, LayoutDashboard, LogOut, Mail, Settings, User } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import clsx from "clsx";
@@ -13,8 +14,18 @@ const NAV_ITEMS = [
   { icon: Mail, label: "Messages", href: "#" },
 ];
 
+const PERSONAS = [
+  { key: "faculty", name: "Dr. Maria Torres", role: "Faculty" },
+  { key: "student", name: "Emma Smith", role: "Student" },
+  { key: "advisor", name: "Ms. Adaeze Okafor", role: "Advisor" },
+  { key: "admin", name: "Dr. Richard Hayes", role: "Admin" },
+] as const;
+
 export function Sidebar() {
   const pathname = usePathname();
+  const [personaIndex, setPersonaIndex] = useState(0);
+  const [showPersonaSwitcher, setShowPersonaSwitcher] = useState(false);
+  const currentPersona = PERSONAS[personaIndex];
 
   return (
     <aside className="flex h-full w-[200px] shrink-0 flex-col bg-[#262626] text-[#e5e5e5]">
@@ -22,9 +33,42 @@ export function Sidebar() {
         <div className="text-sm font-bold tracking-tight">AI-First LMS</div>
       </div>
 
-      <div className="flex items-center gap-2 px-4 py-3 text-sm">
-        <User className="h-4 w-4 text-gray-400" />
-        <span>Dr. Maria Torres</span>
+      {/* User / Persona switcher */}
+      <div className="relative border-b border-white/10">
+        <button
+          onClick={() => setShowPersonaSwitcher(!showPersonaSwitcher)}
+          className="flex w-full items-center gap-2 px-4 py-3 text-sm hover:bg-white/5 transition-colors"
+        >
+          <User className="h-4 w-4 text-gray-400" />
+          <div className="flex-1 text-left">
+            <div className="text-sm">{currentPersona.name}</div>
+            <div className="text-[10px] text-gray-500 uppercase tracking-wide">{currentPersona.role}</div>
+          </div>
+          <ChevronDown className={clsx("h-3 w-3 text-gray-500 transition-transform", showPersonaSwitcher && "rotate-180")} />
+        </button>
+
+        {showPersonaSwitcher && (
+          <div className="absolute left-0 right-0 top-full z-50 border-b border-white/10 bg-[#333] shadow-lg">
+            {PERSONAS.map((p, i) => (
+              <button
+                key={p.key}
+                onClick={() => { setPersonaIndex(i); setShowPersonaSwitcher(false); }}
+                className={clsx(
+                  "flex w-full items-center gap-2 px-4 py-2.5 text-sm transition-colors",
+                  i === personaIndex ? "bg-white/10 text-white" : "text-[#ccc] hover:bg-white/5"
+                )}
+              >
+                <div className="flex h-6 w-6 items-center justify-center rounded-full bg-gray-600 text-[9px] font-semibold text-white">
+                  {p.name.split(" ").map(w => w[0]).join("")}
+                </div>
+                <div className="text-left">
+                  <div>{p.name}</div>
+                  <div className="text-[10px] text-gray-500">{p.role}</div>
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       <nav className="flex-1 py-2">
