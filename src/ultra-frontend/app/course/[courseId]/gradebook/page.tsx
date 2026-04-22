@@ -3,6 +3,8 @@ import { useState } from "react";
 import { GradebookItems } from "@/components/GradebookItems";
 import { GradebookGrid } from "@/components/GradebookGrid";
 import { GradebookStudents } from "@/components/GradebookStudents";
+import { usePageData } from "@/lib/use-page-data";
+import { usePersona } from "@/lib/persona-context";
 import { Filter, Search, Settings, Sparkles } from "lucide-react";
 import clsx from "clsx";
 
@@ -42,8 +44,48 @@ const DEMO_STUDENTS_LIST = [
 
 type View = "items" | "grades" | "students";
 
+interface GradebookData {
+  students: Array<{ id: string; name: string; email: string; overall: number | null; grades: Record<string, number | null> }>;
+  assignments: string[];
+  totalStudents: number;
+}
+
 export default function GradebookPage() {
   const [view, setView] = useState<View>("items");
+  const { persona } = usePersona();
+  const { data: gradebookData, loading } = usePageData<GradebookData>("gradebook", {
+    students: [], assignments: [], totalStudents: 0,
+  });
+
+  // Build grid data from fetched data when available
+  const liveStudents = gradebookData.students.length > 0
+    ? gradebookData.students.map((s) => ({
+        id: s.id,
+        name: s.name,
+        overall: s.overall,
+        grades: s.grades,
+      }))
+    : DEMO_STUDENTS;
+
+  const liveAssignments = gradebookData.assignments.length > 0
+    ? gradebookData.assignments.map((title) => ({
+        id: title.toLowerCase().replace(/[^a-z0-9]/g, "_"),
+        title,
+        points: 100,
+        graded: gradebookData.totalStudents,
+        posted: gradebookData.totalStudents,
+      }))
+    : DEMO_ASSIGNMENTS;
+
+  const liveStudentsList = gradebookData.students.length > 0
+    ? gradebookData.students.map((s) => ({
+        id: s.id,
+        name: s.name,
+        email: s.email,
+        lastAccess: null as string | null,
+        overallGrade: s.overall,
+      }))
+    : DEMO_STUDENTS_LIST;
   const TABS: { key: View; label: string }[] = [
     { key: "items", label: "Gradable Items" },
     { key: "grades", label: "Grades" },
@@ -79,9 +121,10 @@ export default function GradebookPage() {
           <Settings className="h-4 w-4 text-gray-400 cursor-pointer" />
         </div>
       </div>
-      {view === "items" && <GradebookItems items={DEMO_ITEMS} />}
-      {view === "grades" && <GradebookGrid students={DEMO_STUDENTS} assignments={DEMO_ASSIGNMENTS} />}
-      {view === "students" && <GradebookStudents students={DEMO_STUDENTS_LIST} />}
+      {loading && <div className="p-8 text-center text-gray-400 text-sm">Loading gradebook data...</div>}
+      {!loading && view === "items" && <GradebookItems items={DEMO_ITEMS} />}
+      {!loading && view === "grades" && <GradebookGrid students={liveStudents} assignments={liveAssignments} />}
+      {!loading && view === "students" && <GradebookStudents students={liveStudentsList} />}
     </div>
   );
 }

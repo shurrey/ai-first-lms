@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { CourseCard } from "@/components/CourseCard";
 import { fetchPageData } from "@/lib/api";
+import { usePersona } from "@/lib/persona-context";
 import type { Course } from "@/lib/types";
 
 // Fallback data in case the API is slow
@@ -14,15 +15,19 @@ const FALLBACK_COURSES: Course[] = [
 ];
 
 export default function CoursesPage() {
+  const { persona } = usePersona();
   const [courses, setCourses] = useState<Course[]>(FALLBACK_COURSES);
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    fetchPageData<{ courses: Course[] }>("faculty", "cs101", "courses")
+    setLoading(true);
+    fetchPageData<{ courses: Course[] }>(persona, "cs101", "courses")
       .then((data) => {
         if (data.courses?.length) setCourses(data.courses);
       })
-      .catch(() => {}); // Use fallback
-  }, []);
+      .catch(() => {}) // Use fallback
+      .finally(() => setLoading(false));
+  }, [persona]);
 
   return (
     <div>
