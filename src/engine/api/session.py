@@ -98,6 +98,7 @@ async def create_session(body: CreateSessionRequest, request: Request) -> Create
                 course_id=course_id,
                 turn_id=brief_turn_id,
                 turn_store=turn_store,
+                page=body.page,
             )
         )
 

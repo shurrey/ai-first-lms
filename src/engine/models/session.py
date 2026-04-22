@@ -19,6 +19,7 @@ class CreateSessionRequest(BaseModel):
     persona: str
     person_id: str | None = None
     course_id: str
+    page: str | None = None  # Optional page brief: "content", "gradebook", "roster", "calendar", "analytics"
 
 
 class CreateSessionResponse(BaseModel):

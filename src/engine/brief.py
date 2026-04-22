@@ -560,7 +560,13 @@ class BriefGenerator:
         course_id: str,
         turn_id: str,
         turn_store: Any,
+        page: str | None = None,
     ) -> None:
+        # If a page-specific brief is requested, route to page gatherer
+        if page:
+            await self._generate_page_brief(page, persona, person_id, course_id, turn_id, turn_store)
+            return
+
         gatherer = self._gatherers.get(persona)
         if not gatherer:
             # Unknown persona — still send a welcome message
@@ -612,6 +618,225 @@ class BriefGenerator:
                 },
             }])
             await turn_store.update_status(turn_id, "completed")
+
+    async def _generate_page_brief(
+        self, page: str, persona: str, person_id: str, course_id: str, turn_id: str, turn_store: Any,
+    ) -> None:
+        """Generate structured data for a specific Ultra UI page."""
+        try:
+            if page == "content":
+                data = await self._page_content(course_id)
+            elif page == "gradebook":
+                data = await self._page_gradebook(person_id, course_id)
+            elif page == "roster":
+                data = await self._page_roster(course_id)
+            elif page == "calendar":
+                data = await self._page_calendar(course_id)
+            elif page == "analytics":
+                data = await self._page_analytics(person_id, course_id)
+            elif page == "courses":
+                data = await self._page_courses()
+            else:
+                data = {"error": f"Unknown page: {page}"}
+
+            events = [
+                {"event": "page_data", "payload": {"page": page, "data": data}},
+                {"event": "final", "payload": {
+                    "answer_markdown": "", "artifacts": [],
+                    "cost_usd": 0.0, "tokens": 0, "wall_time_ms": 0.0,
+                }},
+            ]
+            await turn_store.add_events(turn_id, events)
+            await turn_store.update_status(turn_id, "completed")
+
+        except Exception as exc:
+            logger.exception("Page brief generation failed for %s: %s", page, exc)
+            await turn_store.add_events(turn_id, [
+                {"event": "page_data", "payload": {"page": page, "data": {"error": str(exc)}}},
+                {"event": "final", "payload": {
+                    "answer_markdown": "", "artifacts": [],
+                    "cost_usd": 0.0, "tokens": 0, "wall_time_ms": 0.0,
+                }},
+            ])
+            await turn_store.update_status(turn_id, "completed")
+
+    async def _page_courses(self) -> dict[str, Any]:
+        """Course list page data."""
+        courses = await _discover_courses()
+        result = []
+        for c in courses:
+            roster = await _call_mcp("roster", "roster.list_by_course", {"course_id": c["id"]})
+            persons = roster.get("persons", [])
+            students = [p for p in persons if p.get("role") == "student"]
+            faculty = [p for p in persons if p.get("role") == "faculty"]
+            result.append({
+                "id": c["id"],
+                "title": c["title"],
+                "studentCount": len(students),
+                "instructor": faculty[0].get("display_name", "") if faculty else "",
+            })
+        return {"courses": result}
+
+    async def _page_content(self, course_id: str) -> dict[str, Any]:
+        """Content tab: modules + content items + faculty."""
+        modules = await _call_mcp("content", "content.list_modules", {"course_id": course_id})
+        roster = await _call_mcp("roster", "roster.list_by_course", {"course_id": course_id})
+        persons = roster.get("persons", [])
+        faculty = [p for p in persons if p.get("role") == "faculty"]
+
+        # Get content items for each module
+        module_list = modules.get("modules", [])
+        enriched_modules = []
+        for mod in module_list:
+            # Content items are stored with node_id = module_id
+            items_result = await _call_mcp("content", "content.retrieve", {"node_id": mod["id"]})
+            items = []
+            if not items_result.get("error"):
+                items.append({
+                    "id": items_result.get("id", ""),
+                    "title": items_result.get("title", ""),
+                    "kind": items_result.get("kind", "document") if "kind" in items_result else "document",
+                })
+            enriched_modules.append({
+                "id": mod["id"],
+                "title": mod["title"],
+                "order": mod.get("order", 0),
+                "items": items,
+            })
+
+        return {
+            "modules": enriched_modules,
+            "faculty": [{"name": f.get("display_name", ""), "id": f.get("id", "")} for f in faculty],
+        }
+
+    async def _page_gradebook(self, person_id: str, course_id: str) -> dict[str, Any]:
+        """Gradebook page: assignments + student grades."""
+        roster = await _call_mcp("roster", "roster.list_by_course", {"course_id": course_id})
+        persons = roster.get("persons", [])
+        students = [p for p in persons if p.get("role") == "student"]
+
+        # Get all student evidence for this course
+        student_grades = []
+        for student in students:
+            ctx = await _call_mcp("roster", "roster.get_student_context", {
+                "person_id": student["id"], "course_id": course_id,
+            })
+            evidence = ctx.get("recent_evidence", [])
+            grades: dict[str, float | None] = {}
+            for ev in evidence:
+                title = ev.get("title", ev.get("kind", ""))
+                if ev.get("score") is not None:
+                    grades[title] = round(ev["score"], 2)
+
+            all_scores = [s for s in grades.values() if s is not None]
+            overall = round(sum(all_scores) / len(all_scores), 2) if all_scores else None
+
+            student_grades.append({
+                "id": student["id"],
+                "name": student.get("display_name", ""),
+                "email": student.get("email", ""),
+                "overall": overall,
+                "grades": grades,
+            })
+
+        # Get assignment list
+        assignments_ctx = await _call_mcp("roster", "roster.get_student_context", {
+            "person_id": students[0]["id"] if students else person_id,
+            "course_id": course_id,
+        })
+        assignment_titles = list({
+            ev.get("title", ev.get("kind", ""))
+            for ev in assignments_ctx.get("recent_evidence", [])
+            if ev.get("title")
+        })
+
+        return {
+            "students": student_grades,
+            "assignments": sorted(assignment_titles),
+            "totalStudents": len(students),
+        }
+
+    async def _page_roster(self, course_id: str) -> dict[str, Any]:
+        """Roster page: students with scores and attributes."""
+        roster = await _call_mcp("roster", "roster.list_by_course", {"course_id": course_id})
+        persons = roster.get("persons", [])
+
+        enriched = []
+        for p in persons:
+            if p.get("role") != "student":
+                enriched.append({
+                    "id": p.get("id", ""),
+                    "name": p.get("display_name", ""),
+                    "email": "",
+                    "role": p.get("role", ""),
+                    "overall": None,
+                    "attributes": {},
+                })
+                continue
+
+            ev = await _call_mcp("assessments", "assessments.list_recent_evidence", {
+                "person_id": p["id"], "course_id": course_id,
+            })
+            evidence = ev.get("evidence", ev.get("recent_evidence", []))
+            scores = [e["score"] for e in evidence if e.get("score") is not None]
+            avg = round(sum(scores) / len(scores), 2) if scores else None
+
+            # Get student attributes
+            student = await _call_mcp("roster", "roster.get_student", {"person_id": p["id"]})
+
+            enriched.append({
+                "id": p.get("id", ""),
+                "name": p.get("display_name", ""),
+                "email": student.get("email", ""),
+                "role": p.get("role", "student"),
+                "overall": avg,
+                "attributes": student.get("attributes", {}),
+            })
+
+        return {"persons": enriched}
+
+    async def _page_calendar(self, course_id: str) -> dict[str, Any]:
+        """Calendar page: assignment due dates."""
+        # Get assignments from the catalog
+        modules = await _call_mcp("content", "content.list_modules", {"course_id": course_id})
+        # Assignments are assessment_item nodes with due_at metadata
+        # We can find them via the SIS catalog or by querying nodes directly
+        # For now, use a simple approach via the content search
+        result = await _call_mcp("content", "content.search", {"query": "assignment quiz exam", "course_id": course_id, "top_k": 20})
+        items = result.get("results", [])
+        return {
+            "events": items,
+            "modules": modules.get("modules", []),
+        }
+
+    async def _page_analytics(self, person_id: str, course_id: str) -> dict[str, Any]:
+        """Analytics page: course activity data."""
+        roster = await _call_mcp("roster", "roster.list_by_course", {"course_id": course_id})
+        persons = roster.get("persons", [])
+        students = [p for p in persons if p.get("role") == "student"]
+
+        analytics = []
+        for student in students:
+            ev = await _call_mcp("assessments", "assessments.list_recent_evidence", {
+                "person_id": student["id"], "course_id": course_id,
+            })
+            evidence = ev.get("evidence", ev.get("recent_evidence", []))
+            scores = [e["score"] for e in evidence if e.get("score") is not None]
+            avg = round(sum(scores) / len(scores), 2) if scores else None
+
+            # Count engagement events (no score)
+            engagement_count = len([e for e in evidence if e.get("score") is None])
+
+            analytics.append({
+                "id": student["id"],
+                "name": student.get("display_name", ""),
+                "overallGrade": avg,
+                "missedDueDates": 0,  # would need assignment due dates comparison
+                "hoursInCourse": round(engagement_count * 0.5, 1),  # rough proxy
+                "daysSinceAccess": 0,  # would need last access tracking
+            })
+
+        return {"students": analytics}
 
     async def _coaching_message(self, persona: str, raw_data: dict[str, Any]) -> str:
         system = _COACHING_PROMPTS.get(persona, _COACHING_PROMPTS["student"])

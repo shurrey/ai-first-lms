@@ -11,6 +11,7 @@ export const EventType = z.enum([
   "clarify",
   "approval_request",
   "brief_card",
+  "page_data",
   "thinking",
   "final",
   "error",
