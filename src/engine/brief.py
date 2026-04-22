@@ -627,9 +627,9 @@ class BriefGenerator:
             if page == "content":
                 data = await self._page_content(course_id)
             elif page == "gradebook":
-                data = await self._page_gradebook(person_id, course_id)
+                data = await self._page_gradebook(persona, person_id, course_id)
             elif page == "roster":
-                data = await self._page_roster(course_id)
+                data = await self._page_roster(persona, person_id, course_id)
             elif page == "calendar":
                 data = await self._page_calendar(course_id)
             elif page == "analytics":
@@ -709,15 +709,25 @@ class BriefGenerator:
             "faculty": [{"name": f.get("display_name", ""), "id": f.get("id", "")} for f in faculty],
         }
 
-    async def _page_gradebook(self, person_id: str, course_id: str) -> dict[str, Any]:
-        """Gradebook page: assignments + student grades."""
-        roster = await _call_mcp("roster", "roster.list_by_course", {"course_id": course_id})
-        persons = roster.get("persons", [])
-        students = [p for p in persons if p.get("role") == "student"]
+    async def _page_gradebook(self, persona: str, person_id: str, course_id: str) -> dict[str, Any]:
+        """Gradebook page: assignments + student grades. Students see only their own data."""
+        if persona == "student":
+            # Student view — only their own grades
+            students_to_query = [{"id": person_id, "display_name": "", "email": ""}]
+            # Get student name
+            student_info = await _call_mcp("roster", "roster.get_student", {"person_id": person_id})
+            if not student_info.get("error"):
+                students_to_query[0]["display_name"] = student_info.get("display_name", "")
+                students_to_query[0]["email"] = student_info.get("email", "")
+        else:
+            # Faculty/advisor/admin — all students
+            roster = await _call_mcp("roster", "roster.list_by_course", {"course_id": course_id})
+            persons = roster.get("persons", [])
+            students_to_query = [p for p in persons if p.get("role") == "student"]
 
-        # Get all student evidence for this course
+        # Get evidence for each student
         student_grades = []
-        for student in students:
+        for student in students_to_query:
             ctx = await _call_mcp("roster", "roster.get_student_context", {
                 "person_id": student["id"], "course_id": course_id,
             })
@@ -741,7 +751,7 @@ class BriefGenerator:
 
         # Get assignment list
         assignments_ctx = await _call_mcp("roster", "roster.get_student_context", {
-            "person_id": students[0]["id"] if students else person_id,
+            "person_id": students_to_query[0]["id"] if students_to_query else person_id,
             "course_id": course_id,
         })
         assignment_titles = list({
@@ -756,10 +766,14 @@ class BriefGenerator:
             "totalStudents": len(students),
         }
 
-    async def _page_roster(self, course_id: str) -> dict[str, Any]:
-        """Roster page: students with scores and attributes."""
+    async def _page_roster(self, persona: str, person_id: str, course_id: str) -> dict[str, Any]:
+        """Roster page: students with scores and attributes. Students see limited view."""
         roster = await _call_mcp("roster", "roster.list_by_course", {"course_id": course_id})
         persons = roster.get("persons", [])
+
+        # Students only see their own entry + faculty/instructors (not other students' grades)
+        if persona == "student":
+            persons = [p for p in persons if p.get("id") == person_id or p.get("role") != "student"]
 
         enriched = []
         for p in persons:
