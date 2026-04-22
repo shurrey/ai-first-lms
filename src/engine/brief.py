@@ -771,9 +771,8 @@ class BriefGenerator:
         roster = await _call_mcp("roster", "roster.list_by_course", {"course_id": course_id})
         persons = roster.get("persons", [])
 
-        # Students only see their own entry + faculty/instructors (not other students' grades)
-        if persona == "student":
-            persons = [p for p in persons if p.get("id") == person_id or p.get("role") != "student"]
+        # Students see everyone but without other students' grades (grades stripped below)
+        hide_other_grades = persona == "student"
 
         enriched = []
         for p in persons:
@@ -798,13 +797,16 @@ class BriefGenerator:
             # Get student attributes
             student = await _call_mcp("roster", "roster.get_student", {"person_id": p["id"]})
 
+            # Students can't see other students' grades
+            show_grade = not hide_other_grades or p.get("id") == person_id
+
             enriched.append({
                 "id": p.get("id", ""),
                 "name": p.get("display_name", ""),
-                "email": student.get("email", ""),
+                "email": student.get("email", "") if not hide_other_grades else "",
                 "role": p.get("role", "student"),
-                "overall": avg,
-                "attributes": student.get("attributes", {}),
+                "overall": avg if show_grade else None,
+                "attributes": student.get("attributes", {}) if show_grade else {},
             })
 
         return {"persons": enriched}
