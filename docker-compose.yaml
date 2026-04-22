@@ -216,6 +216,24 @@ services:
       retries: 5
     restart: unless-stopped
 
+  ultra-frontend:
+    build: src/ultra-frontend
+    container_name: lms-ultra-frontend
+    environment:
+      PORT: "3100"
+      NEXT_PUBLIC_API_URL: http://orchestrator:8000
+    ports:
+      - "3100:3100"
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3100/ || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   # --- Database seed (one-shot) ---
 
   db-seed:

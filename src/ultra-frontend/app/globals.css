@@ -1,0 +1,13 @@
+@import "tailwindcss";
+
+:root {
+  --ultra-nav: #262626;
+  --ultra-sidebar-active: #00bcd4;
+  --ultra-accent: #7c3aed;
+  --ultra-link: #1a73e8;
+  --ultra-ai: #6366f1;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
