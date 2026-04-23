@@ -1,6 +1,7 @@
 "use client";
 
 import type { BriefCardPayload } from "@/lib/events";
+import { MasteryPanel } from "./MasteryPanel";
 
 function sendPrompt(prompt: string) {
   const input = document.querySelector<HTMLInputElement>('form input[type="text"]');
@@ -15,6 +16,12 @@ function sendPrompt(prompt: string) {
 }
 
 export function StudentPanel({ data }: { data: BriefCardPayload | null }) {
+  // Show mastery view if mastery data is available
+  const masteryData = (data?.extra as any)?.mastery_data;
+  if (data && masteryData?.summary) {
+    return <MasteryPanel data={masteryData} />;
+  }
+
   if (!data) {
     return <p className="text-xs text-muted-foreground animate-pulse">Loading course data...</p>;
   }
