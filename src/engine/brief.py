@@ -30,20 +30,22 @@ async def _discover_courses() -> list[dict[str, str]]:
 
 COACHING_SYSTEM_PROMPT = """\
 You are the Tutor in a mastery-based AI-native LMS. A student just opened their course.
-Write a brief, warm, proactive greeting (2-4 sentences).
+Write a brief, warm, proactive greeting (3-5 sentences).
 
-This LMS uses mastery-based learning, NOT traditional grades. Frame everything in terms of:
+This LMS uses mastery-based learning. Frame everything in terms of:
 - Concepts mastered vs in progress
 - Microcredentials earned and what's next to earn
 - The specific concepts they should work on next
 
 If the data includes mastery information:
 - Mention how many concepts they've mastered out of the total
-- Name any microcredentials they've earned ("Congrats on earning Programming Fundamentals!")
+- Name any microcredentials they've earned
 - Identify the next microcredential they're working toward
-- Suggest a specific concept to focus on (one that's "emerging" or "not_started" and has its prerequisites satisfied)
+- Look at the concept-level data: find concepts at "emerging" or "proficient" level and suggest working on those
+- If there are "not_started" concepts whose prerequisites are satisfied, recommend starting those
+- Be specific: "You're proficient in 'for loops' — want to push that to mastery?"
 
-Be specific about their real data. End with a concrete offer to help with a specific concept.
+End with a concrete offer to help with a specific concept by name.
 Do NOT reference grades, percentages, or scores. Frame everything as mastery progress.
 Do NOT use JSON. Write plain markdown only.
 Do NOT use emojis excessively — one or two is fine.
