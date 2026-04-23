@@ -189,7 +189,7 @@ _AGENT_TOOLS: dict[str, list[str]] = {
         "roster.get_student_context",
         "assessments.list_recent_evidence",
         "graph.mastery_map", "graph.neighbors", "graph.prerequisites",
-        "attestations.get_student_attestations",
+        "attestations.get_student_attestations", "attestations.attest",
     ],
     "course_architect": [
         "standards.lookup", "content.library_search", "content.save_draft",
