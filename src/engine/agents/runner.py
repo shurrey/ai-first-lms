@@ -185,16 +185,19 @@ def _mcp_tools_to_claude_tools(mcp_tool_names: list[str]) -> list[dict[str, Any]
 # Map from agent name → list of MCP tools they can use (from manifests)
 _AGENT_TOOLS: dict[str, list[str]] = {
     "tutor": [
-        "content.retrieve", "content.search", "roster.get_student_context",
+        "content.retrieve", "content.search", "content.get_skill",
+        "roster.get_student_context",
         "assessments.list_recent_evidence",
         "graph.mastery_map", "graph.neighbors", "graph.prerequisites",
         "attestations.get_student_attestations",
     ],
     "course_architect": [
         "standards.lookup", "content.library_search", "content.save_draft",
+        "content.get_skill", "content.save_skill", "content.list_skills",
     ],
     "content_generator": [
         "content.retrieve", "content.search", "content.save_draft",
+        "content.get_skill", "content.save_skill", "content.list_skills",
     ],
     "assessment": [
         "assessments.create_question", "assessments.search_bank",
