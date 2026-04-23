@@ -140,6 +140,82 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                 ]
             }
 
+    # ── Conversation persistence ──
+
+    async def save_turn(args: dict[str, Any]) -> dict[str, Any]:
+        person_id = args.get("person_id")
+        course_id = args.get("course_id")
+        role = args.get("role")
+        content = args.get("content")
+        if not all([person_id, course_id, role, content]):
+            return {"error": "person_id, course_id, role, and content are required"}
+        async with pool.acquire() as conn:
+            turn_id = uuid.uuid4()
+            await conn.execute(
+                "INSERT INTO conversation_turns (id, person_id, course_id, role, content) VALUES ($1, $2, $3, $4, $5)",
+                turn_id, uuid.UUID(person_id), uuid.UUID(course_id), role, content,
+            )
+            return {"id": str(turn_id), "saved": True}
+
+    async def get_recent_turns(args: dict[str, Any]) -> dict[str, Any]:
+        person_id = args.get("person_id")
+        course_id = args.get("course_id")
+        limit = args.get("limit", 20)
+        if not person_id or not course_id:
+            return {"error": "person_id and course_id are required"}
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT role, content, created_at FROM conversation_turns
+                   WHERE person_id = $1 AND course_id = $2
+                   ORDER BY created_at DESC LIMIT $3""",
+                uuid.UUID(person_id), uuid.UUID(course_id), limit,
+            )
+            # Return in chronological order
+            turns = [
+                {"role": r["role"], "content": r["content"], "created_at": r["created_at"].isoformat()}
+                for r in reversed(rows)
+            ]
+            return {"turns": turns}
+
+    # ── Learner profile ──
+
+    async def get_learner_profile(args: dict[str, Any]) -> dict[str, Any]:
+        person_id = args.get("person_id")
+        if not person_id:
+            return {"error": "person_id is required"}
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT attributes FROM persons WHERE id = $1", uuid.UUID(person_id),
+            )
+            if not row:
+                return {"error": "Person not found"}
+            attrs = row["attributes"] or {}
+            import json
+            if isinstance(attrs, str):
+                attrs = json.loads(attrs)
+            return {"profile": attrs.get("learner_profile", ""), "person_id": person_id}
+
+    async def update_learner_profile(args: dict[str, Any]) -> dict[str, Any]:
+        person_id = args.get("person_id")
+        profile_md = args.get("profile_md")
+        if not person_id or profile_md is None:
+            return {"error": "person_id and profile_md are required"}
+        async with pool.acquire() as conn:
+            import json
+            # Get current attributes
+            row = await conn.fetchrow("SELECT attributes FROM persons WHERE id = $1", uuid.UUID(person_id))
+            if not row:
+                return {"error": "Person not found"}
+            attrs = row["attributes"] or {}
+            if isinstance(attrs, str):
+                attrs = json.loads(attrs)
+            attrs["learner_profile"] = profile_md
+            await conn.execute(
+                "UPDATE persons SET attributes = $1 WHERE id = $2",
+                json.dumps(attrs), uuid.UUID(person_id),
+            )
+            return {"updated": True}
+
     return [
         ToolDef(
             name="roster.get",
@@ -164,5 +240,37 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
             description="List persons enrolled in a course",
             input_schema={"type": "object", "properties": {"course_id": {"type": "string"}, "role": {"type": "string"}}, "required": ["course_id"]},
             handler=list_by_course,
+        ),
+        ToolDef(
+            name="roster.save_turn",
+            description="Save a conversation turn for persistence across sessions",
+            input_schema={"type": "object", "properties": {
+                "person_id": {"type": "string"}, "course_id": {"type": "string"},
+                "role": {"type": "string"}, "content": {"type": "string"},
+            }, "required": ["person_id", "course_id", "role", "content"]},
+            handler=save_turn, mutates=True, requires_approval=False,
+        ),
+        ToolDef(
+            name="roster.get_recent_turns",
+            description="Get recent conversation turns for a student in a course",
+            input_schema={"type": "object", "properties": {
+                "person_id": {"type": "string"}, "course_id": {"type": "string"},
+                "limit": {"type": "integer"},
+            }, "required": ["person_id", "course_id"]},
+            handler=get_recent_turns, mutates=False,
+        ),
+        ToolDef(
+            name="roster.get_learner_profile",
+            description="Get a student's learner profile — persistent observations about how they learn",
+            input_schema={"type": "object", "properties": {"person_id": {"type": "string"}}, "required": ["person_id"]},
+            handler=get_learner_profile, mutates=False,
+        ),
+        ToolDef(
+            name="roster.update_learner_profile",
+            description="Update a student's learner profile with new observations about their learning style",
+            input_schema={"type": "object", "properties": {
+                "person_id": {"type": "string"}, "profile_md": {"type": "string"},
+            }, "required": ["person_id", "profile_md"]},
+            handler=update_learner_profile, mutates=True, requires_approval=False,
         ),
     ]

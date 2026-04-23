@@ -316,3 +316,18 @@ CREATE VIEW gradebook AS
          g.committed_at
   FROM grades g
   JOIN submissions s ON s.id = g.submission_id;
+
+-- ============================================================================
+-- Conversation persistence
+-- ============================================================================
+
+CREATE TABLE conversation_turns (
+  id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+  person_id uuid NOT NULL REFERENCES persons(id),
+  course_id uuid NOT NULL,
+  role text NOT NULL,
+  content text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_conversation_turns_lookup ON conversation_turns (person_id, course_id, created_at DESC);

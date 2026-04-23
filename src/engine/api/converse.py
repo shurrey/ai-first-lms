@@ -49,8 +49,27 @@ async def _run_graph(app, session, turn: Turn) -> None:  # type: ignore[no-untyp
         graph = build_graph()
         compiled = graph.compile()
 
-        # Build conversation history from prior turns
+        # Build conversation history from persistent DB storage
         conversation = await app.state.turn_store.get_conversation_history(session.id)
+
+        # Also load persisted conversation turns from the database
+        if session.person_id and session.course_id:
+            try:
+                from engine.agents.runner import _call_mcp_tool
+                import json as _json
+                db_turns_raw = await _call_mcp_tool("roster.get_recent_turns", {
+                    "person_id": session.person_id,
+                    "course_id": session.course_id,
+                    "limit": 20,
+                })
+                db_turns_data = _json.loads(db_turns_raw) if isinstance(db_turns_raw, str) else db_turns_raw
+                db_turns = db_turns_data.get("turns", [])
+                if db_turns:
+                    # Prepend DB history before in-memory history
+                    persistent_history = [{"role": t["role"], "content": t["content"]} for t in db_turns]
+                    conversation = persistent_history + conversation
+            except Exception:
+                pass  # Fall back to in-memory only
 
         initial_state = {
             "session_id": session.id,
@@ -96,6 +115,33 @@ async def _run_graph(app, session, turn: Turn) -> None:  # type: ignore[no-untyp
         set_live_event_sink(None)  # Clean up
         await turn_store.update_status(turn.id, "completed")
         logger.info("Turn %s completed with %d events", turn.id, last_event_count)
+
+        # Persist conversation turns to database for cross-session continuity
+        if session.person_id and session.course_id and turn.message != "__brief__":
+            try:
+                from engine.agents.runner import _call_mcp_tool
+                # Save user message
+                await _call_mcp_tool("roster.save_turn", {
+                    "person_id": session.person_id,
+                    "course_id": session.course_id,
+                    "role": "user",
+                    "content": turn.message,
+                })
+                # Find the final answer from events
+                all_events = await turn_store.get_events(turn.id)
+                for ev in reversed(all_events):
+                    if ev.get("event") == "final":
+                        answer = ev.get("payload", {}).get("answer_markdown", "")
+                        if answer:
+                            await _call_mcp_tool("roster.save_turn", {
+                                "person_id": session.person_id,
+                                "course_id": session.course_id,
+                                "role": "assistant",
+                                "content": answer[:5000],  # Truncate very long responses
+                            })
+                        break
+            except Exception:
+                logger.warning("Failed to persist conversation turns", exc_info=True)
 
     except Exception:
         logger.exception("Graph run failed for turn %s", turn.id)
