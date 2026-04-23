@@ -11,7 +11,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 -- ============================================================================
 
 CREATE TYPE node_kind AS ENUM (
-  'concept', 'skill', 'artifact', 'assessment_item', 'resource', 'outcome', 'course', 'module'
+  'concept', 'skill', 'artifact', 'assessment_item', 'resource', 'outcome', 'course', 'module', 'microcredential'
 );
 
 CREATE TABLE nodes (
@@ -31,7 +31,7 @@ CREATE INDEX idx_nodes_tags ON nodes USING gin(tags);
 CREATE INDEX idx_nodes_embedding ON nodes USING hnsw (embedding vector_cosine_ops);
 
 CREATE TYPE edge_kind AS ENUM (
-  'prerequisite_of', 'part_of', 'evidence_of', 'aligned_with', 'variant_of'
+  'prerequisite_of', 'part_of', 'evidence_of', 'aligned_with', 'variant_of', 'contributes_to'
 );
 
 CREATE TABLE edges (
