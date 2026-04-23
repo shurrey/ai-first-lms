@@ -1001,6 +1001,134 @@ async def seed(conn: asyncpg.Connection, rng: random.Random) -> dict[str, Any]:
 
     summary["alignment_edges"] = alignment_count
 
+    # ── Microcredentials ──────────────────────────────────────────────────────
+    MICROCREDENTIALS = {
+        "cs101": [
+            {"title": "Programming Fundamentals", "modules": ["Variables & Data Types", "Control Flow", "Functions"]},
+            {"title": "Data & Algorithms", "modules": ["Data Structures", "Recursion", "Algorithms Basics"]},
+            {"title": "Software Engineering", "modules": ["Object-Oriented Programming", "File I/O", "Testing", "Debugging"]},
+            {"title": "Computing & Society", "modules": ["Ethics in Computing", "Final Project"]},
+        ],
+        "math201": [
+            {"title": "Foundations of Linear Systems", "modules": ["Systems of Linear Equations", "Vectors in Rn", "Matrix Operations", "Determinants"]},
+            {"title": "Abstract Structures", "modules": ["Vector Spaces", "Linear Transformations", "Eigenvalues & Eigenvectors"]},
+            {"title": "Applied Linear Algebra", "modules": ["Orthogonality", "Least Squares", "Symmetric Matrices", "Applications"]},
+        ],
+        "eng102": [
+            {"title": "Writing Foundations", "modules": ["The Writing Process", "Thesis Development", "Evidence & Reasoning", "Style & Voice"]},
+            {"title": "Research & Argumentation", "modules": ["Source Integration", "Rhetorical Analysis", "Argument Structure", "Research Methods"]},
+            {"title": "Scholarly Practice", "modules": ["Citation & Ethics", "Revision Strategies", "Portfolio Assembly"]},
+        ],
+        "bio150": [
+            {"title": "Cellular Biology", "modules": ["The Scientific Method", "Chemistry of Life", "Cell Structure"]},
+            {"title": "Cell Processes", "modules": ["Cellular Respiration", "Photosynthesis", "Cell Division"]},
+            {"title": "Genetics & Evolution", "modules": ["Mendelian Genetics", "DNA & Gene Expression", "Evolution"]},
+            {"title": "Ecology & Impact", "modules": ["Ecology & Ecosystems", "Biodiversity", "Human Impact"]},
+        ],
+    }
+
+    total_microcredentials = 0
+
+    for slug, mc_defs in MICROCREDENTIALS.items():
+        course_id = course_ids[slug]
+        mc_ids: list[uuid.UUID] = []
+
+        for mc_def in mc_defs:
+            mc_id = _uuid(rng)
+            mc_ids.append(mc_id)
+            await conn.execute(
+                "INSERT INTO nodes (id, kind, title, metadata) VALUES ($1, 'microcredential', $2, $3)",
+                mc_id, mc_def["title"],
+                json.dumps({"course_id": str(course_id)}),
+            )
+            total_microcredentials += 1
+
+            # contributes_to edges: module → microcredential
+            for mod_title in mc_def["modules"]:
+                mod_row = await conn.fetchrow(
+                    """SELECT id FROM nodes
+                       WHERE kind = 'module' AND title = $1
+                         AND metadata->>'course_id' = $2""",
+                    mod_title, str(course_id),
+                )
+                if mod_row:
+                    try:
+                        await conn.execute(
+                            "INSERT INTO edges (from_node, to_node, kind) VALUES ($1, $2, 'contributes_to')",
+                            mod_row["id"], mc_id,
+                        )
+                        total_edges += 1
+                    except asyncpg.exceptions.UniqueViolationError:
+                        pass
+
+        # prerequisite_of edges: sequential microcredentials within the course
+        for i in range(1, len(mc_ids)):
+            try:
+                await conn.execute(
+                    "INSERT INTO edges (from_node, to_node, kind) VALUES ($1, $2, 'prerequisite_of')",
+                    mc_ids[i - 1], mc_ids[i],
+                )
+                total_edges += 1
+            except asyncpg.exceptions.UniqueViolationError:
+                pass
+
+        # For high-performing students: mastery attestations for all concepts
+        # in the FIRST microcredential of each course they're enrolled in.
+        if not mc_ids:
+            continue
+        first_mc_def = mc_defs[0]
+        first_mc_id = mc_ids[0]
+
+        # Collect all concept node IDs that belong to modules in the first microcredential
+        first_mc_concept_ids: list[uuid.UUID] = []
+        for mod_title in first_mc_def["modules"]:
+            mod_row = await conn.fetchrow(
+                """SELECT id FROM nodes
+                   WHERE kind = 'module' AND title = $1
+                     AND metadata->>'course_id' = $2""",
+                mod_title, str(course_id),
+            )
+            if mod_row:
+                concept_rows = await conn.fetch(
+                    """SELECT n.id FROM nodes n
+                       JOIN edges e ON e.from_node = n.id
+                       WHERE e.to_node = $1 AND e.kind = 'part_of' AND n.kind = 'concept'""",
+                    mod_row["id"],
+                )
+                first_mc_concept_ids.extend(uuid.UUID(str(row["id"])) for row in concept_rows)
+
+        # Find the primary faculty for this course (first faculty member)
+        primary_faculty_id = faculty_per_course[slug][0]
+
+        # Find high-performing students enrolled in this course and attest mastery
+        # for all concepts in the first microcredential
+        enrolled = student_enrollments[slug]
+        for sid in enrolled:
+            # Re-derive tier: high performers are the first ~30%
+            # We use the same seeded RNG approach — but since tiers were shuffled
+            # we query existing attestation patterns to identify high performers.
+            # Simpler: attest all concepts for students who already have >=3 attestations
+            # in this course (proxy for "high" tier).
+            existing_count = await conn.fetchval(
+                """SELECT COUNT(*) FROM attestations a
+                   JOIN nodes n ON n.id = a.node_id
+                   WHERE a.person_id = $1
+                     AND n.metadata->>'course_id' = $2""",
+                sid, str(course_id),
+            )
+            if existing_count >= 3:
+                for cid in first_mc_concept_ids:
+                    try:
+                        await conn.execute(
+                            """INSERT INTO attestations (person_id, node_id, level, issuer_id)
+                               VALUES ($1, $2, 'mastery', $3)""",
+                            sid, cid, primary_faculty_id,
+                        )
+                    except asyncpg.exceptions.UniqueViolationError:
+                        pass  # already attested at some level; skip
+
+    summary["total_microcredentials"] = total_microcredentials
+
     # ── Summary ──
     summary["total_modules"] = total_modules
     summary["total_concepts"] = total_concepts
@@ -1043,6 +1171,7 @@ async def main(seed_value: int = 42) -> None:
         print(f"  Evidence records: {summary['total_evidence']}")
         print(f"  Submissions: {summary['total_submissions']}")
         print(f"  Grades: {summary['grade_count']} ({summary['committed_grades']} committed, {summary['draft_grades']} draft)")
+        print(f"  Microcredentials: {summary['total_microcredentials']}")
         print(f"  Alignment edges: {summary['alignment_edges']}")
         print(f"  Graph edges: {summary['total_edges']}")
     finally:
