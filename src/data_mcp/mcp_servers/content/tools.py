@@ -237,6 +237,66 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                 prerequisites.append({"id": str(r["id"]), "title": r["title"], "kind": r["kind"], "satisfied": satisfied})
             return {"prerequisites": prerequisites}
 
+    async def get_skill(args: dict[str, Any]) -> dict[str, Any]:
+        concept_id = args.get("concept_id")
+        if not concept_id:
+            return {"error": "concept_id is required"}
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """SELECT ci.id, ci.body_md, n.title as concept_title
+                   FROM content_items ci JOIN nodes n ON n.id = ci.node_id
+                   WHERE ci.node_id = $1 AND ci.kind = 'skill'""",
+                uuid.UUID(concept_id))
+            if not row:
+                return {"error": "No skill content for this concept"}
+            return {"id": str(row["id"]), "concept_title": row["concept_title"], "body_md": row["body_md"]}
+
+    async def save_skill_handler(args: dict[str, Any]) -> dict[str, Any]:
+        concept_id = args.get("concept_id")
+        body_md = args.get("body_md")
+        author_id = args.get("author_id")
+        if not concept_id or not body_md:
+            return {"error": "concept_id and body_md are required"}
+        async with pool.acquire() as conn:
+            cid = uuid.UUID(concept_id)
+            aid = uuid.UUID(author_id) if author_id else None
+            concept = await conn.fetchrow("SELECT title FROM nodes WHERE id = $1", cid)
+            if not concept:
+                return {"error": "Concept not found"}
+            existing = await conn.fetchrow("SELECT id FROM content_items WHERE node_id = $1 AND kind = 'skill'", cid)
+            if existing:
+                await conn.execute("UPDATE content_items SET body_md = $1, author_id = $2 WHERE id = $3", body_md, aid, existing["id"])
+                return {"id": str(existing["id"]), "updated": True}
+            else:
+                new_id = uuid.uuid4()
+                await conn.execute(
+                    "INSERT INTO content_items (id, node_id, kind, title, body_md, author_id) VALUES ($1, $2, 'skill', $3, $4, $5)",
+                    new_id, cid, f"Skill: {concept['title']}", body_md, aid)
+                return {"id": str(new_id), "created": True}
+
+    async def list_skills(args: dict[str, Any]) -> dict[str, Any]:
+        course_id = args.get("course_id")
+        if not course_id:
+            return {"error": "course_id is required"}
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT c.id as concept_id, c.title as concept_title, m.title as module_title,
+                          ci.id IS NOT NULL as has_skill, COALESCE(length(ci.body_md), 0) as char_count
+                   FROM modules mod
+                   JOIN edges e ON e.to_node = mod.module_id AND e.kind = 'part_of'
+                   JOIN nodes c ON c.id = e.from_node AND c.kind = 'concept'
+                   JOIN nodes m ON m.id = mod.module_id
+                   LEFT JOIN content_items ci ON ci.node_id = c.id AND ci.kind = 'skill'
+                   WHERE mod.course_id = $1
+                   ORDER BY (mod.metadata->>'order')::int, c.title""",
+                uuid.UUID(course_id))
+            return {"skills": [
+                {"concept_id": str(r["concept_id"]), "concept_title": r["concept_title"],
+                 "module_title": r["module_title"], "has_skill": r["has_skill"],
+                 "word_count": r["char_count"] // 5 if r["char_count"] else 0}
+                for r in rows
+            ]}
+
     async def graph_mastery_map(args: dict[str, Any]) -> dict[str, Any]:
         person_id_str = args.get("person_id")
         course_id_str = args.get("course_id")
@@ -387,5 +447,43 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                 "person_id": {"type": "string"}, "course_id": {"type": "string"},
             }, "required": ["person_id", "course_id"]},
             handler=graph_mastery_map, mutates=False,
+        ),
+        ToolDef(
+            name="content.get_skill",
+            description="Get the skill content (agent knowledge) for a concept",
+            input_schema={
+                "type": "object",
+                "properties": {"concept_id": {"type": "string"}},
+                "required": ["concept_id"],
+            },
+            handler=get_skill,
+            mutates=False,
+        ),
+        ToolDef(
+            name="content.save_skill",
+            description="Create or update skill content for a concept",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "concept_id": {"type": "string"},
+                    "body_md": {"type": "string"},
+                    "author_id": {"type": "string"},
+                },
+                "required": ["concept_id", "body_md"],
+            },
+            handler=save_skill_handler,
+            mutates=True,
+            requires_approval=False,
+        ),
+        ToolDef(
+            name="content.list_skills",
+            description="List all concepts in a course with their skill content status",
+            input_schema={
+                "type": "object",
+                "properties": {"course_id": {"type": "string"}},
+                "required": ["course_id"],
+            },
+            handler=list_skills,
+            mutates=False,
         ),
     ]
