@@ -194,6 +194,108 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                 ]
             }
 
+    async def graph_neighbors(args: dict[str, Any]) -> dict[str, Any]:
+        node_id = args.get("node_id")
+        direction = args.get("direction", "both")
+        kind_filter = args.get("kinds")
+        if not node_id:
+            return {"error": "node_id is required"}
+        async with pool.acquire() as conn:
+            nid = uuid.UUID(node_id)
+            queries = []
+            if direction in ("outgoing", "both"):
+                q = "SELECT e.to_node AS nid, e.kind AS ek FROM edges e WHERE e.from_node = $1"
+                if kind_filter: q += f" AND e.kind = '{kind_filter}'"
+                queries.append(q)
+            if direction in ("incoming", "both"):
+                q = "SELECT e.from_node AS nid, e.kind AS ek FROM edges e WHERE e.to_node = $1"
+                if kind_filter: q += f" AND e.kind = '{kind_filter}'"
+                queries.append(q)
+            rows = await conn.fetch(" UNION ".join(queries), nid)
+            nodes = []
+            for r in rows:
+                node = await conn.fetchrow("SELECT id, title, kind FROM nodes WHERE id = $1", r["nid"])
+                if node:
+                    nodes.append({"id": str(node["id"]), "title": node["title"], "kind": node["kind"], "edge_kind": r["ek"]})
+            return {"nodes": nodes}
+
+    async def graph_prerequisites(args: dict[str, Any]) -> dict[str, Any]:
+        node_id = args.get("node_id")
+        person_id = args.get("person_id")
+        if not node_id:
+            return {"error": "node_id is required"}
+        async with pool.acquire() as conn:
+            nid = uuid.UUID(node_id)
+            rows = await conn.fetch(
+                "SELECT n.id, n.title, n.kind FROM edges e JOIN nodes n ON n.id = e.from_node WHERE e.to_node = $1 AND e.kind = 'prerequisite_of'", nid)
+            prerequisites = []
+            for r in rows:
+                satisfied = False
+                if person_id:
+                    att = await conn.fetchrow("SELECT level FROM attestations WHERE person_id = $1 AND node_id = $2 AND level = 'mastery'", uuid.UUID(person_id), r["id"])
+                    satisfied = att is not None
+                prerequisites.append({"id": str(r["id"]), "title": r["title"], "kind": r["kind"], "satisfied": satisfied})
+            return {"prerequisites": prerequisites}
+
+    async def graph_mastery_map(args: dict[str, Any]) -> dict[str, Any]:
+        person_id_str = args.get("person_id")
+        course_id_str = args.get("course_id")
+        if not person_id_str or not course_id_str:
+            return {"error": "person_id and course_id are required"}
+        async with pool.acquire() as conn:
+            pid = uuid.UUID(person_id_str)
+            cid = uuid.UUID(course_id_str)
+            person = await conn.fetchrow("SELECT display_name FROM persons WHERE id = $1", pid)
+            student_name = person["display_name"] if person else "Unknown"
+            course = await conn.fetchrow("SELECT title FROM nodes WHERE id = $1 AND kind = 'course'", cid)
+            course_title = course["title"] if course else "Unknown"
+
+            mc_rows = await conn.fetch(
+                "SELECT id, title FROM nodes WHERE kind = 'microcredential' AND metadata->>'course_id' = $1 ORDER BY title", str(cid))
+
+            total_m = total_p = total_e = total_ns = total_c = mc_earned = 0
+            microcredentials = []
+            for mc in mc_rows:
+                mod_rows = await conn.fetch(
+                    """SELECT n.id, n.title FROM edges e JOIN nodes n ON n.id = e.from_node
+                       WHERE e.to_node = $1 AND e.kind = 'contributes_to' AND n.kind = 'module'
+                       ORDER BY (n.metadata->>'order')::int NULLS LAST""", mc["id"])
+                mc_m = mc_p = mc_e = mc_ns = mc_t = 0
+                modules = []
+                for mod in mod_rows:
+                    concept_rows = await conn.fetch(
+                        """SELECT n.id, n.title FROM edges e JOIN nodes n ON n.id = e.from_node
+                           WHERE e.to_node = $1 AND e.kind = 'part_of' AND n.kind = 'concept' ORDER BY n.title""", mod["id"])
+                    concepts = []
+                    for c in concept_rows:
+                        att = await conn.fetchrow(
+                            "SELECT level FROM attestations WHERE person_id = $1 AND node_id = $2 ORDER BY issued_at DESC LIMIT 1", pid, c["id"])
+                        level = att["level"] if att else "not_started"
+                        if level == "mastery": mc_m += 1
+                        elif level == "proficient": mc_p += 1
+                        elif level == "emerging": mc_e += 1
+                        else: mc_ns += 1
+                        mc_t += 1
+                        concepts.append({"id": str(c["id"]), "title": c["title"], "level": level})
+                    modules.append({"id": str(mod["id"]), "title": mod["title"], "concepts": concepts})
+                earned = mc_m == mc_t and mc_t > 0
+                if earned: mc_earned += 1
+                total_m += mc_m; total_p += mc_p; total_e += mc_e; total_ns += mc_ns; total_c += mc_t
+                microcredentials.append({
+                    "id": str(mc["id"]), "title": mc["title"], "earned": earned,
+                    "progress": {"mastery": mc_m, "proficient": mc_p, "emerging": mc_e, "not_started": mc_ns},
+                    "total_concepts": mc_t, "modules": modules,
+                })
+            return {
+                "student_name": student_name, "course_title": course_title,
+                "microcredentials": microcredentials,
+                "summary": {
+                    "total_concepts": total_c, "mastery": total_m, "proficient": total_p,
+                    "emerging": total_e, "not_started": total_ns,
+                    "microcredentials_earned": mc_earned, "microcredentials_total": len(microcredentials),
+                },
+            }
+
     return [
         ToolDef(
             name="content.retrieve",
@@ -260,5 +362,30 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                 "required": ["course_id"],
             },
             handler=list_modules,
+        ),
+        ToolDef(
+            name="graph.neighbors",
+            description="Get neighboring nodes in the knowledge graph by edge direction and kind",
+            input_schema={"type": "object", "properties": {
+                "node_id": {"type": "string"}, "direction": {"type": "string", "enum": ["both", "incoming", "outgoing"]},
+                "depth": {"type": "integer"}, "kinds": {"type": "string"},
+            }, "required": ["node_id"]},
+            handler=graph_neighbors, mutates=False,
+        ),
+        ToolDef(
+            name="graph.prerequisites",
+            description="Get prerequisites for a node, optionally checking if a student has satisfied them",
+            input_schema={"type": "object", "properties": {
+                "node_id": {"type": "string"}, "person_id": {"type": "string"},
+            }, "required": ["node_id"]},
+            handler=graph_prerequisites, mutates=False,
+        ),
+        ToolDef(
+            name="graph.mastery_map",
+            description="Get the full mastery state for a student in a course: microcredentials, concepts, attestation levels",
+            input_schema={"type": "object", "properties": {
+                "person_id": {"type": "string"}, "course_id": {"type": "string"},
+            }, "required": ["person_id", "course_id"]},
+            handler=graph_mastery_map, mutates=False,
         ),
     ]
