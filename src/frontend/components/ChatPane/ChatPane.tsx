@@ -18,6 +18,14 @@ export function ChatPane() {
 
   // Track which turn IDs we've already rendered messages for
   const renderedRef = useRef(new Set<string>());
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll to bottom when messages change or thinking updates
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [messages, turnState.status, turnState.reasoning, turnState.toolCalls]);
 
   // Clear messages and rendered set when session changes
   useEffect(() => {
@@ -143,7 +151,7 @@ export function ChatPane() {
 
   return (
     <main className="flex h-full flex-col overflow-hidden">
-      <div className="flex-1 overflow-y-auto p-4"><div className="mx-auto max-w-3xl space-y-2">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto p-4"><div className="mx-auto max-w-3xl space-y-2">
         {messages.length === 0 && turnState.status === "idle" && (
           <div className="flex h-full items-center justify-center">
             <p className="text-sm text-muted-foreground">Start a conversation with the AI-First LMS.</p>
