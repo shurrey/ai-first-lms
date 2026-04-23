@@ -74,7 +74,7 @@ export const AgentResultPayload = z.object({
 export const ClarifyPayload = z.object({
   question: z.string(),
   reason: z.string(),
-  options: z.array(z.string()).optional(),
+  options: z.array(z.string()).nullable().optional(),
 });
 
 export const ApprovalRequestPayload = z.object({
