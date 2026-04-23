@@ -192,6 +192,59 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                 "committed_at": committed_at.isoformat(),
             }
 
+    async def attest(args: dict[str, Any]) -> dict[str, Any]:
+        person_id = args.get("person_id")
+        node_id = args.get("node_id")
+        level = args.get("level")
+        issuer_id = args.get("issuer_id")
+        if not person_id or not node_id or not level:
+            return {"error": "person_id, node_id, and level are required"}
+        if level not in ("emerging", "proficient", "mastery"):
+            return {"error": "level must be emerging, proficient, or mastery"}
+        async with pool.acquire() as conn:
+            pid = uuid.UUID(person_id)
+            nid = uuid.UUID(node_id)
+            iid = uuid.UUID(issuer_id) if issuer_id else None
+            existing = await conn.fetchrow(
+                "SELECT id, level FROM attestations WHERE person_id = $1 AND node_id = $2", pid, nid)
+            if existing:
+                await conn.execute(
+                    "UPDATE attestations SET level = $1, issuer_id = $2, issued_at = now() WHERE id = $3",
+                    level, iid, existing["id"])
+                return {"attestation_id": str(existing["id"]), "updated": True, "previous_level": existing["level"]}
+            else:
+                att_id = uuid.uuid4()
+                await conn.execute(
+                    "INSERT INTO attestations (id, person_id, node_id, level, issuer_id) VALUES ($1, $2, $3, $4, $5)",
+                    att_id, pid, nid, level, iid)
+                return {"attestation_id": str(att_id), "created": True}
+
+    async def get_student_attestations(args: dict[str, Any]) -> dict[str, Any]:
+        person_id = args.get("person_id")
+        course_id = args.get("course_id")
+        if not person_id:
+            return {"error": "person_id is required"}
+        async with pool.acquire() as conn:
+            pid = uuid.UUID(person_id)
+            if course_id:
+                rows = await conn.fetch(
+                    """SELECT a.node_id, n.title AS node_title, a.level, a.issued_at
+                       FROM attestations a
+                       JOIN nodes n ON n.id = a.node_id
+                       JOIN edges e1 ON e1.from_node = n.id AND e1.kind = 'part_of'
+                       JOIN edges e2 ON e2.from_node = e1.to_node AND e2.kind = 'part_of'
+                       WHERE a.person_id = $1 AND e2.to_node = $2
+                       ORDER BY a.issued_at DESC""", pid, uuid.UUID(course_id))
+            else:
+                rows = await conn.fetch(
+                    """SELECT a.node_id, n.title AS node_title, a.level, a.issued_at
+                       FROM attestations a JOIN nodes n ON n.id = a.node_id
+                       WHERE a.person_id = $1 ORDER BY a.issued_at DESC""", pid)
+            return {"attestations": [
+                {"node_id": str(r["node_id"]), "node_title": r["node_title"], "level": r["level"], "issued_at": r["issued_at"].isoformat()}
+                for r in rows
+            ]}
+
     async def list_recent_evidence(args: dict[str, Any]) -> dict[str, Any]:
         person_id = args["person_id"]
         node_ids = args.get("node_ids")
@@ -339,5 +392,23 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                 "required": ["person_id"],
             },
             handler=list_recent_evidence,
+        ),
+        ToolDef(
+            name="attestations.attest",
+            description="Create or update a mastery attestation for a student on a concept",
+            input_schema={"type": "object", "properties": {
+                "person_id": {"type": "string"}, "node_id": {"type": "string"},
+                "level": {"type": "string", "enum": ["emerging", "proficient", "mastery"]},
+                "issuer_id": {"type": "string"},
+            }, "required": ["person_id", "node_id", "level"]},
+            handler=attest, mutates=True, requires_approval=False,
+        ),
+        ToolDef(
+            name="attestations.get_student_attestations",
+            description="Get all mastery attestations for a student, optionally filtered by course",
+            input_schema={"type": "object", "properties": {
+                "person_id": {"type": "string"}, "course_id": {"type": "string"},
+            }, "required": ["person_id"]},
+            handler=get_student_attestations, mutates=False,
         ),
     ]
