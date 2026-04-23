@@ -85,11 +85,15 @@ class StudentBriefGatherer:
             "content", "content.list_modules",
             {"course_id": course_id},
         )
+        mastery = await _call_mcp("content", "graph.mastery_map", {
+            "person_id": person_id, "course_id": course_id,
+        })
 
         return {
             "student_ctx": student_ctx,
             "evidence": evidence,
             "modules": modules,
+            "mastery": mastery,
         }
 
     def build_card(self, raw_data: dict[str, Any]) -> dict[str, Any]:
@@ -163,6 +167,9 @@ class StudentBriefGatherer:
                 "total_assignments": len(assignments),
             },
             "suggested_actions": suggested_actions,
+            "extra": {
+                "mastery_data": raw_data.get("mastery"),
+            },
         }
 
 
@@ -636,6 +643,8 @@ class BriefGenerator:
                 data = await self._page_analytics(person_id, course_id)
             elif page == "courses":
                 data = await self._page_courses()
+            elif page == "mastery":
+                data = await self._page_mastery(person_id, course_id)
             else:
                 data = {"error": f"Unknown page: {page}"}
 
@@ -853,6 +862,13 @@ class BriefGenerator:
             })
 
         return {"students": analytics}
+
+    async def _page_mastery(self, person_id: str, course_id: str) -> dict[str, Any]:
+        """Mastery map page data."""
+        return await _call_mcp("content", "graph.mastery_map", {
+            "person_id": person_id,
+            "course_id": course_id,
+        })
 
     async def _coaching_message(self, persona: str, raw_data: dict[str, Any]) -> str:
         system = _COACHING_PROMPTS.get(persona, _COACHING_PROMPTS["student"])

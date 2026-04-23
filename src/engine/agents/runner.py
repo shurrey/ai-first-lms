@@ -187,6 +187,8 @@ _AGENT_TOOLS: dict[str, list[str]] = {
     "tutor": [
         "content.retrieve", "content.search", "roster.get_student_context",
         "assessments.list_recent_evidence",
+        "graph.mastery_map", "graph.neighbors", "graph.prerequisites",
+        "attestations.get_student_attestations",
     ],
     "course_architect": [
         "standards.lookup", "content.library_search", "content.save_draft",
@@ -207,6 +209,7 @@ _AGENT_TOOLS: dict[str, list[str]] = {
         "roster.list_by_course",
         "analytics.query", "analytics.trend", "analytics.cohort_compare",
         "sis.get_transcript", "sis.catalog_search",
+        "graph.mastery_map", "attestations.get_student_attestations",
     ],
     "advising": [
         "roster.get_student_context", "roster.get_student",
