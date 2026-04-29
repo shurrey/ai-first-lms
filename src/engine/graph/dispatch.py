@@ -50,6 +50,7 @@ async def dispatch(state: OrchestratorState) -> OrchestratorState:
     persona = state.get("persona", "student")
     person_id = state.get("person_id", "")
     course_id = state.get("course_id", "")
+    session_id = state.get("session_id", "")
     conversation = state.get("conversation", [])
     events: list[dict[str, Any]] = list(state.get("events_emitted", []))
     results: list[AgentResult] = list(state.get("agent_results", []))
@@ -70,7 +71,7 @@ async def dispatch(state: OrchestratorState) -> OrchestratorState:
         # Execute ready steps (potentially in parallel)
         tasks = []
         for step in ready:
-            tasks.append(_execute_step(runner, step, message, events, persona, person_id, course_id, conversation))
+            tasks.append(_execute_step(runner, step, message, events, persona, person_id, course_id, conversation, session_id))
 
         step_results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -132,6 +133,7 @@ async def _execute_step(
     person_id: str = "",
     course_id: str = "",
     conversation: list[dict[str, str]] | None = None,
+    session_id: str = "",
 ) -> dict[str, Any]:
     """Execute a single plan step and return events + result."""
     step_id = step["step_id"]
@@ -164,6 +166,7 @@ async def _execute_step(
         "person_id": person_id,
         "course_id": course_id,
         "conversation": conversation or [],
+        "session_id": session_id,
         "_on_event": on_agent_event,
     })
     elapsed_ms = (time.monotonic() - start_time) * 1000

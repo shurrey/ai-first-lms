@@ -370,6 +370,7 @@ class ClaudeAgentRunner:
         persona = inputs.get("persona", "student")
         person_id = inputs.get("person_id", "")
         course_id = inputs.get("course_id", "")
+        session_id = inputs.get("session_id", "")
         conversation = inputs.get("conversation", [])
 
         # Build context prefix — tell the agent who they are and who they're NOT
@@ -429,7 +430,7 @@ class ClaudeAgentRunner:
 
         try:
             return await asyncio.wait_for(
-                self._tool_loop(agent_name, system_prompt, messages, claude_tools, tool_name_map, tool_call_records, start, on_event),
+                self._tool_loop(agent_name, system_prompt, messages, claude_tools, tool_name_map, tool_call_records, start, on_event, session_id),
                 timeout=90.0,
             )
         except asyncio.TimeoutError:
@@ -463,6 +464,7 @@ class ClaudeAgentRunner:
         tool_call_records: list[dict[str, Any]],
         start: float,
         on_event: Any = None,
+        session_id: str = "",
     ) -> dict[str, Any]:
         total_input_tokens = 0
         total_output_tokens = 0
@@ -512,8 +514,17 @@ class ClaudeAgentRunner:
                     for block in response.content:
                         if block.type == "tool_use":
                             mcp_name = tool_name_map.get(block.name, block.name)
+                            tool_args = dict(block.input)
+
+                            # Auto-inject session_id for attestation calls (mastery timing enforcement)
+                            if mcp_name == "attestations.attest" and "session_id" not in tool_args and session_id:
+                                tool_args["session_id"] = session_id
+                                logger.debug(
+                                    "Auto-injected session_id=%s into attestations.attest call", session_id
+                                )
+
                             tool_start = time.monotonic()
-                            result_text = await _call_mcp_tool(mcp_name, block.input)
+                            result_text = await _call_mcp_tool(mcp_name, tool_args)
                             tool_ms = (time.monotonic() - tool_start) * 1000
 
                             logger.info(
@@ -522,7 +533,7 @@ class ClaudeAgentRunner:
 
                             record = {
                                 "tool": mcp_name,
-                                "arguments": block.input,
+                                "arguments": tool_args,
                                 "result_summary": result_text[:200],
                                 "latency_ms": round(tool_ms, 1),
                                 "success": "error" not in result_text.lower()[:50],
@@ -532,7 +543,7 @@ class ClaudeAgentRunner:
                                 await on_event({"event": "agent_tool_call", "payload": {
                                     "step_id": "", "agent": agent_name,
                                     "tool": mcp_name,
-                                    "arguments": block.input,
+                                    "arguments": tool_args,
                                     "result_summary": result_text[:200],
                                     "latency_ms": round(tool_ms, 1),
                                     "success": record["success"],
