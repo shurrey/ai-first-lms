@@ -232,24 +232,64 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
             for r in rows:
                 satisfied = False
                 if person_id:
-                    att = await conn.fetchrow("SELECT level FROM attestations WHERE person_id = $1 AND node_id = $2 AND level = 'mastery'", uuid.UUID(person_id), r["id"])
+                    att = await conn.fetchrow("SELECT level FROM attestations WHERE person_id = $1 AND node_id = $2 AND level IN ('proficient', 'mastery')", uuid.UUID(person_id), r["id"])
                     satisfied = att is not None
                 prerequisites.append({"id": str(r["id"]), "title": r["title"], "kind": r["kind"], "satisfied": satisfied})
             return {"prerequisites": prerequisites}
 
     async def get_skill(args: dict[str, Any]) -> dict[str, Any]:
         concept_id = args.get("concept_id")
+        person_id = args.get("person_id")
         if not concept_id:
             return {"error": "concept_id is required"}
         async with pool.acquire() as conn:
+            # Resolve concept by title if not UUID
+            try:
+                cid = uuid.UUID(concept_id)
+            except ValueError:
+                row = await conn.fetchrow(
+                    "SELECT id FROM nodes WHERE LOWER(title) = LOWER($1) AND kind = 'concept'", concept_id)
+                if not row:
+                    return {"error": f"Concept not found: {concept_id}"}
+                cid = row["id"]
+
+            # Fetch skill content
             row = await conn.fetchrow(
-                """SELECT ci.id, ci.body_md, n.title as concept_title
+                """SELECT ci.body_md, n.title as concept_title
                    FROM content_items ci JOIN nodes n ON n.id = ci.node_id
-                   WHERE ci.node_id = $1 AND ci.kind = 'skill'""",
-                uuid.UUID(concept_id))
+                   WHERE ci.node_id = $1 AND ci.kind = 'skill'""", cid)
             if not row:
-                return {"error": "No skill content for this concept"}
-            return {"id": str(row["id"]), "concept_title": row["concept_title"], "body_md": row["body_md"]}
+                return {"error": "No skill content for this concept", "concept_id": str(cid)}
+
+            result: dict[str, Any] = {
+                "id": str(cid),
+                "concept_title": row["concept_title"],
+                "body_md": row["body_md"],
+            }
+
+            # Prerequisite soft gate: check gaps if person_id provided
+            if person_id:
+                prereqs = await conn.fetch(
+                    """SELECT n.id, n.title FROM edges e
+                       JOIN nodes n ON n.id = e.from_node
+                       WHERE e.to_node = $1 AND e.kind = 'prerequisite_of'""", cid)
+                gaps = []
+                for p in prereqs:
+                    att = await conn.fetchrow(
+                        "SELECT level FROM attestations WHERE person_id = $1 AND node_id = $2 ORDER BY issued_at DESC LIMIT 1",
+                        uuid.UUID(person_id), p["id"])
+                    student_level = att["level"] if att else "not_started"
+                    if student_level not in ("proficient", "mastery"):
+                        gaps.append({
+                            "id": str(p["id"]),
+                            "title": p["title"],
+                            "required_level": "proficient",
+                            "student_level": student_level,
+                        })
+                if gaps:
+                    result["prerequisite_gaps"] = gaps
+
+            return result
 
     async def save_skill_handler(args: dict[str, Any]) -> dict[str, Any]:
         concept_id = args.get("concept_id")
@@ -450,12 +490,11 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
         ),
         ToolDef(
             name="content.get_skill",
-            description="Get the skill content (agent knowledge) for a concept",
-            input_schema={
-                "type": "object",
-                "properties": {"concept_id": {"type": "string"}},
-                "required": ["concept_id"],
-            },
+            description="Get the skill document for a concept — includes prerequisite gap warnings if person_id provided",
+            input_schema={"type": "object", "properties": {
+                "concept_id": {"type": "string"},
+                "person_id": {"type": "string"},
+            }, "required": ["concept_id"]},
             handler=get_skill,
             mutates=False,
         ),
