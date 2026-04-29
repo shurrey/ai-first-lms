@@ -108,6 +108,7 @@ CREATE TABLE attestations (
   level      attestation_level NOT NULL,
   issued_at  timestamptz NOT NULL DEFAULT now(),
   payload    jsonb DEFAULT '{}'::jsonb,
+  session_id uuid REFERENCES sessions(id),
   CHECK (node_id IS NOT NULL OR node_set IS NOT NULL)
 );
 
@@ -255,7 +256,8 @@ CREATE TABLE sessions (
   persona    text NOT NULL,
   course_node uuid REFERENCES nodes(id),
   metadata   jsonb DEFAULT '{}'::jsonb,
-  created_at timestamptz NOT NULL DEFAULT now()
+  created_at timestamptz NOT NULL DEFAULT now(),
+  ended_at   timestamptz
 );
 
 CREATE TABLE turns (
@@ -325,9 +327,70 @@ CREATE TABLE conversation_turns (
   id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
   person_id uuid NOT NULL REFERENCES persons(id),
   course_id uuid NOT NULL,
+  session_id uuid REFERENCES sessions(id),
   role text NOT NULL,
   content text NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE INDEX idx_conversation_turns_lookup ON conversation_turns (person_id, course_id, created_at DESC);
+CREATE INDEX idx_conversation_turns_session ON conversation_turns (session_id, created_at);
+
+-- ============================================================================
+-- Credentials & Badges (OpenBadges 3.0)
+-- ============================================================================
+
+CREATE TABLE pending_credentials (
+  id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+  person_id uuid NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+  microcredential_id uuid NOT NULL REFERENCES nodes(id),
+  course_id uuid NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  status text NOT NULL DEFAULT 'pending',  -- pending, approved, rejected
+  reviewed_by uuid REFERENCES persons(id),
+  reviewed_at timestamptz,
+  UNIQUE(person_id, microcredential_id)
+);
+
+CREATE INDEX idx_pending_credentials_course ON pending_credentials (course_id, status);
+CREATE INDEX idx_pending_credentials_person ON pending_credentials (person_id);
+
+CREATE TABLE issued_credentials (
+  id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+  person_id uuid NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+  microcredential_id uuid NOT NULL REFERENCES nodes(id),
+  course_id uuid NOT NULL,
+  issued_by uuid NOT NULL REFERENCES persons(id),
+  credential_json jsonb NOT NULL,  -- Full OB3 JSON-LD document
+  issued_at timestamptz NOT NULL DEFAULT now(),
+  external_id text,  -- ID from Badgr/Credly after push
+  UNIQUE(person_id, microcredential_id)
+);
+
+CREATE INDEX idx_issued_credentials_person ON issued_credentials (person_id);
+
+-- ============================================================================
+-- System settings
+-- ============================================================================
+
+CREATE TABLE system_settings (
+  key text PRIMARY KEY,
+  value jsonb NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- ============================================================================
+-- Concept review tracking (retrieval practice & spaced repetition)
+-- ============================================================================
+
+CREATE TABLE concept_reviews (
+  id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+  person_id uuid NOT NULL REFERENCES persons(id),
+  concept_id uuid NOT NULL REFERENCES nodes(id),
+  session_id uuid REFERENCES sessions(id),
+  outcome text NOT NULL,  -- 'recalled', 'struggled', 'failed'
+  reviewed_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(person_id, concept_id, session_id)
+);
+
+CREATE INDEX idx_concept_reviews_lookup ON concept_reviews (person_id, concept_id, reviewed_at DESC);
