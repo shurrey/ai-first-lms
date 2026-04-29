@@ -27,6 +27,7 @@ _MCP_SERVERS: dict[str, str] = {
     "communications": "http://mcp-communications:7006",
     "standards": "http://mcp-standards:7007",
     "graph": "http://mcp-content:7001",  # graph tools live on content server
+    "attestations": "http://mcp-assessments:7003",  # attestation tools live on assessments server
 }
 
 # Max tool-use iterations to prevent infinite loops
@@ -190,7 +191,8 @@ _AGENT_TOOLS: dict[str, list[str]] = {
         "assessments.list_recent_evidence",
         "graph.mastery_map", "graph.neighbors", "graph.prerequisites",
         "attestations.get_student_attestations", "attestations.attest",
-        "roster.get_learner_profile", "roster.update_learner_profile",
+        "roster.get_learner_profile",
+        "roster.get_goals", "roster.set_goal",
     ],
     "course_architect": [
         "standards.lookup", "content.library_search", "content.save_draft",
@@ -203,6 +205,11 @@ _AGENT_TOOLS: dict[str, list[str]] = {
     "assessment": [
         "assessments.create_question", "assessments.search_bank",
         "assessments.get_rubric", "assessments.list_recent_evidence",
+        "assessments.list_pending_credentials", "assessments.get_credential_evidence",
+        "assessments.approve_credential", "assessments.list_issued_credentials",
+        "roster.get_student", "roster.list_by_course",
+        "graph.mastery_map", "attestations.get_student_attestations",
+        "roster.list_student_sessions",
     ],
     "grading_assistant": [
         "assessments.get_submission", "assessments.get_rubric",
@@ -228,6 +235,14 @@ _AGENT_TOOLS: dict[str, list[str]] = {
     ],
     "communication": [
         "roster.list_by_course", "roster.get_student_context",
+    ],
+    "learning_analyst": [
+        "roster.get_learner_profile", "roster.update_learner_profile",
+        "roster.get_recent_turns", "roster.list_student_sessions",
+        "roster.get_session_transcript",
+        "attestations.get_student_attestations",
+        "roster.update_student_insights", "roster.update_session_summary",
+        "roster.save_concept_review",
     ],
 }
 
@@ -316,6 +331,7 @@ class ClaudeAgentRunner:
         "accessibility": "accessibility",
         "engagement_analyst": "engagement_analyst",
         "communication": "communication",
+        "learning_analyst": "learning_analyst",
     }
 
     def __init__(self, model: str = "claude-sonnet-4-6") -> None:
