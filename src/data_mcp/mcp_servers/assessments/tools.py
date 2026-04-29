@@ -197,27 +197,78 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
         node_id = args.get("node_id")
         level = args.get("level")
         issuer_id = args.get("issuer_id")
+        session_id = args.get("session_id")
         if not person_id or not node_id or not level:
             return {"error": "person_id, node_id, and level are required"}
         if level not in ("emerging", "proficient", "mastery"):
             return {"error": "level must be emerging, proficient, or mastery"}
         async with pool.acquire() as conn:
             pid = uuid.UUID(person_id)
-            nid = uuid.UUID(node_id)
+            # Support both UUID and concept title for node_id
+            try:
+                nid = uuid.UUID(node_id)
+            except ValueError:
+                # Look up concept by title
+                row = await conn.fetchrow(
+                    "SELECT id FROM nodes WHERE LOWER(title) = LOWER($1) AND kind = 'concept'", node_id,
+                )
+                if not row:
+                    return {"error": f"Concept not found: {node_id}"}
+                nid = row["id"]
             iid = uuid.UUID(issuer_id) if issuer_id else None
+            sid = uuid.UUID(session_id) if session_id else None
+
+            # Enforce mastery timing: mastery requires a prior attestation from a different session
+            original_level = level
+            if level == "mastery" and sid:
+                prior = await conn.fetchrow(
+                    """SELECT session_id FROM attestations
+                       WHERE person_id = $1 AND node_id = $2 AND session_id IS NOT NULL AND session_id != $3
+                       LIMIT 1""",
+                    pid, nid, sid,
+                )
+                if not prior:
+                    level = "proficient"
+
             existing = await conn.fetchrow(
                 "SELECT id, level FROM attestations WHERE person_id = $1 AND node_id = $2", pid, nid)
             if existing:
                 await conn.execute(
-                    "UPDATE attestations SET level = $1, issuer_id = $2, issued_at = now() WHERE id = $3",
-                    level, iid, existing["id"])
-                return {"attestation_id": str(existing["id"]), "updated": True, "previous_level": existing["level"]}
+                    "UPDATE attestations SET level = $1, issuer_id = $2, issued_at = now(), session_id = $3 WHERE id = $4",
+                    level, iid, sid, existing["id"])
+                result = {"attestation_id": str(existing["id"]), "updated": True, "previous_level": existing["level"], "level": level}
             else:
                 att_id = uuid.uuid4()
                 await conn.execute(
-                    "INSERT INTO attestations (id, person_id, node_id, level, issuer_id) VALUES ($1, $2, $3, $4, $5)",
-                    att_id, pid, nid, level, iid)
-                return {"attestation_id": str(att_id), "created": True}
+                    "INSERT INTO attestations (id, person_id, node_id, level, issuer_id, session_id) VALUES ($1, $2, $3, $4, $5, $6)",
+                    att_id, pid, nid, level, iid, sid)
+                result = {"attestation_id": str(att_id), "created": True, "level": level}
+
+            if original_level == "mastery" and level == "proficient":
+                result["downgraded"] = True
+                result["reason"] = "Cannot attest mastery in the same session as initial teaching. Auto-downgraded to proficient."
+
+            # Auto-check for credential readiness when mastery is achieved
+            if level == "mastery":
+                # Find the course this concept belongs to
+                course_row = await conn.fetchrow(
+                    """SELECT e2.to_node as course_id FROM edges e
+                       JOIN nodes mod ON mod.id = e.to_node AND mod.kind = 'module'
+                       JOIN edges e2 ON e2.from_node = mod.id AND e2.kind = 'part_of'
+                       JOIN nodes course ON course.id = e2.to_node AND course.kind = 'course'
+                       WHERE e.from_node = $1 AND e.kind = 'part_of'
+                       LIMIT 1""",
+                    nid,
+                )
+                if course_row:
+                    check_result = await check_and_create_pending({
+                        "person_id": person_id,
+                        "course_id": str(course_row["course_id"]),
+                    })
+                    if check_result.get("created"):
+                        result["credentials_pending"] = check_result["created"]
+
+            return result
 
     async def get_student_attestations(args: dict[str, Any]) -> dict[str, Any]:
         person_id = args.get("person_id")
@@ -287,6 +338,327 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                     for r in rows
                 ]
             }
+
+    # ── Credential management ──
+
+    async def check_and_create_pending(args: dict[str, Any]) -> dict[str, Any]:
+        """Check if a student has mastered all concepts in any microcredential and create pending credentials."""
+        person_id = args.get("person_id")
+        course_id = args.get("course_id")
+        if not person_id or not course_id:
+            return {"error": "person_id and course_id are required"}
+
+        async with pool.acquire() as conn:
+            # Get microcredentials for this course: course -> module -> microcredential
+            mc_rows = await conn.fetch(
+                """SELECT DISTINCT n.id, n.title
+                   FROM nodes n
+                   WHERE n.kind = 'microcredential'
+                   AND EXISTS (
+                       SELECT 1 FROM edges e
+                       JOIN nodes mod ON mod.id = e.from_node AND mod.kind = 'module'
+                       JOIN edges e2 ON e2.from_node = mod.id AND e2.to_node = $1 AND e2.kind = 'part_of'
+                       WHERE e.to_node = n.id AND e.kind = 'contributes_to'
+                   )""",
+                uuid.UUID(course_id),
+            )
+
+            created = []
+            for mc in mc_rows:
+                mc_id = mc["id"]
+
+                # Skip if already pending or issued
+                existing = await conn.fetchval(
+                    "SELECT id FROM pending_credentials WHERE person_id = $1 AND microcredential_id = $2",
+                    uuid.UUID(person_id), mc_id,
+                )
+                if existing:
+                    continue
+                issued = await conn.fetchval(
+                    "SELECT id FROM issued_credentials WHERE person_id = $1 AND microcredential_id = $2",
+                    uuid.UUID(person_id), mc_id,
+                )
+                if issued:
+                    continue
+
+                # Get all concepts in this microcredential: concept -part_of-> module -contributes_to-> mc
+                concept_ids = await conn.fetch(
+                    """SELECT DISTINCT c.id FROM nodes c
+                       JOIN edges e ON e.from_node = c.id AND e.kind = 'part_of'
+                       JOIN nodes mod ON mod.id = e.to_node AND mod.kind = 'module'
+                       JOIN edges e2 ON e2.from_node = mod.id AND e2.to_node = $1 AND e2.kind = 'contributes_to'
+                       WHERE c.kind = 'concept'""",
+                    mc_id,
+                )
+
+                if not concept_ids:
+                    continue
+
+                # Check if all concepts have mastery attestation
+                all_mastered = True
+                for row in concept_ids:
+                    att = await conn.fetchval(
+                        """SELECT level FROM attestations
+                           WHERE person_id = $1 AND node_id = $2
+                           ORDER BY issued_at DESC LIMIT 1""",
+                        uuid.UUID(person_id), row["id"],
+                    )
+                    if att != "mastery":
+                        all_mastered = False
+                        break
+
+                if all_mastered:
+                    await conn.execute(
+                        """INSERT INTO pending_credentials (person_id, microcredential_id, course_id)
+                           VALUES ($1, $2, $3) ON CONFLICT DO NOTHING""",
+                        uuid.UUID(person_id), mc_id, uuid.UUID(course_id),
+                    )
+                    created.append({"microcredential_id": str(mc_id), "title": mc["title"]})
+
+            return {"created": created}
+
+    async def list_pending_credentials(args: dict[str, Any]) -> dict[str, Any]:
+        """List pending credentials for a course, optionally filtered by student."""
+        course_id = args.get("course_id")
+        person_id = args.get("person_id")
+        if not course_id:
+            return {"error": "course_id is required"}
+
+        async with pool.acquire() as conn:
+            if person_id:
+                rows = await conn.fetch(
+                    """SELECT pc.id, pc.person_id, pc.microcredential_id, pc.created_at, pc.status,
+                              p.display_name as student_name, n.title as credential_title
+                       FROM pending_credentials pc
+                       JOIN persons p ON p.id = pc.person_id
+                       JOIN nodes n ON n.id = pc.microcredential_id
+                       WHERE pc.course_id = $1 AND pc.person_id = $2 AND pc.status = 'pending'
+                       ORDER BY pc.created_at DESC""",
+                    uuid.UUID(course_id), uuid.UUID(person_id),
+                )
+            else:
+                rows = await conn.fetch(
+                    """SELECT pc.id, pc.person_id, pc.microcredential_id, pc.created_at, pc.status,
+                              p.display_name as student_name, n.title as credential_title
+                       FROM pending_credentials pc
+                       JOIN persons p ON p.id = pc.person_id
+                       JOIN nodes n ON n.id = pc.microcredential_id
+                       WHERE pc.course_id = $1 AND pc.status = 'pending'
+                       ORDER BY pc.created_at DESC""",
+                    uuid.UUID(course_id),
+                )
+
+            return {
+                "pending": [
+                    {
+                        "id": str(r["id"]),
+                        "person_id": str(r["person_id"]),
+                        "student_name": r["student_name"],
+                        "microcredential_id": str(r["microcredential_id"]),
+                        "credential_title": r["credential_title"],
+                        "created_at": r["created_at"].isoformat(),
+                    }
+                    for r in rows
+                ]
+            }
+
+    async def get_credential_evidence(args: dict[str, Any]) -> dict[str, Any]:
+        """Get evidence supporting a pending credential — attestations and session data."""
+        pending_id = args.get("pending_id")
+        if not pending_id:
+            return {"error": "pending_id is required"}
+
+        async with pool.acquire() as conn:
+            pc = await conn.fetchrow(
+                """SELECT pc.*, p.display_name as student_name, n.title as credential_title
+                   FROM pending_credentials pc
+                   JOIN persons p ON p.id = pc.person_id
+                   JOIN nodes n ON n.id = pc.microcredential_id
+                   WHERE pc.id = $1""",
+                uuid.UUID(pending_id),
+            )
+            if not pc:
+                return {"error": "Pending credential not found"}
+
+            # Get all concepts in this microcredential with their attestations
+            concepts = await conn.fetch(
+                """SELECT c.id, c.title,
+                          (SELECT a.level FROM attestations a WHERE a.person_id = $1 AND a.node_id = c.id ORDER BY a.issued_at DESC LIMIT 1) as level,
+                          (SELECT a.issued_at FROM attestations a WHERE a.person_id = $1 AND a.node_id = c.id ORDER BY a.issued_at DESC LIMIT 1) as attested_at
+                   FROM nodes c
+                   JOIN edges e ON e.from_node = c.id AND e.kind = 'part_of'
+                   JOIN nodes mod ON mod.id = e.to_node AND mod.kind = 'module'
+                   JOIN edges e2 ON e2.from_node = mod.id AND e2.to_node = $2 AND e2.kind = 'contributes_to'
+                   WHERE c.kind = 'concept'
+                   ORDER BY c.title""",
+                pc["person_id"], pc["microcredential_id"],
+            )
+
+            # Get session count for this student in this course
+            session_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM sessions WHERE person_id = $1 AND course_node = $2 AND persona = 'student'",
+                pc["person_id"], pc["course_id"],
+            )
+
+            return {
+                "pending_id": str(pc["id"]),
+                "student_name": pc["student_name"],
+                "credential_title": pc["credential_title"],
+                "created_at": pc["created_at"].isoformat(),
+                "session_count": session_count,
+                "concepts": [
+                    {
+                        "id": str(c["id"]),
+                        "title": c["title"],
+                        "level": c["level"],
+                        "attested_at": c["attested_at"].isoformat() if c["attested_at"] else None,
+                    }
+                    for c in concepts
+                ],
+            }
+
+    async def approve_credential(args: dict[str, Any]) -> dict[str, Any]:
+        """Approve a pending credential and generate OB3 JSON-LD."""
+        pending_id = args.get("pending_id")
+        reviewer_id = args.get("reviewer_id")
+        if not pending_id or not reviewer_id:
+            return {"error": "pending_id and reviewer_id are required"}
+
+        async with pool.acquire() as conn:
+            pc = await conn.fetchrow(
+                """SELECT pc.*, p.display_name as student_name, p.email as student_email,
+                          n.title as credential_title, n.description as credential_description
+                   FROM pending_credentials pc
+                   JOIN persons p ON p.id = pc.person_id
+                   JOIN nodes n ON n.id = pc.microcredential_id
+                   WHERE pc.id = $1 AND pc.status = 'pending'""",
+                uuid.UUID(pending_id),
+            )
+            if not pc:
+                return {"error": "Pending credential not found or already processed"}
+
+            # Get course title
+            course = await conn.fetchrow("SELECT title FROM nodes WHERE id = $1", pc["course_id"])
+            course_title = course["title"] if course else "Unknown Course"
+
+            # Get reviewer info
+            reviewer = await conn.fetchrow("SELECT display_name FROM persons WHERE id = $1", uuid.UUID(reviewer_id))
+
+            import json
+            from datetime import datetime, timezone
+
+            # Generate OB3 JSON-LD credential
+            credential_id = str(uuid.uuid4())
+            ob3_credential = {
+                "@context": [
+                    "https://www.w3.org/ns/credentials/v2",
+                    "https://purl.imsglobal.org/spec/ob/v3p0/context-3.0.3.json",
+                ],
+                "id": f"urn:uuid:{credential_id}",
+                "type": ["VerifiableCredential", "OpenBadgeCredential"],
+                "issuer": {
+                    "id": "urn:uuid:ai-first-lms",
+                    "type": ["Profile"],
+                    "name": "AI-First LMS",
+                },
+                "validFrom": datetime.now(timezone.utc).isoformat(),
+                "credentialSubject": {
+                    "id": f"urn:uuid:{pc['person_id']}",
+                    "type": ["AchievementSubject"],
+                    "name": pc["student_name"],
+                    "achievement": {
+                        "id": f"urn:uuid:{pc['microcredential_id']}",
+                        "type": ["Achievement"],
+                        "name": pc["credential_title"],
+                        "description": pc["credential_description"] or f"Mastery of {pc['credential_title']} in {course_title}",
+                        "criteria": {
+                            "narrative": f"Demonstrated mastery of all concepts in the {pc['credential_title']} microcredential through AI-assisted adaptive learning in {course_title}."
+                        },
+                    },
+                },
+                "evidence": [
+                    {
+                        "id": f"urn:uuid:{pc['id']}",
+                        "type": ["Evidence"],
+                        "name": "AI Tutor Assessment",
+                        "description": f"Mastery verified through adaptive tutoring sessions. Approved by {reviewer['display_name'] if reviewer else 'instructor'}.",
+                    }
+                ],
+            }
+
+            # Mark pending as approved
+            await conn.execute(
+                "UPDATE pending_credentials SET status = 'approved', reviewed_by = $1, reviewed_at = now() WHERE id = $2",
+                uuid.UUID(reviewer_id), uuid.UUID(pending_id),
+            )
+
+            # Insert issued credential
+            await conn.execute(
+                """INSERT INTO issued_credentials (person_id, microcredential_id, course_id, issued_by, credential_json)
+                   VALUES ($1, $2, $3, $4, $5) ON CONFLICT (person_id, microcredential_id) DO NOTHING""",
+                pc["person_id"], pc["microcredential_id"], pc["course_id"],
+                uuid.UUID(reviewer_id), json.dumps(ob3_credential),
+            )
+
+            return {"approved": True, "credential_id": credential_id}
+
+    async def list_issued_credentials(args: dict[str, Any]) -> dict[str, Any]:
+        """List issued credentials for a student."""
+        person_id = args.get("person_id")
+        if not person_id:
+            return {"error": "person_id is required"}
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT ic.id, ic.microcredential_id, ic.course_id, ic.issued_at,
+                          n.title as credential_title, nc.title as course_title,
+                          p.display_name as issued_by_name
+                   FROM issued_credentials ic
+                   JOIN nodes n ON n.id = ic.microcredential_id
+                   LEFT JOIN nodes nc ON nc.id = ic.course_id
+                   JOIN persons p ON p.id = ic.issued_by
+                   WHERE ic.person_id = $1
+                   ORDER BY ic.issued_at DESC""",
+                uuid.UUID(person_id),
+            )
+            return {
+                "credentials": [
+                    {
+                        "id": str(r["id"]),
+                        "credential_title": r["credential_title"],
+                        "course_title": r["course_title"] or "Unknown",
+                        "issued_at": r["issued_at"].isoformat(),
+                        "issued_by": r["issued_by_name"],
+                    }
+                    for r in rows
+                ]
+            }
+
+    # ── System settings ──
+
+    async def get_settings(args: dict[str, Any]) -> dict[str, Any]:
+        key = args.get("key")
+        async with pool.acquire() as conn:
+            if key:
+                row = await conn.fetchrow("SELECT value FROM system_settings WHERE key = $1", key)
+                return {"key": key, "value": row["value"] if row else None}
+            else:
+                rows = await conn.fetch("SELECT key, value FROM system_settings ORDER BY key")
+                import json
+                return {"settings": {r["key"]: (json.loads(r["value"]) if isinstance(r["value"], str) else r["value"]) for r in rows}}
+
+    async def save_settings(args: dict[str, Any]) -> dict[str, Any]:
+        key = args.get("key")
+        value = args.get("value")
+        if not key or value is None:
+            return {"error": "key and value are required"}
+        import json
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO system_settings (key, value, updated_at) VALUES ($1, $2, now())
+                   ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = now()""",
+                key, json.dumps(value),
+            )
+            return {"saved": True}
 
     return [
         ToolDef(
@@ -400,6 +772,7 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                 "person_id": {"type": "string"}, "node_id": {"type": "string"},
                 "level": {"type": "string", "enum": ["emerging", "proficient", "mastery"]},
                 "issuer_id": {"type": "string"},
+                "session_id": {"type": "string", "description": "Session UUID. When level=mastery, a prior attestation from a different session is required or the level is auto-downgraded to proficient."},
             }, "required": ["person_id", "node_id", "level"]},
             handler=attest, mutates=True, requires_approval=False,
         ),
@@ -410,5 +783,61 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                 "person_id": {"type": "string"}, "course_id": {"type": "string"},
             }, "required": ["person_id"]},
             handler=get_student_attestations, mutates=False,
+        ),
+        ToolDef(
+            name="assessments.check_pending_credentials",
+            description="Check if a student has mastered all concepts in any microcredential and create pending credentials",
+            input_schema={"type": "object", "properties": {
+                "person_id": {"type": "string"}, "course_id": {"type": "string"},
+            }, "required": ["person_id", "course_id"]},
+            handler=check_and_create_pending, mutates=True, requires_approval=False,
+        ),
+        ToolDef(
+            name="assessments.list_pending_credentials",
+            description="List pending credentials for a course awaiting instructor approval",
+            input_schema={"type": "object", "properties": {
+                "course_id": {"type": "string"}, "person_id": {"type": "string"},
+            }, "required": ["course_id"]},
+            handler=list_pending_credentials, mutates=False,
+        ),
+        ToolDef(
+            name="assessments.get_credential_evidence",
+            description="Get mastery evidence supporting a pending credential",
+            input_schema={"type": "object", "properties": {
+                "pending_id": {"type": "string"},
+            }, "required": ["pending_id"]},
+            handler=get_credential_evidence, mutates=False,
+        ),
+        ToolDef(
+            name="assessments.approve_credential",
+            description="Approve a pending credential and generate OB3 badge",
+            input_schema={"type": "object", "properties": {
+                "pending_id": {"type": "string"}, "reviewer_id": {"type": "string"},
+            }, "required": ["pending_id", "reviewer_id"]},
+            handler=approve_credential, mutates=True, requires_approval=False,
+        ),
+        ToolDef(
+            name="assessments.list_issued_credentials",
+            description="List issued OB3 badge credentials for a student",
+            input_schema={"type": "object", "properties": {
+                "person_id": {"type": "string"},
+            }, "required": ["person_id"]},
+            handler=list_issued_credentials, mutates=False,
+        ),
+        ToolDef(
+            name="assessments.get_settings",
+            description="Get system settings (badge provider config, etc.)",
+            input_schema={"type": "object", "properties": {
+                "key": {"type": "string"},
+            }},
+            handler=get_settings, mutates=False,
+        ),
+        ToolDef(
+            name="assessments.save_settings",
+            description="Save a system setting",
+            input_schema={"type": "object", "properties": {
+                "key": {"type": "string"}, "value": {},
+            }, "required": ["key", "value"]},
+            handler=save_settings, mutates=True, requires_approval=False,
         ),
     ]
