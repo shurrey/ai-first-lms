@@ -145,6 +145,7 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
     async def save_turn(args: dict[str, Any]) -> dict[str, Any]:
         person_id = args.get("person_id")
         course_id = args.get("course_id")
+        session_id = args.get("session_id")
         role = args.get("role")
         content = args.get("content")
         if not all([person_id, course_id, role, content]):
@@ -152,8 +153,10 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
         async with pool.acquire() as conn:
             turn_id = uuid.uuid4()
             await conn.execute(
-                "INSERT INTO conversation_turns (id, person_id, course_id, role, content) VALUES ($1, $2, $3, $4, $5)",
-                turn_id, uuid.UUID(person_id), uuid.UUID(course_id), role, content,
+                "INSERT INTO conversation_turns (id, person_id, course_id, session_id, role, content) VALUES ($1, $2, $3, $4, $5, $6)",
+                turn_id, uuid.UUID(person_id), uuid.UUID(course_id),
+                uuid.UUID(session_id) if session_id else None,
+                role, content,
             )
             return {"id": str(turn_id), "saved": True}
 
@@ -216,6 +219,238 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
             )
             return {"updated": True}
 
+    # ── Session persistence & queries ──
+
+    async def save_session(args: dict[str, Any]) -> dict[str, Any]:
+        session_id = args.get("session_id")
+        person_id = args.get("person_id")
+        persona = args.get("persona")
+        course_id = args.get("course_id")
+        if not all([session_id, person_id, persona, course_id]):
+            return {"error": "session_id, person_id, persona, and course_id are required"}
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO sessions (id, person_id, persona, course_node, metadata) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (id) DO NOTHING",
+                uuid.UUID(session_id), uuid.UUID(person_id), persona,
+                uuid.UUID(course_id), "{}",
+            )
+            return {"saved": True}
+
+    async def list_student_sessions(args: dict[str, Any]) -> dict[str, Any]:
+        person_id = args.get("person_id")
+        course_id = args.get("course_id")
+        if not person_id:
+            return {"error": "person_id is required"}
+        async with pool.acquire() as conn:
+            if course_id:
+                rows = await conn.fetch(
+                    """SELECT s.id, s.persona, s.course_node, s.created_at,
+                              n.title as course_title,
+                              (SELECT COUNT(*) FROM conversation_turns ct WHERE ct.session_id = s.id) as turn_count,
+                              (SELECT content FROM conversation_turns ct WHERE ct.session_id = s.id AND ct.role = 'user' ORDER BY ct.created_at LIMIT 1) as first_message
+                       FROM sessions s
+                       LEFT JOIN nodes n ON n.id = s.course_node
+                       WHERE s.person_id = $1 AND s.course_node = $2 AND s.persona = 'student'
+                       ORDER BY s.created_at DESC""",
+                    uuid.UUID(person_id), uuid.UUID(course_id),
+                )
+            else:
+                rows = await conn.fetch(
+                    """SELECT s.id, s.persona, s.course_node, s.created_at,
+                              n.title as course_title,
+                              (SELECT COUNT(*) FROM conversation_turns ct WHERE ct.session_id = s.id) as turn_count,
+                              (SELECT content FROM conversation_turns ct WHERE ct.session_id = s.id AND ct.role = 'user' ORDER BY ct.created_at LIMIT 1) as first_message
+                       FROM sessions s
+                       LEFT JOIN nodes n ON n.id = s.course_node
+                       WHERE s.person_id = $1 AND s.persona = 'student'
+                       ORDER BY s.created_at DESC""",
+                    uuid.UUID(person_id),
+                )
+            return {
+                "sessions": [
+                    {
+                        "session_id": str(r["id"]),
+                        "course_id": str(r["course_node"]) if r["course_node"] else None,
+                        "course_title": r["course_title"] or "Unknown",
+                        "created_at": r["created_at"].isoformat(),
+                        "turn_count": r["turn_count"],
+                        "first_message": (r["first_message"] or "")[:100],
+                    }
+                    for r in rows
+                ]
+            }
+
+    async def get_session_transcript(args: dict[str, Any]) -> dict[str, Any]:
+        session_id = args.get("session_id")
+        if not session_id:
+            return {"error": "session_id is required"}
+        async with pool.acquire() as conn:
+            # Get session info
+            session_row = await conn.fetchrow(
+                """SELECT s.id, s.person_id, s.course_node, s.created_at, p.display_name, n.title as course_title
+                   FROM sessions s
+                   JOIN persons p ON p.id = s.person_id
+                   LEFT JOIN nodes n ON n.id = s.course_node
+                   WHERE s.id = $1""",
+                uuid.UUID(session_id),
+            )
+            if not session_row:
+                return {"error": "Session not found"}
+            # Get turns
+            rows = await conn.fetch(
+                """SELECT role, content, created_at FROM conversation_turns
+                   WHERE session_id = $1 ORDER BY created_at""",
+                uuid.UUID(session_id),
+            )
+            return {
+                "session_id": str(session_row["id"]),
+                "student_name": session_row["display_name"],
+                "course_title": session_row["course_title"] or "Unknown",
+                "created_at": session_row["created_at"].isoformat(),
+                "turns": [
+                    {"role": r["role"], "content": r["content"], "created_at": r["created_at"].isoformat()}
+                    for r in rows
+                ],
+            }
+
+    # ── Retrieval practice / concept reviews ──
+
+    async def save_concept_review(args: dict[str, Any]) -> dict[str, Any]:
+        person_id = args.get("person_id")
+        concept_id = args.get("concept_id")
+        session_id = args.get("session_id")
+        outcome = args.get("outcome")
+        if not all([person_id, concept_id, outcome]):
+            return {"error": "person_id, concept_id, and outcome are required"}
+        async with pool.acquire() as conn:
+            # Resolve concept by title if needed
+            try:
+                cid = uuid.UUID(concept_id)
+            except ValueError:
+                row = await conn.fetchrow("SELECT id FROM nodes WHERE LOWER(title) = LOWER($1) AND kind = 'concept'", concept_id)
+                if not row:
+                    return {"error": f"Concept not found: {concept_id}"}
+                cid = row["id"]
+            await conn.execute(
+                """INSERT INTO concept_reviews (person_id, concept_id, session_id, outcome)
+                   VALUES ($1, $2, $3, $4)
+                   ON CONFLICT (person_id, concept_id, session_id) DO UPDATE SET outcome = $4, reviewed_at = now()""",
+                uuid.UUID(person_id), cid,
+                uuid.UUID(session_id) if session_id else None, outcome,
+            )
+            return {"saved": True}
+
+    async def get_review_candidates(args: dict[str, Any]) -> dict[str, Any]:
+        person_id = args.get("person_id")
+        course_id = args.get("course_id")
+        limit = args.get("limit", 3)
+        if not person_id or not course_id:
+            return {"error": "person_id and course_id are required"}
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT a.node_id, n.title,
+                          (SELECT MAX(cr.reviewed_at) FROM concept_reviews cr WHERE cr.person_id = $1 AND cr.concept_id = a.node_id) as last_reviewed
+                   FROM attestations a
+                   JOIN nodes n ON n.id = a.node_id
+                   JOIN edges e ON e.from_node = n.id AND e.kind = 'part_of'
+                   JOIN nodes mod ON mod.id = e.to_node AND mod.kind = 'module'
+                   JOIN edges e2 ON e2.from_node = mod.id AND e2.kind = 'part_of'
+                   WHERE a.person_id = $1 AND a.level = 'proficient'
+                   AND e2.to_node = $2
+                   ORDER BY last_reviewed NULLS FIRST, a.issued_at ASC
+                   LIMIT $3""",
+                uuid.UUID(person_id), uuid.UUID(course_id), limit,
+            )
+            return {
+                "concepts": [
+                    {"id": str(r["node_id"]), "title": r["title"], "last_reviewed": r["last_reviewed"].isoformat() if r["last_reviewed"] else None}
+                    for r in rows
+                ]
+            }
+
+    # ── Goals ──
+
+    async def get_goals(args: dict[str, Any]) -> dict[str, Any]:
+        person_id = args.get("person_id")
+        if not person_id:
+            return {"error": "person_id is required"}
+        async with pool.acquire() as conn:
+            import json as _json
+            row = await conn.fetchrow("SELECT attributes FROM persons WHERE id = $1", uuid.UUID(person_id))
+            if not row:
+                return {"error": "Person not found"}
+            attrs = row["attributes"] or {}
+            if isinstance(attrs, str):
+                attrs = _json.loads(attrs)
+            return {"goals": attrs.get("goals", [])}
+
+    async def set_goal(args: dict[str, Any]) -> dict[str, Any]:
+        person_id = args.get("person_id")
+        description = args.get("description")
+        target_date = args.get("target_date")
+        if not person_id or not description:
+            return {"error": "person_id and description are required"}
+        async with pool.acquire() as conn:
+            import json as _json
+            from datetime import datetime, timezone
+            row = await conn.fetchrow("SELECT attributes FROM persons WHERE id = $1", uuid.UUID(person_id))
+            if not row:
+                return {"error": "Person not found"}
+            attrs = row["attributes"] or {}
+            if isinstance(attrs, str):
+                attrs = _json.loads(attrs)
+            goals = attrs.get("goals", [])
+            goals.append({
+                "description": description,
+                "target_date": target_date,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "status": "active",
+            })
+            attrs["goals"] = goals
+            await conn.execute("UPDATE persons SET attributes = $1 WHERE id = $2", _json.dumps(attrs), uuid.UUID(person_id))
+            return {"saved": True}
+
+    # ── Student insights & session summary ──
+
+    async def update_student_insights(args: dict[str, Any]) -> dict[str, Any]:
+        person_id = args.get("person_id")
+        insights = args.get("insights")
+        if not person_id or insights is None:
+            return {"error": "person_id and insights are required"}
+        async with pool.acquire() as conn:
+            import json as _json
+            row = await conn.fetchrow("SELECT attributes FROM persons WHERE id = $1", uuid.UUID(person_id))
+            if not row:
+                return {"error": "Person not found"}
+            attrs = row["attributes"] or {}
+            if isinstance(attrs, str):
+                attrs = _json.loads(attrs)
+            attrs["student_insights"] = insights
+            await conn.execute("UPDATE persons SET attributes = $1 WHERE id = $2", _json.dumps(attrs), uuid.UUID(person_id))
+            return {"updated": True}
+
+    async def update_session_summary(args: dict[str, Any]) -> dict[str, Any]:
+        session_id = args.get("session_id")
+        summary = args.get("summary")
+        review_flag = args.get("review_flag", False)
+        review_reason = args.get("review_reason")
+        if not session_id or not summary:
+            return {"error": "session_id and summary are required"}
+        async with pool.acquire() as conn:
+            import json as _json
+            row = await conn.fetchrow("SELECT metadata FROM sessions WHERE id = $1", uuid.UUID(session_id))
+            if not row:
+                return {"error": "Session not found"}
+            metadata = row["metadata"] or {}
+            if isinstance(metadata, str):
+                metadata = _json.loads(metadata)
+            metadata["summary"] = summary
+            metadata["review_flag"] = review_flag
+            if review_reason:
+                metadata["review_reason"] = review_reason
+            await conn.execute("UPDATE sessions SET metadata = $1 WHERE id = $2", _json.dumps(metadata), uuid.UUID(session_id))
+            return {"updated": True}
+
     return [
         ToolDef(
             name="roster.get",
@@ -246,7 +481,7 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
             description="Save a conversation turn for persistence across sessions",
             input_schema={"type": "object", "properties": {
                 "person_id": {"type": "string"}, "course_id": {"type": "string"},
-                "role": {"type": "string"}, "content": {"type": "string"},
+                "session_id": {"type": "string"}, "role": {"type": "string"}, "content": {"type": "string"},
             }, "required": ["person_id", "course_id", "role", "content"]},
             handler=save_turn, mutates=True, requires_approval=False,
         ),
@@ -272,5 +507,78 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                 "person_id": {"type": "string"}, "profile_md": {"type": "string"},
             }, "required": ["person_id", "profile_md"]},
             handler=update_learner_profile, mutates=True, requires_approval=False,
+        ),
+        ToolDef(
+            name="roster.save_session",
+            description="Persist a session to the database",
+            input_schema={"type": "object", "properties": {
+                "session_id": {"type": "string"}, "person_id": {"type": "string"},
+                "persona": {"type": "string"}, "course_id": {"type": "string"},
+            }, "required": ["session_id", "person_id", "persona", "course_id"]},
+            handler=save_session, mutates=True, requires_approval=False,
+        ),
+        ToolDef(
+            name="roster.list_student_sessions",
+            description="List tutoring sessions for a student, optionally filtered by course",
+            input_schema={"type": "object", "properties": {
+                "person_id": {"type": "string"}, "course_id": {"type": "string"},
+            }, "required": ["person_id"]},
+            handler=list_student_sessions, mutates=False,
+        ),
+        ToolDef(
+            name="roster.get_session_transcript",
+            description="Get the full conversation transcript for a session",
+            input_schema={"type": "object", "properties": {
+                "session_id": {"type": "string"},
+            }, "required": ["session_id"]},
+            handler=get_session_transcript, mutates=False,
+        ),
+        ToolDef(
+            name="roster.save_concept_review",
+            description="Record a concept review outcome for retrieval practice tracking",
+            input_schema={"type": "object", "properties": {
+                "person_id": {"type": "string"}, "concept_id": {"type": "string"},
+                "session_id": {"type": "string"}, "outcome": {"type": "string", "enum": ["recalled", "struggled", "failed"]},
+            }, "required": ["person_id", "concept_id", "outcome"]},
+            handler=save_concept_review, mutates=True, requires_approval=False,
+        ),
+        ToolDef(
+            name="roster.get_review_candidates",
+            description="Get proficient concepts sorted by least-recently-reviewed for retrieval practice",
+            input_schema={"type": "object", "properties": {
+                "person_id": {"type": "string"}, "course_id": {"type": "string"}, "limit": {"type": "integer"},
+            }, "required": ["person_id", "course_id"]},
+            handler=get_review_candidates, mutates=False,
+        ),
+        ToolDef(
+            name="roster.get_goals",
+            description="Get a student's active learning goals",
+            input_schema={"type": "object", "properties": {"person_id": {"type": "string"}}, "required": ["person_id"]},
+            handler=get_goals, mutates=False,
+        ),
+        ToolDef(
+            name="roster.set_goal",
+            description="Set a learning goal for a student",
+            input_schema={"type": "object", "properties": {
+                "person_id": {"type": "string"}, "description": {"type": "string"}, "target_date": {"type": "string"},
+            }, "required": ["person_id", "description"]},
+            handler=set_goal, mutates=True, requires_approval=False,
+        ),
+        ToolDef(
+            name="roster.update_student_insights",
+            description="Update student-facing learning insights (written by learning analyst)",
+            input_schema={"type": "object", "properties": {
+                "person_id": {"type": "string"}, "insights": {"type": "array", "items": {"type": "string"}},
+            }, "required": ["person_id", "insights"]},
+            handler=update_student_insights, mutates=True, requires_approval=False,
+        ),
+        ToolDef(
+            name="roster.update_session_summary",
+            description="Update session summary and review flag (written by learning analyst)",
+            input_schema={"type": "object", "properties": {
+                "session_id": {"type": "string"}, "summary": {"type": "string"},
+                "review_flag": {"type": "boolean"}, "review_reason": {"type": "string"},
+            }, "required": ["session_id", "summary"]},
+            handler=update_session_summary, mutates=True, requires_approval=False,
         ),
     ]
