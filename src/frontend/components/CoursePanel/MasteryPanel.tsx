@@ -1,10 +1,23 @@
 "use client";
 
+import { useEffect, useState } from "react";
+import { useSession } from "@/lib/session-context";
+import { generatePodcast, API_BASE, type PodcastResult } from "@/lib/api";
+import { AudioPlayer } from "@/components/ChatPane/AudioPlayer";
+
+interface IssuedCredential {
+  id: string;
+  credential_title: string;
+  course_title: string;
+  issued_at: string;
+  issued_by: string;
+}
+
 function sendPrompt(prompt: string) {
-  const input = document.querySelector<HTMLInputElement>('form input[type="text"]');
+  const input = document.querySelector<HTMLTextAreaElement>("form textarea");
   const form = input?.closest("form");
   if (input && form) {
-    const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    const nativeSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
     nativeSetter?.call(input, prompt);
     input.dispatchEvent(new Event("input", { bubbles: true }));
     input.dispatchEvent(new Event("change", { bubbles: true }));
@@ -31,6 +44,48 @@ interface MasteryData {
 }
 
 export function MasteryPanel({ data }: { data: MasteryData | null }) {
+  const { personId, courseUuid, sessionId } = useSession();
+  const [podcast, setPodcast] = useState<PodcastResult | null>(null);
+  const [podcastLoading, setPodcastLoading] = useState(false);
+  const [earnedBadges, setEarnedBadges] = useState<IssuedCredential[]>([]);
+  const [insights, setInsights] = useState<string[]>([]);
+  const [goals, setGoals] = useState<Array<{ description: string; target_date: string | null; status: string }>>([]);
+
+  useEffect(() => {
+    if (!personId) return;
+    fetch(`${API_BASE}/api/credentials/${personId}`)
+      .then((r) => r.json())
+      .then((d) => setEarnedBadges(d.credentials || []))
+      .catch(() => {});
+  }, [personId]);
+
+  useEffect(() => {
+    if (!personId) return;
+    fetch(`${API_BASE}/api/student-insights/${personId}`)
+      .then((r) => r.json())
+      .then((d) => setInsights(d.insights || []))
+      .catch(() => {});
+    fetch(`${API_BASE}/api/student-goals/${personId}`)
+      .then((r) => r.json())
+      .then((d) => setGoals(d.goals || []))
+      .catch(() => {});
+  }, [personId]);
+
+  const handleGeneratePodcast = async () => {
+    if (!personId || !courseUuid) return;
+    setPodcastLoading(true);
+    try {
+      const result = await generatePodcast(personId, courseUuid, sessionId ?? undefined);
+      if (!result.error) {
+        setPodcast(result);
+      }
+    } catch {
+      // Silently fail — user can retry
+    } finally {
+      setPodcastLoading(false);
+    }
+  };
+
   if (!data || !data.summary) {
     return <p className="text-xs text-muted-foreground animate-pulse">Loading mastery data...</p>;
   }
@@ -88,6 +143,74 @@ export function MasteryPanel({ data }: { data: MasteryData | null }) {
         </div>
       </section>
 
+      {/* Earned badges */}
+      {earnedBadges.length > 0 && (
+        <section>
+          <SectionLabel>Earned Badges ({earnedBadges.length})</SectionLabel>
+          <div className="space-y-1.5">
+            {earnedBadges.map((badge) => (
+              <div
+                key={badge.id}
+                className="rounded-lg border border-green-200 bg-green-50/50 dark:border-green-900 dark:bg-green-950/20 p-2.5"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="text-lg">🏅</span>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-xs font-medium">{badge.credential_title}</div>
+                    <div className="text-[9px] text-muted-foreground">
+                      Issued {new Date(badge.issued_at).toLocaleDateString()} by {badge.issued_by}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* Learning Goals */}
+      {goals.filter(g => g.status === "active").length > 0 && (
+        <section>
+          <SectionLabel>Your Goals</SectionLabel>
+          <div className="space-y-1.5">
+            {goals.filter(g => g.status === "active").map((goal, i) => (
+              <div key={i} className="rounded-lg border border-indigo-200 bg-indigo-50/50 dark:border-indigo-900 dark:bg-indigo-950/20 p-2.5">
+                <div className="text-xs font-medium">{goal.description}</div>
+                {goal.target_date && (
+                  <div className="text-[9px] text-muted-foreground mt-0.5">Target: {new Date(goal.target_date).toLocaleDateString()}</div>
+                )}
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* Learning Insights */}
+      {insights.length > 0 && (
+        <section>
+          <SectionLabel>Learning Insights</SectionLabel>
+          <div className="rounded-lg border border-border bg-card p-3 space-y-1.5">
+            {insights.map((insight, i) => (
+              <div key={i} className="flex items-start gap-2 text-xs text-muted-foreground">
+                <span className="text-amber-500 shrink-0">*</span>
+                <span>{insight}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* Podcast player */}
+      {podcast && (
+        <section>
+          <SectionLabel>Your Podcast</SectionLabel>
+          <AudioPlayer
+            audioUrl={`${API_BASE}${podcast.audio_url}`}
+            title={podcast.title}
+          />
+        </section>
+      )}
+
       <section>
         <SectionLabel>Quick Actions</SectionLabel>
         <div className="flex flex-wrap gap-1.5">
@@ -95,6 +218,9 @@ export function MasteryPanel({ data }: { data: MasteryData | null }) {
           <Pill onClick={() => sendPrompt("Show me my full mastery map")}>📊 Mastery map</Pill>
           <Pill onClick={() => sendPrompt("Quiz me on a concept I'm working on")}>📝 Quiz me</Pill>
           <Pill onClick={() => sendPrompt("What microcredentials have I earned?")}>🏅 My credentials</Pill>
+          <Pill onClick={handleGeneratePodcast} disabled={podcastLoading}>
+            {podcastLoading ? "⏳ Generating..." : "🎧 Generate podcast"}
+          </Pill>
         </div>
       </section>
     </div>
@@ -105,9 +231,13 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   return <h3 className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{children}</h3>;
 }
 
-function Pill({ children, onClick }: { children: React.ReactNode; onClick: () => void }) {
+function Pill({ children, onClick, disabled }: { children: React.ReactNode; onClick: () => void; disabled?: boolean }) {
   return (
-    <button onClick={onClick} className="rounded-md border border-border bg-background px-2 py-1 text-xs hover:bg-muted transition-colors">
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className="rounded-md border border-border bg-background px-2 py-1 text-xs hover:bg-muted transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+    >
       {children}
     </button>
   );
