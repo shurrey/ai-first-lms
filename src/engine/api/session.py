@@ -81,6 +81,19 @@ async def create_session(body: CreateSessionRequest, request: Request) -> Create
     store = request.app.state.session_store
     await store.create(session)
 
+    # Persist session to DB for transcript/roster features
+    if person_id and course_id != "all":
+        try:
+            from engine.agents.runner import _call_mcp_tool
+            await _call_mcp_tool("roster.save_session", {
+                "session_id": session.id,
+                "person_id": person_id,
+                "persona": body.persona,
+                "course_id": course_id,
+            })
+        except Exception:
+            pass  # Non-critical — in-memory session still works
+
     # Create a brief turn and fire generation in background
     brief_turn_id = f"brief-{session.id}"
     brief_turn = Turn(session_id=session.id, message="__brief__")
@@ -106,6 +119,8 @@ async def create_session(body: CreateSessionRequest, request: Request) -> Create
 
     return CreateSessionResponse(
         session_id=session.id,
+        person_id=person_id,
+        course_uuid=course_id,
         brief_turn_id=brief_turn_id,
         stream_url=stream_url,
     )

@@ -71,6 +71,40 @@ async def _run_graph(app, session, turn: Turn) -> None:  # type: ignore[no-untyp
             except Exception:
                 pass  # Fall back to in-memory only
 
+        # Session lifecycle: context injections for student persona
+        lifecycle_context = ""
+        if session.persona == "student" and session.person_id and session.course_id:
+            from engine.lifecycle import (
+                get_retrieval_practice_injection,
+                get_revision_injection,
+                get_interleaving_injection,
+            )
+
+            # First turn of session: retrieval practice
+            is_first_turn = len(conversation) == 0
+            if is_first_turn:
+                retrieval = await get_retrieval_practice_injection(
+                    session.person_id, session.course_id, session.id,
+                )
+                if retrieval:
+                    lifecycle_context += retrieval + "\n\n"
+
+            # Every turn: check for revision pending
+            session_meta = session.metadata or {}
+            revision = get_revision_injection(session_meta)
+            if revision:
+                lifecycle_context += revision + "\n\n"
+
+            # Interleaving check
+            interleaving = get_interleaving_injection(session_meta, session.person_id)
+            if interleaving:
+                lifecycle_context += interleaving + "\n\n"
+
+        # Prepend lifecycle context to the user message
+        effective_message = turn.message
+        if lifecycle_context:
+            effective_message = f"[SYSTEM CONTEXT — not visible to student]\n{lifecycle_context}[END SYSTEM CONTEXT]\n\n{turn.message}"
+
         initial_state = {
             "session_id": session.id,
             "turn_id": turn.id,
@@ -78,7 +112,7 @@ async def _run_graph(app, session, turn: Turn) -> None:  # type: ignore[no-untyp
             "person_id": session.person_id or "",
             "course_id": session.course_id,
             "conversation": conversation,
-            "current_message": turn.message,
+            "current_message": effective_message,
             "interpretation": None,
             "clarification": None,
             "plan": None,
@@ -124,6 +158,7 @@ async def _run_graph(app, session, turn: Turn) -> None:  # type: ignore[no-untyp
                 await _call_mcp_tool("roster.save_turn", {
                     "person_id": session.person_id,
                     "course_id": session.course_id,
+                    "session_id": session.id,
                     "role": "user",
                     "content": turn.message,
                 })
@@ -136,12 +171,28 @@ async def _run_graph(app, session, turn: Turn) -> None:  # type: ignore[no-untyp
                             await _call_mcp_tool("roster.save_turn", {
                                 "person_id": session.person_id,
                                 "course_id": session.course_id,
+                                "session_id": session.id,
                                 "role": "assistant",
                                 "content": answer[:5000],  # Truncate very long responses
                             })
                         break
             except Exception:
                 logger.warning("Failed to persist conversation turns", exc_info=True)
+
+        # Session end detection — fire learning analyst
+        if session.persona == "student" and session.person_id:
+            end_phrases = ["bye", "done", "that's all", "gotta go", "see you", "i'm done", "thanks, bye", "that's it"]
+            if any(phrase in turn.message.lower() for phrase in end_phrases):
+                try:
+                    from engine.analyst import run_session_analysis
+                    asyncio.create_task(run_session_analysis(
+                        session_id=session.id,
+                        person_id=session.person_id,
+                        course_id=session.course_id,
+                    ))
+                    logger.info("Learning analyst triggered for session %s", session.id)
+                except Exception:
+                    logger.warning("Failed to trigger learning analyst", exc_info=True)
 
     except Exception:
         logger.exception("Graph run failed for turn %s", turn.id)

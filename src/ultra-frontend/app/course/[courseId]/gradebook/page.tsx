@@ -1,130 +1,183 @@
 "use client";
-import { useState } from "react";
-import { GradebookItems } from "@/components/GradebookItems";
-import { GradebookGrid } from "@/components/GradebookGrid";
-import { GradebookStudents } from "@/components/GradebookStudents";
-import { usePageData } from "@/lib/use-page-data";
+import { use, useEffect, useState } from "react";
 import { usePersona } from "@/lib/persona-context";
-import { Filter, Search, Settings, Sparkles } from "lucide-react";
-import clsx from "clsx";
+import { API_BASE } from "@/lib/api";
 
-const DEMO_ITEMS = [
-  { title: "HW1: Variables & Control Flow", type: "Assignment", submissions: 48, totalStudents: 50, dueDate: "9/14/26", gradingStatus: "All graded" },
-  { title: "Quiz 1: Fundamentals", type: "Test", submissions: 50, totalStudents: 50, dueDate: "9/21/26", gradingStatus: "All graded" },
-  { title: "HW2: Functions & Data Structures", type: "Assignment", submissions: 49, totalStudents: 50, dueDate: "10/5/26", gradingStatus: "All graded" },
-  { title: "Quiz 2: OOP & Testing", type: "Test", submissions: 50, totalStudents: 50, dueDate: "10/19/26", gradingStatus: "All graded" },
-  { title: "Essay: Ethics in Computing", type: "Assignment", submissions: 49, totalStudents: 50, dueDate: "11/2/26", gradingStatus: "131 to review" },
-  { title: "Final Project", type: "Assignment", submissions: 46, totalStudents: 50, dueDate: "12/1/26", gradingStatus: "All graded" },
-];
-
-const DEMO_ASSIGNMENTS = [
-  { id: "hw1", title: "HW1: Variables", points: 100, graded: 48, posted: 48 },
-  { id: "q1", title: "Quiz 1", points: 50, graded: 50, posted: 50 },
-  { id: "hw2", title: "HW2: Functions", points: 100, graded: 49, posted: 49 },
-  { id: "q2", title: "Quiz 2: OOP", points: 80, graded: 50, posted: 50 },
-  { id: "ethics", title: "Ethics Essay", points: 100, graded: 49, posted: 18 },
-  { id: "final", title: "Final Project", points: 200, graded: 46, posted: 46 },
-];
-
-const DEMO_STUDENTS = [
-  { id: "1", name: "Emma Smith", overall: 0.88, grades: { hw1: 0.91, q1: 0.97, hw2: 0.80, q2: 0.86, ethics: 0.87, final: 0.91 } },
-  { id: "2", name: "Liam Johnson", overall: 0.64, grades: { hw1: 0.72, q1: 0.65, hw2: 0.68, q2: 0.71, ethics: 0.45, final: null } },
-  { id: "3", name: "Olivia Williams", overall: 0.32, grades: { hw1: 0.38, q1: 0.29, hw2: 0.42, q2: 0.31, ethics: 0.22, final: null } },
-  { id: "4", name: "Noah Brown", overall: 0.79, grades: { hw1: 0.85, q1: 0.82, hw2: 0.78, q2: 0.74, ethics: 0.69, final: 0.88 } },
-  { id: "5", name: "Ava Jones", overall: 0.82, grades: { hw1: 0.88, q1: 0.79, hw2: 0.85, q2: 0.80, ethics: 0.78, final: 0.84 } },
-];
-
-const DEMO_STUDENTS_LIST = [
-  { id: "1", name: "Emma Smith", email: "emma.smith@student.edu", lastAccess: "4/22/26, 2:30 PM", overallGrade: 0.88 },
-  { id: "2", name: "Liam Johnson", email: "liam.johnson@student.edu", lastAccess: "4/21/26, 11:15 AM", overallGrade: 0.64 },
-  { id: "3", name: "Olivia Williams", email: "olivia.williams@student.edu", lastAccess: "4/18/26, 9:00 AM", overallGrade: 0.32 },
-  { id: "4", name: "Noah Brown", email: "noah.brown@student.edu", lastAccess: "4/22/26, 1:45 PM", overallGrade: 0.79 },
-  { id: "5", name: "Ava Jones", email: "ava.jones@student.edu", lastAccess: "4/22/26, 3:10 PM", overallGrade: 0.82 },
-];
-
-type View = "items" | "grades" | "students";
-
-interface GradebookData {
-  students: Array<{ id: string; name: string; email: string; overall: number | null; grades: Record<string, number | null> }>;
-  assignments: string[];
-  totalStudents: number;
+interface StudentAttestation {
+  id: string;
+  name: string;
+  concepts: Record<string, string>; // concept_id → level
+  summary: { mastery: number; proficient: number; emerging: number; not_started: number };
 }
 
-export default function GradebookPage() {
-  const [view, setView] = useState<View>("items");
-  const { persona } = usePersona();
-  const { data: gradebookData, loading } = usePageData<GradebookData>("gradebook", {
-    students: [], assignments: [], totalStudents: 0,
-  });
+interface ConceptInfo {
+  id: string;
+  title: string;
+  module: string;
+}
 
-  // Build grid data from fetched data when available
-  const liveStudents = gradebookData.students.length > 0
-    ? gradebookData.students.map((s) => ({
-        id: s.id,
-        name: s.name,
-        overall: s.overall,
-        grades: s.grades,
-      }))
-    : DEMO_STUDENTS;
+const LEVEL_COLORS: Record<string, string> = {
+  mastery: "bg-green-500",
+  proficient: "bg-blue-400",
+  emerging: "bg-amber-400",
+  not_started: "bg-gray-200",
+};
 
-  const liveAssignments = gradebookData.assignments.length > 0
-    ? gradebookData.assignments.map((title) => ({
-        id: title.toLowerCase().replace(/[^a-z0-9]/g, "_"),
-        title,
-        points: 100,
-        graded: gradebookData.totalStudents,
-        posted: gradebookData.totalStudents,
-      }))
-    : DEMO_ASSIGNMENTS;
+const LEVEL_SHORT: Record<string, string> = {
+  mastery: "M",
+  proficient: "P",
+  emerging: "E",
+  not_started: "",
+};
 
-  const liveStudentsList = gradebookData.students.length > 0
-    ? gradebookData.students.map((s) => ({
-        id: s.id,
-        name: s.name,
-        email: s.email,
-        lastAccess: null as string | null,
-        overallGrade: s.overall,
-      }))
-    : DEMO_STUDENTS_LIST;
-  const TABS: { key: View; label: string }[] = [
-    { key: "items", label: "Gradable Items" },
-    { key: "grades", label: "Grades" },
-    { key: "students", label: "Students" },
-  ];
+export default function GradebookPage({ params }: { params: Promise<{ courseId: string }> }) {
+  const { courseId } = use(params);
+  const { persona, personId, ensureSession } = usePersona();
+  const [students, setStudents] = useState<StudentAttestation[]>([]);
+  const [concepts, setConcepts] = useState<ConceptInfo[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  return (
-    <div>
-      <div className="flex items-center justify-between border-b border-gray-200 px-4">
-        <div className="flex">
-          <button className="px-4 py-3 text-sm text-gray-500 hover:text-gray-700">Overview</button>
-          {TABS.map((tab) => (
-            <button key={tab.key} onClick={() => setView(tab.key)}
-              className={clsx("relative px-4 py-3 text-sm", view === tab.key ? "font-semibold text-[#1a1a1a]" : "text-gray-500 hover:text-gray-700")}>
-              {tab.label}
-              {view === tab.key && <div className="absolute bottom-0 left-0 right-0 h-[3px] bg-[#7c3aed]" />}
-            </button>
-          ))}
-        </div>
-        <div className="flex items-center gap-2">
-          {view === "grades" && (
-            <>
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
-                <input className="border border-gray-300 rounded pl-9 pr-3 py-1.5 text-sm w-48" placeholder="Search gradebook" />
-              </div>
-              <button className="flex items-center gap-1 border border-gray-300 rounded px-3 py-1.5 text-sm"><Filter className="h-3.5 w-3.5" />Filter</button>
-            </>
-          )}
-          <button className="flex items-center gap-1 bg-[#6366f1] text-white rounded px-3 py-1.5 text-sm hover:bg-[#4f46e5]">
-            <Sparkles className="h-3.5 w-3.5" />Review AI Grades
-          </button>
-          <Settings className="h-4 w-4 text-gray-400 cursor-pointer" />
+  useEffect(() => {
+    setLoading(true);
+    setStudents([]);
+    setConcepts([]);
+
+    async function load() {
+      // Ensure session and get personId for current persona
+      const session = await ensureSession(courseId);
+      const pid = session?.personId || personId;
+
+      // Helper: extract concepts and build student attestation from mastery data
+      function parseMastery(mapData: any, studentId: string, studentName: string) {
+        const conceptList: ConceptInfo[] = [];
+        const conceptMap: Record<string, string> = {};
+        const summary = { mastery: 0, proficient: 0, emerging: 0, not_started: 0 };
+        for (const mc of mapData.microcredentials || []) {
+          for (const mod of mc.modules || []) {
+            for (const c of mod.concepts || []) {
+              conceptList.push({ id: c.id, title: c.title || c.id, module: mod.title });
+              conceptMap[c.id] = c.level || "not_started";
+              summary[c.level as keyof typeof summary] = (summary[c.level as keyof typeof summary] || 0) + 1;
+            }
+          }
+        }
+        return { conceptList, student: { id: studentId, name: studentName, concepts: conceptMap, summary } };
+      }
+
+      if (persona === "student" && pid) {
+        // Student view: just their own data
+        const res = await fetch(`${API_BASE}/api/mastery/${pid}/${courseId}`);
+        const data = await res.json();
+        if (!data.summary) { setLoading(false); return; }
+        const { conceptList, student } = parseMastery(data, pid!, "You");
+        setConcepts(conceptList);
+        setStudents([student]);
+        setLoading(false);
+        return;
+      }
+
+      // Faculty/advisor/admin: fetch ALL students
+      const rosterRes = await fetch(`${API_BASE}/api/roster/${courseId}`);
+      const roster = await rosterRes.json();
+      const allStudents = roster.students || [];
+      if (allStudents.length === 0) { setLoading(false); return; }
+
+      // Get concept structure from first student
+      const structRes = await fetch(`${API_BASE}/api/mastery/${allStudents[0].id}/${courseId}`);
+      const structData = await structRes.json();
+      if (!structData.summary) { setLoading(false); return; }
+      const { conceptList } = parseMastery(structData, "", "");
+      setConcepts(conceptList);
+
+      // Fetch mastery for ALL students in batches of 10
+      const studentData: StudentAttestation[] = [];
+      for (let i = 0; i < allStudents.length; i += 10) {
+        const batch = allStudents.slice(i, i + 10);
+        await Promise.all(batch.map(async (s: any) => {
+          try {
+            const res = await fetch(`${API_BASE}/api/mastery/${s.id}/${courseId}`);
+            const data = await res.json();
+            const { student } = parseMastery(data, s.id, s.name);
+            studentData.push(student);
+          } catch { /* skip */ }
+        }));
+      }
+
+      studentData.sort((a, b) => a.name.localeCompare(b.name));
+      setStudents(studentData);
+      setLoading(false);
+    }
+
+    load();
+  }, [courseId, persona]);
+
+  if (loading) {
+    return (
+      <div className="p-6">
+        <div className="animate-pulse space-y-3">
+          <div className="h-6 w-64 rounded bg-gray-200" />
+          <div className="h-96 rounded bg-gray-100" />
         </div>
       </div>
-      {loading && <div className="p-8 text-center text-gray-400 text-sm">Loading gradebook data...</div>}
-      {!loading && view === "items" && <GradebookItems items={DEMO_ITEMS} />}
-      {!loading && view === "grades" && <GradebookGrid students={liveStudents} assignments={liveAssignments} />}
-      {!loading && view === "students" && <GradebookStudents students={liveStudentsList} />}
+    );
+  }
+
+  return (
+    <div className="p-6">
+      <div className="mb-4 flex items-center justify-between">
+        <h2 className="text-lg font-semibold">
+          {persona === "student" ? "Your Mastery Attestations" : `Mastery Attestations (${students.length} students)`}
+        </h2>
+        <div className="flex items-center gap-4 text-xs text-gray-500">
+          <span className="flex items-center gap-1"><span className="h-2.5 w-2.5 rounded bg-green-500" /> Mastery</span>
+          <span className="flex items-center gap-1"><span className="h-2.5 w-2.5 rounded bg-blue-400" /> Proficient</span>
+          <span className="flex items-center gap-1"><span className="h-2.5 w-2.5 rounded bg-amber-400" /> Emerging</span>
+          <span className="flex items-center gap-1"><span className="h-2.5 w-2.5 rounded bg-gray-200" /> Not started</span>
+        </div>
+      </div>
+
+      <div className="overflow-auto rounded-xl border border-gray-200 bg-white">
+        <table className="min-w-full text-xs">
+          <thead>
+            <tr className="bg-gray-50 border-b border-gray-200">
+              <th className="sticky left-0 z-10 bg-gray-50 px-3 py-2 text-left font-semibold text-gray-700 min-w-[160px]">Student</th>
+              <th className="px-2 py-2 text-center font-semibold text-gray-700 min-w-[48px]">Progress</th>
+              {concepts.map((c) => (
+                <th key={c.id} className="px-1 py-2 text-center min-w-[32px]" title={`${c.title} (${c.module})`}>
+                  <div className="writing-vertical text-[9px] text-gray-500 max-h-[80px] overflow-hidden" style={{ writingMode: "vertical-rl", transform: "rotate(180deg)" }}>
+                    {c.title}
+                  </div>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {students.map((student) => {
+              const total = concepts.length;
+              const done = student.summary.mastery + student.summary.proficient;
+              const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+              return (
+                <tr key={student.id} className="border-t border-gray-100 hover:bg-gray-50/50">
+                  <td className="sticky left-0 z-10 bg-white px-3 py-1.5 font-medium text-gray-800">{student.name}</td>
+                  <td className="px-2 py-1.5 text-center text-gray-500">{pct}%</td>
+                  {concepts.map((c) => {
+                    const level = student.concepts[c.id] || "not_started";
+                    const color = LEVEL_COLORS[level];
+                    return (
+                      <td key={c.id} className="px-1 py-1.5 text-center" title={`${student.name}: ${c.title} — ${level}`}>
+                        <div className={`mx-auto h-5 w-5 rounded ${color} flex items-center justify-center text-[8px] font-bold text-white`}>
+                          {LEVEL_SHORT[level]}
+                        </div>
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
     </div>
   );
 }

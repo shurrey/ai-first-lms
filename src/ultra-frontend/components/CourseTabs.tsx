@@ -10,15 +10,15 @@ interface Tab {
   badge?: number;
 }
 
-export function CourseTabs({ courseId }: { courseId: string }) {
+export function CourseTabs({ courseId, persona }: { courseId: string; persona?: string }) {
   const pathname = usePathname();
   const base = `/course/${courseId}`;
 
   const tabs: Tab[] = [
     { label: "Content", href: base },
-    { label: "Calendar", href: `${base}/calendar` },
-    { label: "Gradebook", href: `${base}/gradebook` },
-    { label: "Messages", href: "#" },
+    { label: "Attestations", href: `${base}/gradebook` },
+    { label: persona === "student" ? "Sessions" : "Roster", href: `${base}/roster` },
+    { label: "Credentials", href: `${base}/credentials` },
     { label: "Analytics", href: `${base}/analytics` },
   ];
 

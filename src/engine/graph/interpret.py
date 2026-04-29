@@ -32,7 +32,8 @@ Agent routing guide:
 - tutor: the default student-facing agent. Handles explaining concepts, Socratic tutoring, \
 quizzing, practice problems, study help, AND student questions about their assignments, \
 grades, progress, and course content. If a STUDENT is asking, tutor is almost always right.
-- assessment: for FACULTY/DESIGNERS creating assessments, question banks, rubrics. NOT for students checking their assignments.
+- assessment: for FACULTY/DESIGNERS creating assessments, question banks, rubrics, \
+AND reviewing credential evidence, approving badges, checking pending credentials. NOT for students checking their assignments.
 - grading_assistant: for FACULTY grading submissions, providing feedback on student work
 - advising: degree requirements, course planning, prerequisites, graduation timelines
 - course_architect: for FACULTY designing courses, module structure, learning objectives
@@ -45,7 +46,10 @@ grades, progress, and course content. If a STUDENT is asking, tutor is almost al
 Key routing rules:
 - Student asking about assignments, grades, progress → tutor (NOT assessment)
 - Faculty creating quizzes or rubrics → assessment
+- Faculty asking about credentials, badges, evidence, approvals → assessment
+- Student asking about their earned badges or credentials → tutor
 - "What courses should I take next semester?" → advising
+- If the student says "done", "bye", "I'm done for today", "that's all", "gotta go", etc. → set action to "session_end" and agent to "tutor". The tutor will handle the farewell with a reflection question.
 
 MULTI-AGENT actions (set action to exactly these strings when the request needs multiple agents):
 - "identify_and_help": find struggling students AND create study guides AND send messages → uses early_alert → content_generator → communication

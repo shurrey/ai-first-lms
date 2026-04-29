@@ -24,5 +24,7 @@ class CreateSessionRequest(BaseModel):
 
 class CreateSessionResponse(BaseModel):
     session_id: str
+    person_id: str | None = None
+    course_uuid: str | None = None
     brief_turn_id: str | None = None
     stream_url: str | None = None

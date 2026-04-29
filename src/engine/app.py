@@ -5,6 +5,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from engine.api.approval import router as approval_router
 from engine.api.converse import router as converse_router
+from engine.api.credentials import router as credentials_router
+from engine.api.podcast import router as podcast_router
+from engine.api.roster import router as roster_router
 from engine.api.session import router as session_router
 from engine.api.stream import router as stream_router
 from engine.db import SessionStore, TurnStore
@@ -20,7 +23,7 @@ def create_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:3000"],
+        allow_origins=["http://localhost:3000", "http://localhost:3100"],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -38,5 +41,8 @@ def create_app() -> FastAPI:
     app.include_router(converse_router)
     app.include_router(stream_router)
     app.include_router(approval_router)
+    app.include_router(podcast_router)
+    app.include_router(roster_router)
+    app.include_router(credentials_router)
 
     return app

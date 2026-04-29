@@ -31,10 +31,10 @@ export function BriefCard({ data }: BriefCardProps) {
               key={i}
               onClick={() => {
                 console.log("[BriefCard] Pill clicked:", action.prompt);
-                const input = document.querySelector<HTMLInputElement>('form input[type="text"]');
+                const input = document.querySelector<HTMLTextAreaElement>("form textarea");
                 const form = input?.closest("form");
                 if (input && form) {
-                  const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+                  const nativeSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
                   nativeSetter?.call(input, action.prompt);
                   // React 16+ listens for 'input' events via its synthetic system
                   input.dispatchEvent(new Event("input", { bubbles: true }));

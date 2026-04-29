@@ -21,13 +21,15 @@ const COURSES = [
 export function Header() {
   const {
     persona, courseId, sessionId,
-    setPersona, setCourseId, setSessionId, setBriefTurnId, resetSession,
+    setPersona, setCourseId, setSessionId, setPersonId, setCourseUuid, setBriefTurnId, resetSession,
   } = useSession();
 
   const createSessionMutation = useMutation({
     mutationFn: ({ p, c }: { p: Persona; c: string }) => createSession(p, c),
     onSuccess: (data) => {
       setSessionId(data.session_id);
+      setPersonId(data.person_id ?? null);
+      setCourseUuid(data.course_uuid ?? null);
       setBriefTurnId(data.brief_turn_id ?? null);
     },
   });

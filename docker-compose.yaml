@@ -184,8 +184,13 @@ services:
       PORT: "8000"
       DATABASE_URL: postgresql://${POSTGRES_USER:-lms}:${POSTGRES_PASSWORD:-lms_dev}@postgres:5432/${POSTGRES_DB:-lms_db}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      FISH_AUDIO_API_KEY: ${FISH_AUDIO_API_KEY:-}
+      FISH_AUDIO_HOST_VOICE: ${FISH_AUDIO_HOST_VOICE:-}
+      FISH_AUDIO_EXPERT_VOICE: ${FISH_AUDIO_EXPERT_VOICE:-}
     ports:
       - "${ORCHESTRATOR_PORT:-8000}:8000"
+    volumes:
+      - audio-data:/app/audio
     depends_on:
       postgres:
         condition: service_healthy
@@ -308,6 +313,7 @@ services:
 
 volumes:
   pgdata:
+  audio-data:
   tempo-data:
   prometheus-data:
   grafana-data:

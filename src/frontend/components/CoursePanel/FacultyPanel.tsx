@@ -1,12 +1,24 @@
 "use client";
 
+import { useEffect, useState } from "react";
+import { useSession } from "@/lib/session-context";
+import { API_BASE } from "@/lib/api";
 import type { BriefCardPayload } from "@/lib/events";
 
+interface PendingCredential {
+  id: string;
+  person_id: string;
+  student_name: string;
+  microcredential_id: string;
+  credential_title: string;
+  created_at: string;
+}
+
 function sendPrompt(prompt: string) {
-  const input = document.querySelector<HTMLInputElement>('form input[type="text"]');
+  const input = document.querySelector<HTMLTextAreaElement>("form textarea");
   const form = input?.closest("form");
   if (input && form) {
-    const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    const nativeSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
     nativeSetter?.call(input, prompt);
     input.dispatchEvent(new Event("input", { bubbles: true }));
     input.dispatchEvent(new Event("change", { bubbles: true }));
@@ -27,6 +39,55 @@ interface StrugglingStudent {
 }
 
 export function FacultyPanel({ data }: { data: BriefCardPayload | null }) {
+  const { courseUuid, personId } = useSession();
+  const [pendingCreds, setPendingCreds] = useState<PendingCredential[]>([]);
+  const [approving, setApproving] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!courseUuid || courseUuid === "all") return;
+    fetch(`${API_BASE}/api/pending-credentials/${courseUuid}`)
+      .then((r) => r.json())
+      .then((d) => setPendingCreds(d.pending || []))
+      .catch(() => {});
+  }, [courseUuid]);
+
+  const handleApprove = async (pendingId: string) => {
+    if (!personId) return;
+    setApproving(pendingId);
+    try {
+      await fetch(`${API_BASE}/api/approve-credential/${pendingId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reviewer_id: personId }),
+      });
+      setPendingCreds((prev) => prev.filter((c) => c.id !== pendingId));
+    } catch {
+      // ignore
+    } finally {
+      setApproving(null);
+    }
+  };
+
+  const handleBulkApprove = async () => {
+    if (!personId || pendingCreds.length === 0) return;
+    setApproving("bulk");
+    try {
+      await fetch(`${API_BASE}/api/approve-credentials/bulk`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          pending_ids: pendingCreds.map((c) => c.id),
+          reviewer_id: personId,
+        }),
+      });
+      setPendingCreds([]);
+    } catch {
+      // ignore
+    } finally {
+      setApproving(null);
+    }
+  };
+
   if (!data) {
     return <p className="text-xs text-muted-foreground animate-pulse">Loading course data...</p>;
   }
@@ -74,6 +135,50 @@ export function FacultyPanel({ data }: { data: BriefCardPayload | null }) {
               <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-sm bg-orange-500" />{dist.low} low</span>
               <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-sm bg-red-500" />{dist.at_risk} risk</span>
             </div>
+          </div>
+        </section>
+      )}
+
+      {pendingCreds.length > 0 && (
+        <section>
+          <div className="flex items-center justify-between mb-1.5">
+            <SectionLabel>Pending Badges ({pendingCreds.length})</SectionLabel>
+            {pendingCreds.length > 1 && (
+              <button
+                onClick={handleBulkApprove}
+                disabled={approving === "bulk"}
+                className="text-[10px] text-primary hover:underline disabled:opacity-50"
+              >
+                {approving === "bulk" ? "Approving..." : "Approve all"}
+              </button>
+            )}
+          </div>
+          <div className="space-y-1.5">
+            {pendingCreds.map((c) => (
+              <div key={c.id} className="rounded-lg border border-amber-200 bg-amber-50/50 dark:border-amber-900 dark:bg-amber-950/20 p-2.5">
+                <div className="flex items-center justify-between">
+                  <div className="min-w-0 flex-1">
+                    <div className="text-xs font-medium truncate">{c.student_name}</div>
+                    <div className="text-[10px] text-muted-foreground">{c.credential_title}</div>
+                  </div>
+                  <div className="flex gap-1 shrink-0 ml-2">
+                    <button
+                      onClick={() => sendPrompt(`Show me the evidence for ${c.student_name}'s ${c.credential_title} credential`)}
+                      className="rounded border border-border bg-background px-1.5 py-0.5 text-[10px] hover:bg-muted"
+                    >
+                      Review
+                    </button>
+                    <button
+                      onClick={() => handleApprove(c.id)}
+                      disabled={approving === c.id}
+                      className="rounded border border-green-300 bg-green-50 px-1.5 py-0.5 text-[10px] text-green-700 hover:bg-green-100 dark:border-green-800 dark:bg-green-950 dark:text-green-400 disabled:opacity-50"
+                    >
+                      {approving === c.id ? "..." : "Approve"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
           </div>
         </section>
       )}

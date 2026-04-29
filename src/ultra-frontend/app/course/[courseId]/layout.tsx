@@ -1,11 +1,12 @@
 "use client";
 
-import { useState } from "react";
 import { CourseNav } from "@/components/CourseNav";
 import { CourseTabs } from "@/components/CourseTabs";
 import { CourseBanner } from "@/components/CourseBanner";
 import { AiFab } from "@/components/AiFab";
 import { AiPanel } from "@/components/AiPanel";
+import { AiPanelProvider, useAiPanel } from "@/lib/ai-panel-context";
+import { usePersona } from "@/lib/persona-context";
 import { use } from "react";
 
 const COURSE_TITLES: Record<string, string> = {
@@ -24,16 +25,28 @@ export default function CourseLayout({
 }) {
   const { courseId } = use(params);
   const title = COURSE_TITLES[courseId] ?? "Course";
-  const [aiOpen, setAiOpen] = useState(false);
+
+  return (
+    <AiPanelProvider>
+      <CourseLayoutInner courseId={courseId} title={title}>
+        {children}
+      </CourseLayoutInner>
+    </AiPanelProvider>
+  );
+}
+
+function CourseLayoutInner({ courseId, title, children }: { courseId: string; title: string; children: React.ReactNode }) {
+  const { isOpen, open, close } = useAiPanel();
+  const { persona } = usePersona();
 
   return (
     <div className="flex h-full flex-col">
       <CourseNav courseTitle={title} />
-      <CourseTabs courseId={courseId} />
+      <CourseTabs courseId={courseId} persona={persona} />
       <CourseBanner courseId={courseId} title={title} />
       <div className="flex-1 overflow-auto">{children}</div>
-      <AiFab onClick={() => setAiOpen(true)} />
-      {aiOpen && <AiPanel onClose={() => setAiOpen(false)} courseTitle={title} />}
+      <AiFab onClick={() => open()} />
+      {isOpen && <AiPanel onClose={close} courseId={courseId} courseTitle={title} />}
     </div>
   );
 }

@@ -1,13 +1,17 @@
 "use client";
 
+import { useEffect, useState, useRef } from "react";
+import { useSession } from "@/lib/session-context";
+import { useTurn } from "@/lib/turn-context";
+import { API_BASE } from "@/lib/api";
 import type { BriefCardPayload } from "@/lib/events";
 import { MasteryPanel } from "./MasteryPanel";
 
 function sendPrompt(prompt: string) {
-  const input = document.querySelector<HTMLInputElement>('form input[type="text"]');
+  const input = document.querySelector<HTMLTextAreaElement>("form textarea");
   const form = input?.closest("form");
   if (input && form) {
-    const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    const nativeSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
     nativeSetter?.call(input, prompt);
     input.dispatchEvent(new Event("input", { bubbles: true }));
     input.dispatchEvent(new Event("change", { bubbles: true }));
@@ -16,8 +20,30 @@ function sendPrompt(prompt: string) {
 }
 
 export function StudentPanel({ data }: { data: BriefCardPayload | null }) {
-  // Show mastery view if mastery data is available
-  const masteryData = (data?.extra as any)?.mastery_data;
+  const { personId, courseUuid } = useSession();
+  const { status } = useTurn();
+  const [liveMastery, setLiveMastery] = useState<any>(null);
+  const prevStatusRef = useRef(status);
+
+  // Seed from brief data
+  const briefMastery = (data?.extra as any)?.mastery_data;
+
+  // Refetch mastery data when a turn completes
+  useEffect(() => {
+    if (prevStatusRef.current === "streaming" && status === "done" && personId && courseUuid && courseUuid !== "all") {
+      fetch(`${API_BASE}/api/mastery/${personId}/${courseUuid}`)
+        .then((r) => r.json())
+        .then((d) => {
+          if (d.summary) setLiveMastery(d);
+        })
+        .catch(() => {});
+    }
+    prevStatusRef.current = status;
+  }, [status, personId, courseUuid]);
+
+  // Use live data if available, fall back to brief data
+  const masteryData = liveMastery || briefMastery;
+
   if (data && masteryData?.summary) {
     return <MasteryPanel data={masteryData} />;
   }

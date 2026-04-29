@@ -2,6 +2,9 @@
 
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { MermaidBlock } from "./MermaidBlock";
+import { CodeSandbox } from "./CodeSandbox";
+import { VisualBlock } from "./VisualBlock";
 
 export interface ChatMessage {
   id: string;
@@ -15,10 +18,10 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
   const isUser = message.role === "user";
 
   const handleFollowUp = (prompt: string) => {
-    const input = document.querySelector<HTMLInputElement>('form input[type="text"]');
+    const input = document.querySelector<HTMLTextAreaElement>("form textarea");
     const form = input?.closest("form");
     if (input && form) {
-      const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      const nativeSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
       nativeSetter?.call(input, prompt);
       input.dispatchEvent(new Event("input", { bubbles: true }));
       input.dispatchEvent(new Event("change", { bubbles: true }));
@@ -40,7 +43,55 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
         ) : (
           <>
             <div className="prose prose-sm max-w-none dark:prose-invert">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={{
+                  code({ className, children, ...props }) {
+                    const content = String(children).replace(/\n$/, "");
+                    const langMatch = /language-(\S+)/.exec(className || "");
+                    const lang = langMatch?.[1] || "";
+
+                    // Mermaid diagrams
+                    if (lang === "mermaid") {
+                      return <MermaidBlock code={content} />;
+                    }
+
+                    // Interactive Python sandbox
+                    if (lang === "python:interactive" || lang === "python:sandbox") {
+                      return <CodeSandbox initialCode={content} />;
+                    }
+
+                    // Structured visual blocks (JSON)
+                    if (lang.startsWith("visual:")) {
+                      try {
+                        const data = JSON.parse(content);
+                        return <VisualBlock data={data} />;
+                      } catch {
+                        // Fall through to regular code block
+                      }
+                    }
+
+                    // Regular code block (block vs inline detection)
+                    const isBlock = content.includes("\n") || (className && className.includes("language-"));
+                    if (isBlock) {
+                      return (
+                        <pre className="rounded-md bg-gray-950 p-3 overflow-x-auto">
+                          <code className={className} {...props}>{content}</code>
+                        </pre>
+                      );
+                    }
+
+                    // Inline code
+                    return <code className={className} {...props}>{children}</code>;
+                  },
+                  // Prevent wrapping code blocks in extra <pre>
+                  pre({ children }) {
+                    return <>{children}</>;
+                  },
+                }}
+              >
+                {message.content}
+              </ReactMarkdown>
             </div>
             {message.followUps && message.followUps.length > 0 && (
               <div className="mt-3 flex flex-wrap gap-1.5 border-t border-border/50 pt-2">

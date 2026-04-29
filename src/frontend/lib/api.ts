@@ -7,7 +7,7 @@ export async function createSession(
   persona: Persona,
   courseId: string,
   personId?: string
-): Promise<{ session_id: string; brief_turn_id: string | null; stream_url: string | null }> {
+): Promise<{ session_id: string; person_id: string | null; course_uuid: string | null; brief_turn_id: string | null; stream_url: string | null }> {
   const res = await fetch(`${API_BASE}/api/session`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -85,6 +85,37 @@ export async function submitClarification(params: {
   if (!res.ok) {
     throw new Error(`Failed to submit clarification: ${res.status}`);
   }
+}
+
+export interface PodcastResult {
+  podcast_id: string;
+  audio_url: string;
+  script: string;
+  segment_count: number;
+  title: string;
+  error?: string;
+}
+
+export async function generatePodcast(
+  personId: string,
+  courseId: string,
+  sessionId?: string,
+  conceptIds?: string[]
+): Promise<PodcastResult> {
+  const res = await fetch(`${API_BASE}/api/generate-podcast`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      person_id: personId,
+      course_id: courseId,
+      ...(sessionId && { session_id: sessionId }),
+      ...(conceptIds && { concept_ids: conceptIds }),
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`Failed to generate podcast: ${res.status}`);
+  }
+  return res.json();
 }
 
 export async function getSessionHistory(
