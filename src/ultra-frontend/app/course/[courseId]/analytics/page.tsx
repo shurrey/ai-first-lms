@@ -1,76 +1,253 @@
-import { BarChart3, Table, Download, Mail, Sparkles } from "lucide-react";
+"use client";
 
-const STUDENTS = [
-  { name: "Emma Smith", grade: 0.88, missedDue: 0, hours: 42.5, daysSince: 0 },
-  { name: "Liam Johnson", grade: 0.64, missedDue: 1, hours: 28.3, daysSince: 1 },
-  { name: "Olivia Williams", grade: 0.32, missedDue: 3, hours: 8.1, daysSince: 14 },
-  { name: "Noah Brown", grade: 0.79, missedDue: 0, hours: 35.2, daysSince: 0 },
-  { name: "Ava Jones", grade: 0.82, missedDue: 0, hours: 38.7, daysSince: 0 },
-  { name: "Sophia Davis", grade: 0.28, missedDue: 4, hours: 3.2, daysSince: 21 },
-];
+import { use, useEffect, useState } from "react";
+import { usePersona } from "@/lib/persona-context";
+import { API_BASE } from "@/lib/api";
+import { BarChart3, TrendingUp, Award, MessageSquare } from "lucide-react";
 
-function GradePillInline({ score }: { score: number | null }) {
-  if (score === null) return <span className="inline-flex h-7 items-center justify-center rounded-full bg-gray-200 px-3 text-xs font-medium text-gray-500">--</span>;
-  const pct = Math.round(score * 100);
-  const cls = pct >= 70 ? "bg-green-500 text-white" : pct >= 50 ? "bg-yellow-400 text-black" : "bg-red-500 text-white";
-  return <span className={`inline-flex h-7 items-center justify-center rounded-full px-3 text-xs font-semibold ${cls}`}>{pct}%</span>;
+interface StudentAnalytics {
+  id: string;
+  name: string;
+  session_count: number;
+  total_turns: number;
+  last_active: string | null;
+  mastery: number;
+  proficient: number;
+  emerging: number;
+  total_concepts: number;
 }
 
-export default function AnalyticsPage() {
+export default function AnalyticsPage({ params }: { params: Promise<{ courseId: string }> }) {
+  const { courseId } = use(params);
+  const { persona, personId, ensureSession } = usePersona();
+
+  if (persona === "student") {
+    return <StudentAnalyticsView courseId={courseId} personId={personId} ensureSession={ensureSession} />;
+  }
+  return <FacultyAnalyticsView courseId={courseId} ensureSession={ensureSession} />;
+}
+
+function StudentAnalyticsView({ courseId, personId, ensureSession }: { courseId: string; personId: string | null; ensureSession: (c: string) => Promise<any> }) {
+  const [data, setData] = useState<any>(null);
+  const [sessions, setSessions] = useState<any[]>([]);
+  const [insights, setInsights] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    ensureSession(courseId).then(async () => {
+      if (!personId) return;
+      const [masteryRes, sessionsRes] = await Promise.all([
+        fetch(`${API_BASE}/api/mastery/${personId}/${courseId}`),
+        fetch(`${API_BASE}/api/student/${personId}/sessions?course_id=${courseId}`),
+      ]);
+      const mastery = await masteryRes.json();
+      const sess = await sessionsRes.json();
+      setData(mastery);
+      setSessions(sess.sessions || []);
+      fetch(`${API_BASE}/api/student-insights/${personId}`)
+        .then((r) => r.json())
+        .then((d) => setInsights(d.insights || []))
+        .catch(() => {});
+      setLoading(false);
+    });
+  }, [courseId, personId]);
+
+  if (loading || !data?.summary) {
+    return <div className="p-6"><div className="animate-pulse h-48 rounded bg-gray-100" /></div>;
+  }
+
+  const s = data.summary;
+  const totalDone = s.mastery + s.proficient;
+  const pct = s.total_concepts > 0 ? Math.round((totalDone / s.total_concepts) * 100) : 0;
+
   return (
-    <div>
-      <div className="flex items-center border-b border-gray-200 px-4">
-        <button className="relative px-4 py-3 text-sm font-semibold text-[#1a1a1a]">Course Activity<div className="absolute bottom-0 left-0 right-0 h-[3px] bg-[#7c3aed]" /></button>
-        <button className="px-4 py-3 text-sm text-gray-500">Question Analysis</button>
-        <button className="px-4 py-3 text-sm text-gray-500">Course Reports</button>
+    <div className="p-6 max-w-3xl">
+      <h2 className="text-lg font-semibold mb-4">Your Learning Analytics</h2>
+
+      <div className="grid grid-cols-4 gap-3 mb-6">
+        <StatCard icon={<TrendingUp className="h-5 w-5 text-green-500" />} label="Progress" value={`${pct}%`} sub={`${totalDone} of ${s.total_concepts} concepts`} />
+        <StatCard icon={<Award className="h-5 w-5 text-indigo-500" />} label="Credentials" value={`${s.microcredentials_earned}`} sub={`of ${s.microcredentials_total}`} />
+        <StatCard icon={<MessageSquare className="h-5 w-5 text-blue-500" />} label="Sessions" value={`${sessions.length}`} sub="tutoring sessions" />
+        <StatCard icon={<BarChart3 className="h-5 w-5 text-amber-500" />} label="Mastery" value={`${s.mastery}`} sub="concepts mastered" />
       </div>
-      <div className="px-6 py-3 text-sm text-gray-600">
-        This report shows student performance and activity in your course.
-        <br /><span className="text-xs text-gray-400">Overall grade and hours in course updates every 24 hours.</span>
-      </div>
-      <div className="flex items-center justify-between px-6 py-2 border-b border-gray-200">
-        <div className="flex items-center gap-3">
-          <div className="flex border border-gray-300 rounded">
-            <button className="px-2 py-1"><BarChart3 className="h-4 w-4 text-gray-500" /></button>
-            <button className="px-2 py-1 bg-gray-100 border-l border-gray-300"><Table className="h-4 w-4 text-gray-700" /></button>
-          </div>
-          <select className="border border-gray-300 rounded px-3 py-1.5 text-sm"><option>All students</option></select>
+
+      <div className="rounded-xl border border-gray-200 bg-white p-4 mb-4">
+        <h3 className="text-sm font-semibold mb-3">Mastery Breakdown</h3>
+        <div className="flex h-4 w-full overflow-hidden rounded-full bg-gray-100 mb-2">
+          {s.mastery > 0 && <div className="bg-green-500" style={{ width: `${(s.mastery / s.total_concepts) * 100}%` }} />}
+          {s.proficient > 0 && <div className="bg-blue-400" style={{ width: `${(s.proficient / s.total_concepts) * 100}%` }} />}
+          {s.emerging > 0 && <div className="bg-amber-400" style={{ width: `${(s.emerging / s.total_concepts) * 100}%` }} />}
         </div>
-        <div className="flex items-center gap-2">
-          <button className="flex items-center gap-1 rounded bg-[#6366f1] px-3 py-1.5 text-sm text-white hover:bg-[#4f46e5]"><Sparkles className="h-3.5 w-3.5" />AI Insights</button>
-          <button className="flex items-center gap-1 border border-gray-300 rounded px-3 py-1.5 text-sm"><Mail className="h-3.5 w-3.5" />Send message</button>
-          <button className="flex items-center gap-1 border border-gray-300 rounded px-3 py-1.5 text-sm"><Download className="h-3.5 w-3.5" />Download</button>
+        <div className="flex gap-4 text-xs text-gray-500">
+          <span className="flex items-center gap-1"><span className="h-2.5 w-2.5 rounded bg-green-500" />{s.mastery} mastered</span>
+          <span className="flex items-center gap-1"><span className="h-2.5 w-2.5 rounded bg-blue-400" />{s.proficient} proficient</span>
+          <span className="flex items-center gap-1"><span className="h-2.5 w-2.5 rounded bg-amber-400" />{s.emerging} emerging</span>
+          <span className="flex items-center gap-1"><span className="h-2.5 w-2.5 rounded bg-gray-200" />{s.not_started} not started</span>
         </div>
       </div>
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="border-b-2 border-gray-200 text-left text-xs font-semibold text-gray-600">
-            <th className="py-3 px-6 w-8"><input type="checkbox" /></th>
-            <th className="py-3 px-4">Student ⇅</th>
-            <th className="py-3 px-4">Overall Grade ⇅</th>
-            <th className="py-3 px-4">Missed Due Dates ⇅</th>
-            <th className="py-3 px-4">Hours in Course ⇅</th>
-            <th className="py-3 px-4">Days Since Last Access ⇅</th>
-          </tr>
-        </thead>
-        <tbody>
-          {STUDENTS.map((s, i) => (
-            <tr key={i} className="border-b border-gray-50 hover:bg-gray-50">
-              <td className="py-3 px-6"><input type="checkbox" /></td>
-              <td className="py-3 px-4">
-                <div className="flex items-center gap-3">
-                  <div className="flex h-8 w-8 items-center justify-center rounded-full bg-gray-200 text-xs font-semibold text-gray-500">{s.name.split(" ").map(w => w[0]).join("")}</div>
-                  <span>{s.name}</span>
+
+      {data.microcredentials && (
+        <div className="rounded-xl border border-gray-200 bg-white p-4">
+          <h3 className="text-sm font-semibold mb-3">Credential Progress</h3>
+          <div className="space-y-2">
+            {data.microcredentials.map((mc: any, i: number) => {
+              const mcPct = mc.total_concepts > 0 ? Math.round(((mc.progress.mastery + mc.progress.proficient) / mc.total_concepts) * 100) : 0;
+              return (
+                <div key={i} className="flex items-center gap-3">
+                  <span>{mc.earned ? "🏅" : "🔒"}</span>
+                  <div className="flex-1">
+                    <div className="flex justify-between text-xs mb-0.5">
+                      <span className="font-medium">{mc.title}</span>
+                      <span className="text-gray-400">{mcPct}%</span>
+                    </div>
+                    <div className="h-1.5 w-full rounded-full bg-gray-100">
+                      <div className="h-1.5 rounded-full bg-indigo-500" style={{ width: `${mcPct}%` }} />
+                    </div>
+                  </div>
                 </div>
-              </td>
-              <td className="py-3 px-4"><GradePillInline score={s.grade} /></td>
-              <td className="py-3 px-4">{s.missedDue}</td>
-              <td className="py-3 px-4">{s.hours}</td>
-              <td className="py-3 px-4">{s.daysSince === 0 ? "—" : s.daysSince}</td>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {insights.length > 0 && (
+        <div className="rounded-xl border border-gray-200 bg-white p-4">
+          <h3 className="text-sm font-semibold mb-3">Your Learning Insights</h3>
+          <div className="space-y-2">
+            {insights.map((insight, i) => (
+              <p key={i} className="text-xs text-gray-600 flex items-start gap-2">
+                <span className="text-amber-500 shrink-0 mt-0.5">*</span>
+                {insight}
+              </p>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FacultyAnalyticsView({ courseId, ensureSession }: { courseId: string; ensureSession: (c: string) => Promise<any> }) {
+  const [students, setStudents] = useState<StudentAnalytics[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    ensureSession(courseId).then(async () => {
+      const rosterRes = await fetch(`${API_BASE}/api/roster/${courseId}`);
+      const roster = await rosterRes.json();
+
+      const analyticsData: StudentAnalytics[] = [];
+      const allStudents = roster.students || [];
+
+      // Fetch mastery for each student in batches
+      for (let i = 0; i < allStudents.length; i += 10) {
+        const batch = allStudents.slice(i, i + 10);
+        await Promise.all(batch.map(async (s: any) => {
+          try {
+            const res = await fetch(`${API_BASE}/api/mastery/${s.id}/${courseId}`);
+            const data = await res.json();
+            const sum = data.summary || {};
+            analyticsData.push({
+              id: s.id,
+              name: s.name,
+              session_count: s.session_count,
+              total_turns: s.total_turns,
+              last_active: s.last_active,
+              mastery: sum.mastery || 0,
+              proficient: sum.proficient || 0,
+              emerging: sum.emerging || 0,
+              total_concepts: sum.total_concepts || 0,
+            });
+          } catch { /* skip */ }
+        }));
+      }
+
+      analyticsData.sort((a, b) => a.name.localeCompare(b.name));
+      setStudents(analyticsData);
+      setLoading(false);
+    });
+  }, [courseId]);
+
+  if (loading) return <div className="p-6"><div className="animate-pulse h-96 rounded bg-gray-100" /></div>;
+
+  const avgMastery = students.length > 0 ? Math.round(students.reduce((s, st) => s + st.mastery, 0) / students.length) : 0;
+  const avgProficient = students.length > 0 ? Math.round(students.reduce((s, st) => s + st.proficient, 0) / students.length) : 0;
+  const activeSessions = students.reduce((s, st) => s + st.session_count, 0);
+  const totalConcepts = students[0]?.total_concepts || 0;
+
+  return (
+    <div className="p-6">
+      <h2 className="text-lg font-semibold mb-4">Course Analytics</h2>
+
+      <div className="grid grid-cols-4 gap-3 mb-6">
+        <StatCard icon={<TrendingUp className="h-5 w-5 text-green-500" />} label="Avg Mastered" value={`${avgMastery}`} sub={`of ${totalConcepts} concepts`} />
+        <StatCard icon={<BarChart3 className="h-5 w-5 text-blue-500" />} label="Avg Proficient" value={`${avgProficient}`} sub="concepts" />
+        <StatCard icon={<MessageSquare className="h-5 w-5 text-indigo-500" />} label="Total Sessions" value={`${activeSessions}`} sub="tutoring sessions" />
+        <StatCard icon={<Award className="h-5 w-5 text-amber-500" />} label="Students" value={`${students.length}`} sub="enrolled" />
+      </div>
+
+      <div className="overflow-auto rounded-xl border border-gray-200 bg-white">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b-2 border-gray-200 text-left text-xs font-semibold text-gray-600">
+              <th className="py-3 px-4">Student</th>
+              <th className="py-3 px-4">Progress</th>
+              <th className="py-3 px-4">Mastered</th>
+              <th className="py-3 px-4">Proficient</th>
+              <th className="py-3 px-4">Emerging</th>
+              <th className="py-3 px-4">Sessions</th>
+              <th className="py-3 px-4">Last Active</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {students.map((s) => {
+              const done = s.mastery + s.proficient;
+              const pct = s.total_concepts > 0 ? Math.round((done / s.total_concepts) * 100) : 0;
+              return (
+                <tr key={s.id} className="border-b border-gray-50 hover:bg-gray-50">
+                  <td className="py-2.5 px-4">
+                    <div className="flex items-center gap-2">
+                      <div className="flex h-7 w-7 items-center justify-center rounded-full bg-gray-200 text-[10px] font-medium text-gray-600">
+                        {s.name.split(" ").map((w) => w[0]).join("")}
+                      </div>
+                      <span className="text-sm">{s.name}</span>
+                    </div>
+                  </td>
+                  <td className="py-2.5 px-4">
+                    <div className="flex items-center gap-2">
+                      <div className="h-2 w-16 rounded-full bg-gray-100 overflow-hidden">
+                        <div className="h-2 rounded-full bg-green-500" style={{ width: `${pct}%` }} />
+                      </div>
+                      <span className="text-xs text-gray-500">{pct}%</span>
+                    </div>
+                  </td>
+                  <td className="py-2.5 px-4 text-green-600 font-medium">{s.mastery}</td>
+                  <td className="py-2.5 px-4 text-blue-500 font-medium">{s.proficient}</td>
+                  <td className="py-2.5 px-4 text-amber-500 font-medium">{s.emerging}</td>
+                  <td className="py-2.5 px-4">{s.session_count}</td>
+                  <td className="py-2.5 px-4 text-xs text-gray-400">
+                    {s.last_active ? new Date(s.last_active).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "—"}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function StatCard({ icon, label, value, sub }: { icon: React.ReactNode; label: string; value: string; sub: string }) {
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white p-3">
+      <div className="flex items-center gap-2 mb-1">
+        {icon}
+        <span className="text-xs text-gray-500">{label}</span>
+      </div>
+      <div className="text-xl font-bold">{value}</div>
+      <div className="text-[10px] text-gray-400">{sub}</div>
     </div>
   );
 }
