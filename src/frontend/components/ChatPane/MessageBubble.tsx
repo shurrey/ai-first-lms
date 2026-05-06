@@ -5,6 +5,7 @@ import remarkGfm from "remark-gfm";
 import { MermaidBlock } from "./MermaidBlock";
 import { CodeSandbox } from "./CodeSandbox";
 import { VisualBlock } from "./VisualBlock";
+import { sendPrompt } from "@/components/CoursePanel/shared";
 
 export interface ChatMessage {
   id: string;
@@ -16,18 +17,6 @@ export interface ChatMessage {
 
 export function MessageBubble({ message }: { message: ChatMessage }) {
   const isUser = message.role === "user";
-
-  const handleFollowUp = (prompt: string) => {
-    const input = document.querySelector<HTMLTextAreaElement>("form textarea");
-    const form = input?.closest("form");
-    if (input && form) {
-      const nativeSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
-      nativeSetter?.call(input, prompt);
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-      input.dispatchEvent(new Event("change", { bubbles: true }));
-      requestAnimationFrame(() => requestAnimationFrame(() => form.requestSubmit()));
-    }
-  };
 
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
@@ -98,7 +87,7 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
                 {message.followUps.map((fu, i) => (
                   <button
                     key={i}
-                    onClick={() => handleFollowUp(fu)}
+                    onClick={() => sendPrompt(fu)}
                     className="rounded-md border border-border bg-background px-2 py-1 text-xs hover:bg-primary/10 transition-colors"
                   >
                     {fu}

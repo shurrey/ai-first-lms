@@ -132,6 +132,12 @@ async def _call_mcp_tool(tool_name: str, arguments: dict[str, Any]) -> str:
         return json.dumps({"error": f"Tool call failed: {exc}"})
 
 
+async def _call_mcp_json(tool_name: str, arguments: dict[str, Any]) -> Any:
+    """Call an MCP tool and return the parsed JSON result."""
+    raw = await _call_mcp_tool(tool_name, arguments)
+    return json.loads(raw) if isinstance(raw, str) else raw
+
+
 # Cached tool schemas fetched from MCP servers at first use
 _tool_schema_cache: dict[str, dict[str, Any]] = {}
 _schema_cache_loaded = False

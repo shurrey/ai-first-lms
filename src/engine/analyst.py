@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import random
@@ -22,20 +23,15 @@ async def run_session_analysis(
     deep: bool = False,
 ) -> None:
     """Run post-session learning analysis. Called as a background task."""
-    from engine.agents.runner import _call_mcp_tool
+    from engine.agents.runner import _call_mcp_json
 
     try:
         # Gather data
-        transcript_raw = await _call_mcp_tool("roster.get_session_transcript", {"session_id": session_id})
-        transcript = json.loads(transcript_raw) if isinstance(transcript_raw, str) else transcript_raw
-
-        profile_raw = await _call_mcp_tool("roster.get_learner_profile", {"person_id": person_id})
-        profile = json.loads(profile_raw) if isinstance(profile_raw, str) else profile_raw
-
-        attestations_raw = await _call_mcp_tool("attestations.get_student_attestations", {
+        transcript = await _call_mcp_json("roster.get_session_transcript", {"session_id": session_id})
+        profile = await _call_mcp_json("roster.get_learner_profile", {"person_id": person_id})
+        attestations = await _call_mcp_json("attestations.get_student_attestations", {
             "person_id": person_id, "course_id": course_id,
         })
-        attestations = json.loads(attestations_raw) if isinstance(attestations_raw, str) else attestations_raw
 
         turns = transcript.get("turns", [])
         if not turns:
@@ -58,16 +54,14 @@ async def run_session_analysis(
         # For deep review, gather additional session history
         deep_context = ""
         if deep:
-            sessions_raw = await _call_mcp_tool("roster.list_student_sessions", {
+            sessions = await _call_mcp_json("roster.list_student_sessions", {
                 "person_id": person_id, "course_id": course_id,
             })
-            sessions = json.loads(sessions_raw) if isinstance(sessions_raw, str) else sessions_raw
             prior_sessions = [s for s in sessions.get("sessions", []) if s["session_id"] != session_id][:15]
 
             for ps in prior_sessions[:5]:
                 try:
-                    pt_raw = await _call_mcp_tool("roster.get_session_transcript", {"session_id": ps["session_id"]})
-                    pt = json.loads(pt_raw) if isinstance(pt_raw, str) else pt_raw
+                    pt = await _call_mcp_json("roster.get_session_transcript", {"session_id": ps["session_id"]})
                     pt_text = "\n".join(
                         f"{'Student' if t['role'] == 'user' else 'Tutor'}: {t['content'][:200]}"
                         for t in pt.get("turns", [])[:10]
@@ -129,7 +123,7 @@ Return ONLY valid JSON matching this schema:
 
         # 1. Session summary
         if result.get("session_summary"):
-            await _call_mcp_tool("roster.update_session_summary", {
+            await _call_mcp_json("roster.update_session_summary", {
                 "session_id": session_id,
                 "summary": result["session_summary"],
                 "review_flag": result.get("review_flag", False),
@@ -139,19 +133,16 @@ Return ONLY valid JSON matching this schema:
 
         # 2. Profile update
         if result.get("profile_additions"):
-            new_profile = current_profile
-            if new_profile:
-                new_profile += "\n\n" + result["profile_additions"]
-            else:
-                new_profile = result["profile_additions"]
-            await _call_mcp_tool("roster.update_learner_profile", {
+            additions = result["profile_additions"]
+            new_profile = f"{current_profile}\n\n{additions}" if current_profile else additions
+            await _call_mcp_json("roster.update_learner_profile", {
                 "person_id": person_id,
                 "profile_md": new_profile,
             })
 
         # 3. Student insights
         if result.get("student_insights"):
-            await _call_mcp_tool("roster.update_student_insights", {
+            await _call_mcp_json("roster.update_student_insights", {
                 "person_id": person_id,
                 "insights": result["student_insights"],
             })
@@ -159,7 +150,7 @@ Return ONLY valid JSON matching this schema:
         # 4. Concept reviews
         for cr in result.get("concepts_reviewed", []):
             try:
-                await _call_mcp_tool("roster.save_concept_review", {
+                await _call_mcp_json("roster.save_concept_review", {
                     "person_id": person_id,
                     "concept_id": cr.get("id", ""),
                     "session_id": session_id,
@@ -176,7 +167,6 @@ Return ONLY valid JSON matching this schema:
             )
             if should_deep:
                 logger.info("Triggering deep review for %s", person_id)
-                import asyncio
                 asyncio.create_task(run_session_analysis(
                     session_id=session_id,
                     person_id=person_id,

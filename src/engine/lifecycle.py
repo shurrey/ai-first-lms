@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import random
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -14,14 +13,13 @@ async def get_retrieval_practice_injection(
     person_id: str, course_id: str, session_id: str
 ) -> str | None:
     """Generate retrieval practice context injection for session start."""
-    from engine.agents.runner import _call_mcp_tool
+    from engine.agents.runner import _call_mcp_json
 
-    raw = await _call_mcp_tool("roster.get_review_candidates", {
+    data = await _call_mcp_json("roster.get_review_candidates", {
         "person_id": person_id,
         "course_id": course_id,
         "limit": 3,
     })
-    data = json.loads(raw) if isinstance(raw, str) else raw
     concepts = data.get("concepts", [])
 
     if not concepts:

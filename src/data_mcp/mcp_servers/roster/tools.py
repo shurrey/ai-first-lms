@@ -1,12 +1,15 @@
 """Roster MCP server tool handlers."""
 from __future__ import annotations
 
+import json
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 import asyncpg
 
 from data_mcp.mcp_base import ToolDef
+from data_mcp.mcp_servers._helpers import parse_json_column, resolve_concept_id
 
 
 def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
@@ -192,10 +195,7 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
             )
             if not row:
                 return {"error": "Person not found"}
-            attrs = row["attributes"] or {}
-            import json
-            if isinstance(attrs, str):
-                attrs = json.loads(attrs)
+            attrs = parse_json_column(row["attributes"])
             return {"profile": attrs.get("learner_profile", ""), "person_id": person_id}
 
     async def update_learner_profile(args: dict[str, Any]) -> dict[str, Any]:
@@ -204,14 +204,10 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
         if not person_id or profile_md is None:
             return {"error": "person_id and profile_md are required"}
         async with pool.acquire() as conn:
-            import json
-            # Get current attributes
             row = await conn.fetchrow("SELECT attributes FROM persons WHERE id = $1", uuid.UUID(person_id))
             if not row:
                 return {"error": "Person not found"}
-            attrs = row["attributes"] or {}
-            if isinstance(attrs, str):
-                attrs = json.loads(attrs)
+            attrs = parse_json_column(row["attributes"])
             attrs["learner_profile"] = profile_md
             await conn.execute(
                 "UPDATE persons SET attributes = $1 WHERE id = $2",
@@ -323,14 +319,9 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
         if not all([person_id, concept_id, outcome]):
             return {"error": "person_id, concept_id, and outcome are required"}
         async with pool.acquire() as conn:
-            # Resolve concept by title if needed
-            try:
-                cid = uuid.UUID(concept_id)
-            except ValueError:
-                row = await conn.fetchrow("SELECT id FROM nodes WHERE LOWER(title) = LOWER($1) AND kind = 'concept'", concept_id)
-                if not row:
-                    return {"error": f"Concept not found: {concept_id}"}
-                cid = row["id"]
+            cid = await resolve_concept_id(conn, concept_id)
+            if cid is None:
+                return {"error": f"Concept not found: {concept_id}"}
             await conn.execute(
                 """INSERT INTO concept_reviews (person_id, concept_id, session_id, outcome)
                    VALUES ($1, $2, $3, $4)
@@ -375,13 +366,10 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
         if not person_id:
             return {"error": "person_id is required"}
         async with pool.acquire() as conn:
-            import json as _json
             row = await conn.fetchrow("SELECT attributes FROM persons WHERE id = $1", uuid.UUID(person_id))
             if not row:
                 return {"error": "Person not found"}
-            attrs = row["attributes"] or {}
-            if isinstance(attrs, str):
-                attrs = _json.loads(attrs)
+            attrs = parse_json_column(row["attributes"])
             return {"goals": attrs.get("goals", [])}
 
     async def set_goal(args: dict[str, Any]) -> dict[str, Any]:
@@ -391,14 +379,10 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
         if not person_id or not description:
             return {"error": "person_id and description are required"}
         async with pool.acquire() as conn:
-            import json as _json
-            from datetime import datetime, timezone
             row = await conn.fetchrow("SELECT attributes FROM persons WHERE id = $1", uuid.UUID(person_id))
             if not row:
                 return {"error": "Person not found"}
-            attrs = row["attributes"] or {}
-            if isinstance(attrs, str):
-                attrs = _json.loads(attrs)
+            attrs = parse_json_column(row["attributes"])
             goals = attrs.get("goals", [])
             goals.append({
                 "description": description,
@@ -407,7 +391,7 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                 "status": "active",
             })
             attrs["goals"] = goals
-            await conn.execute("UPDATE persons SET attributes = $1 WHERE id = $2", _json.dumps(attrs), uuid.UUID(person_id))
+            await conn.execute("UPDATE persons SET attributes = $1 WHERE id = $2", json.dumps(attrs), uuid.UUID(person_id))
             return {"saved": True}
 
     # ── Student insights & session summary ──
@@ -418,15 +402,12 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
         if not person_id or insights is None:
             return {"error": "person_id and insights are required"}
         async with pool.acquire() as conn:
-            import json as _json
             row = await conn.fetchrow("SELECT attributes FROM persons WHERE id = $1", uuid.UUID(person_id))
             if not row:
                 return {"error": "Person not found"}
-            attrs = row["attributes"] or {}
-            if isinstance(attrs, str):
-                attrs = _json.loads(attrs)
+            attrs = parse_json_column(row["attributes"])
             attrs["student_insights"] = insights
-            await conn.execute("UPDATE persons SET attributes = $1 WHERE id = $2", _json.dumps(attrs), uuid.UUID(person_id))
+            await conn.execute("UPDATE persons SET attributes = $1 WHERE id = $2", json.dumps(attrs), uuid.UUID(person_id))
             return {"updated": True}
 
     async def update_session_summary(args: dict[str, Any]) -> dict[str, Any]:
@@ -437,18 +418,15 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
         if not session_id or not summary:
             return {"error": "session_id and summary are required"}
         async with pool.acquire() as conn:
-            import json as _json
             row = await conn.fetchrow("SELECT metadata FROM sessions WHERE id = $1", uuid.UUID(session_id))
             if not row:
                 return {"error": "Session not found"}
-            metadata = row["metadata"] or {}
-            if isinstance(metadata, str):
-                metadata = _json.loads(metadata)
+            metadata = parse_json_column(row["metadata"])
             metadata["summary"] = summary
             metadata["review_flag"] = review_flag
             if review_reason:
                 metadata["review_reason"] = review_reason
-            await conn.execute("UPDATE sessions SET metadata = $1 WHERE id = $2", _json.dumps(metadata), uuid.UUID(session_id))
+            await conn.execute("UPDATE sessions SET metadata = $1 WHERE id = $2", json.dumps(metadata), uuid.UUID(session_id))
             return {"updated": True}
 
     return [

@@ -1,12 +1,15 @@
 """Assessments MCP server tool handlers."""
 from __future__ import annotations
 
+import json
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 import asyncpg
 
 from data_mcp.mcp_base import ToolDef
+from data_mcp.mcp_servers._helpers import parse_json_column, resolve_concept_id
 
 
 def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
@@ -32,7 +35,6 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                 return {"error": "Question bank not found"}
 
             question_id = uuid.uuid4()
-            import json as _json
             aligned_uuids = [uuid.UUID(n) for n in aligned_nodes] if aligned_nodes else []
             await conn.execute(
                 """INSERT INTO questions
@@ -42,8 +44,8 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                 uuid.UUID(bank_id),
                 q_type,
                 stem,
-                _json.dumps(options) if options is not None else None,
-                _json.dumps(answer_key),
+                json.dumps(options) if options is not None else None,
+                json.dumps(answer_key),
                 bloom_level,
                 difficulty,
                 aligned_uuids,
@@ -119,7 +121,6 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
             }
 
     async def get_rubric(args: dict[str, Any]) -> dict[str, Any]:
-        import json as _json
         rubric_id = args["rubric_id"]
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -128,13 +129,10 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
             )
             if not row:
                 return {"error": "Rubric not found"}
-            criteria = row["criteria"]
-            if isinstance(criteria, str):
-                criteria = _json.loads(criteria)
             return {
                 "id": str(row["id"]),
                 "title": row["title"],
-                "criteria": criteria,
+                "criteria": parse_json_column(row["criteria"]),
             }
 
     async def draft_grade(args: dict[str, Any]) -> dict[str, Any]:
@@ -145,7 +143,6 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
         holistic_md = args.get("holistic_md")
         graded_by = args["graded_by"]
 
-        import json as _json
         async with pool.acquire() as conn:
             # Verify submission exists
             sub = await conn.fetchrow(
@@ -163,8 +160,8 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                 grade_id,
                 uuid.UUID(submission_id),
                 uuid.UUID(rubric_id) if rubric_id else None,
-                _json.dumps(scores),
-                _json.dumps(feedback),
+                json.dumps(scores),
+                json.dumps(feedback),
                 holistic_md,
                 uuid.UUID(graded_by),
             )
@@ -204,17 +201,9 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
             return {"error": "level must be emerging, proficient, or mastery"}
         async with pool.acquire() as conn:
             pid = uuid.UUID(person_id)
-            # Support both UUID and concept title for node_id
-            try:
-                nid = uuid.UUID(node_id)
-            except ValueError:
-                # Look up concept by title
-                row = await conn.fetchrow(
-                    "SELECT id FROM nodes WHERE LOWER(title) = LOWER($1) AND kind = 'concept'", node_id,
-                )
-                if not row:
-                    return {"error": f"Concept not found: {node_id}"}
-                nid = row["id"]
+            nid = await resolve_concept_id(conn, node_id)
+            if nid is None:
+                return {"error": f"Concept not found: {node_id}"}
             iid = uuid.UUID(issuer_id) if issuer_id else None
             sid = uuid.UUID(session_id) if session_id else None
 
@@ -544,9 +533,6 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
             # Get reviewer info
             reviewer = await conn.fetchrow("SELECT display_name FROM persons WHERE id = $1", uuid.UUID(reviewer_id))
 
-            import json
-            from datetime import datetime, timezone
-
             # Generate OB3 JSON-LD credential
             credential_id = str(uuid.uuid4())
             ob3_credential = {
@@ -643,15 +629,13 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                 return {"key": key, "value": row["value"] if row else None}
             else:
                 rows = await conn.fetch("SELECT key, value FROM system_settings ORDER BY key")
-                import json
-                return {"settings": {r["key"]: (json.loads(r["value"]) if isinstance(r["value"], str) else r["value"]) for r in rows}}
+                return {"settings": {r["key"]: r["value"] for r in rows}}
 
     async def save_settings(args: dict[str, Any]) -> dict[str, Any]:
         key = args.get("key")
         value = args.get("value")
         if not key or value is None:
             return {"error": "key and value are required"}
-        import json
         async with pool.acquire() as conn:
             await conn.execute(
                 """INSERT INTO system_settings (key, value, updated_at) VALUES ($1, $2, now())

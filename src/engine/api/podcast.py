@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -79,8 +80,6 @@ Example: ["id1", "id2", "id3"]"""}],
 
     # Parse the response
     text = response.content[0].text.strip()
-    # Extract JSON array from response
-    import re
     match = re.search(r'\[.*?\]', text, re.DOTALL)
     if match:
         try:
@@ -128,14 +127,13 @@ async def generate_podcast_endpoint(body: PodcastRequest, request: Request) -> d
     """Generate a personalized podcast for a student."""
     from engine.podcast import generate_podcast
 
-    from engine.agents.runner import _call_mcp_tool
+    from engine.agents.runner import _call_mcp_json
 
     # Get mastery map
-    mastery_raw = await _call_mcp_tool("graph.mastery_map", {
+    mastery_data = await _call_mcp_json("graph.mastery_map", {
         "person_id": body.person_id,
         "course_id": body.course_id,
     })
-    mastery_data = json.loads(mastery_raw) if isinstance(mastery_raw, str) else mastery_raw
 
     # Select concepts: explicit > conversation-aware > fallback
     if body.concept_ids:
@@ -155,8 +153,7 @@ async def generate_podcast_endpoint(body: PodcastRequest, request: Request) -> d
     # Get skill content for each concept
     concepts = []
     for cid in target_ids[:5]:  # Max 5 concepts per podcast
-        skill_raw = await _call_mcp_tool("content.get_skill", {"concept_id": cid})
-        skill_data = json.loads(skill_raw) if isinstance(skill_raw, str) else skill_raw
+        skill_data = await _call_mcp_json("content.get_skill", {"concept_id": cid})
         if not skill_data.get("error"):
             concepts.append({
                 "id": cid,
@@ -168,8 +165,7 @@ async def generate_podcast_endpoint(body: PodcastRequest, request: Request) -> d
         return {"error": "No skill content available for selected concepts"}
 
     # Get learner profile
-    profile_raw = await _call_mcp_tool("roster.get_learner_profile", {"person_id": body.person_id})
-    profile_data = json.loads(profile_raw) if isinstance(profile_raw, str) else profile_raw
+    profile_data = await _call_mcp_json("roster.get_learner_profile", {"person_id": body.person_id})
     learner_profile = profile_data.get("profile", "")
 
     # Generate summary

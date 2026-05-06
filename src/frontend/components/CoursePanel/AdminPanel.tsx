@@ -1,18 +1,7 @@
 "use client";
 
 import type { BriefCardPayload } from "@/lib/events";
-
-function sendPrompt(prompt: string) {
-  const input = document.querySelector<HTMLTextAreaElement>("form textarea");
-  const form = input?.closest("form");
-  if (input && form) {
-    const nativeSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
-    nativeSetter?.call(input, prompt);
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    input.dispatchEvent(new Event("change", { bubbles: true }));
-    requestAnimationFrame(() => requestAnimationFrame(() => form.requestSubmit()));
-  }
-}
+import { sendPrompt, SectionLabel, Pill, StatRow } from "./shared";
 
 interface RosterBreakdown {
   students: number;
@@ -120,23 +109,3 @@ export function AdminPanel({ data }: { data: BriefCardPayload | null }) {
   );
 }
 
-function SectionLabel({ children }: { children: React.ReactNode }) {
-  return <h3 className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{children}</h3>;
-}
-
-function StatRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex justify-between text-xs">
-      <span className="text-muted-foreground">{label}</span>
-      <span className="font-medium">{value}</span>
-    </div>
-  );
-}
-
-function Pill({ children, onClick }: { children: React.ReactNode; onClick: () => void }) {
-  return (
-    <button onClick={onClick} className="rounded-md border border-border bg-background px-2 py-1 text-xs hover:bg-muted transition-colors">
-      {children}
-    </button>
-  );
-}

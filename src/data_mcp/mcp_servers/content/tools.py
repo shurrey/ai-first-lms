@@ -8,6 +8,7 @@ from typing import Any
 import asyncpg
 
 from data_mcp.mcp_base import ToolDef
+from data_mcp.mcp_servers._helpers import resolve_concept_id
 
 
 def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
@@ -243,15 +244,9 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
         if not concept_id:
             return {"error": "concept_id is required"}
         async with pool.acquire() as conn:
-            # Resolve concept by title if not UUID
-            try:
-                cid = uuid.UUID(concept_id)
-            except ValueError:
-                row = await conn.fetchrow(
-                    "SELECT id FROM nodes WHERE LOWER(title) = LOWER($1) AND kind = 'concept'", concept_id)
-                if not row:
-                    return {"error": f"Concept not found: {concept_id}"}
-                cid = row["id"]
+            cid = await resolve_concept_id(conn, concept_id)
+            if cid is None:
+                return {"error": f"Concept not found: {concept_id}"}
 
             # Fetch skill content
             row = await conn.fetchrow(
