@@ -1,5 +1,5 @@
 FROM public.ecr.aws/docker/library/node:20-alpine AS base
-RUN corepack enable && corepack prepare pnpm@latest --activate
+RUN corepack enable && corepack prepare pnpm@9.15.9 --activate
 
 FROM base AS deps
 WORKDIR /app
