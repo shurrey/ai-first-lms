@@ -108,7 +108,7 @@ CREATE TABLE attestations (
   level      attestation_level NOT NULL,
   issued_at  timestamptz NOT NULL DEFAULT now(),
   payload    jsonb DEFAULT '{}'::jsonb,
-  session_id uuid REFERENCES sessions(id),
+  session_id uuid,  -- FK added after sessions table is created (see ALTER below)
   CHECK (node_id IS NOT NULL OR node_set IS NOT NULL)
 );
 
@@ -259,6 +259,11 @@ CREATE TABLE sessions (
   created_at timestamptz NOT NULL DEFAULT now(),
   ended_at   timestamptz
 );
+
+-- Deferred FK: attestations.session_id references sessions, defined above out of order.
+ALTER TABLE attestations
+  ADD CONSTRAINT attestations_session_id_fkey
+  FOREIGN KEY (session_id) REFERENCES sessions(id);
 
 CREATE TABLE turns (
   id           uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
