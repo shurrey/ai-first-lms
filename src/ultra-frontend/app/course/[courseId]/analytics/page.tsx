@@ -66,7 +66,7 @@ function StudentAnalyticsView({ courseId, personId, ensureSession }: { courseId:
 
       <div className="grid grid-cols-4 gap-3 mb-6">
         <StatCard icon={<TrendingUp className="h-5 w-5 text-green-500" />} label="Progress" value={`${pct}%`} sub={`${totalDone} of ${s.total_concepts} concepts`} />
-        <StatCard icon={<Award className="h-5 w-5 text-indigo-500" />} label="Credentials" value={`${s.microcredentials_earned}`} sub={`of ${s.microcredentials_total}`} />
+        <StatCard icon={<Award className="h-5 w-5 text-indigo-500" />} label="Microcredentials" value={`${s.microcredentials_earned}`} sub={`of ${s.microcredentials_total}`} />
         <StatCard icon={<MessageSquare className="h-5 w-5 text-blue-500" />} label="Sessions" value={`${sessions.length}`} sub="tutoring sessions" />
         <StatCard icon={<BarChart3 className="h-5 w-5 text-amber-500" />} label="Mastery" value={`${s.mastery}`} sub="concepts mastered" />
       </div>
