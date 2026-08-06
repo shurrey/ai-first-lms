@@ -18,7 +18,7 @@ export function CourseTabs({ courseId, persona }: { courseId: string; persona?: 
     { label: "Content", href: base },
     { label: "Attestations", href: `${base}/gradebook` },
     { label: persona === "student" ? "Sessions" : "Roster", href: `${base}/roster` },
-    { label: "Credentials", href: `${base}/credentials` },
+    { label: "Badges", href: `${base}/credentials` },
     { label: "Analytics", href: `${base}/analytics` },
   ];
 
