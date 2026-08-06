@@ -526,6 +526,7 @@ class AdminBriefGatherer:
                 "avg_score": avg_score,
                 "is_cross_course": is_cross_course,
                 "roster_breakdown": {
+                    "total": total_students + len(all_faculty) + total_advisors,
                     "students": total_students,
                     "faculty": len(all_faculty),
                     "advisors": total_advisors,
