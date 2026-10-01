@@ -1,7 +1,7 @@
 # docker-compose.yaml — AI-First LMS Prototype
 # Owned by Platform workstream (T-P-*)
 # Usage: docker compose up
-# Docs: src/platform/README.md
+# Docs: docs/setup.md
 
 services:
   postgres:
@@ -30,6 +30,10 @@ services:
     build:
       context: .
       dockerfile: src/data_mcp/Dockerfile
+      args:
+        CORPORATE_CA_PATH: ${CORPORATE_CA_PATH:-}
+      secrets:
+        - corporate_ca
     command: ["uvicorn", "data_mcp.mcp_servers.content.server:app", "--host", "0.0.0.0", "--port", "7001"]
     container_name: lms-mcp-content
     environment:
@@ -51,6 +55,10 @@ services:
     build:
       context: .
       dockerfile: src/data_mcp/Dockerfile
+      args:
+        CORPORATE_CA_PATH: ${CORPORATE_CA_PATH:-}
+      secrets:
+        - corporate_ca
     command: ["uvicorn", "data_mcp.mcp_servers.roster.server:app", "--host", "0.0.0.0", "--port", "7002"]
     container_name: lms-mcp-roster
     environment:
@@ -72,6 +80,10 @@ services:
     build:
       context: .
       dockerfile: src/data_mcp/Dockerfile
+      args:
+        CORPORATE_CA_PATH: ${CORPORATE_CA_PATH:-}
+      secrets:
+        - corporate_ca
     command: ["uvicorn", "data_mcp.mcp_servers.assessments.server:app", "--host", "0.0.0.0", "--port", "7003"]
     container_name: lms-mcp-assessments
     environment:
@@ -93,6 +105,10 @@ services:
     build:
       context: .
       dockerfile: src/data_mcp/Dockerfile
+      args:
+        CORPORATE_CA_PATH: ${CORPORATE_CA_PATH:-}
+      secrets:
+        - corporate_ca
     command: ["uvicorn", "data_mcp.mcp_servers.analytics.server:app", "--host", "0.0.0.0", "--port", "7004"]
     container_name: lms-mcp-analytics
     environment:
@@ -114,6 +130,10 @@ services:
     build:
       context: .
       dockerfile: src/data_mcp/Dockerfile
+      args:
+        CORPORATE_CA_PATH: ${CORPORATE_CA_PATH:-}
+      secrets:
+        - corporate_ca
     command: ["uvicorn", "data_mcp.mcp_servers.sis.server:app", "--host", "0.0.0.0", "--port", "7005"]
     container_name: lms-mcp-sis
     environment:
@@ -135,6 +155,10 @@ services:
     build:
       context: .
       dockerfile: src/data_mcp/Dockerfile
+      args:
+        CORPORATE_CA_PATH: ${CORPORATE_CA_PATH:-}
+      secrets:
+        - corporate_ca
     command: ["uvicorn", "data_mcp.mcp_servers.communications.server:app", "--host", "0.0.0.0", "--port", "7006"]
     container_name: lms-mcp-communications
     environment:
@@ -156,6 +180,10 @@ services:
     build:
       context: .
       dockerfile: src/data_mcp/Dockerfile
+      args:
+        CORPORATE_CA_PATH: ${CORPORATE_CA_PATH:-}
+      secrets:
+        - corporate_ca
     command: ["uvicorn", "data_mcp.mcp_servers.standards.server:app", "--host", "0.0.0.0", "--port", "7007"]
     container_name: lms-mcp-standards
     environment:
@@ -179,6 +207,10 @@ services:
     build:
       context: .
       dockerfile: src/engine/Dockerfile
+      args:
+        CORPORATE_CA_PATH: ${CORPORATE_CA_PATH:-}
+      secrets:
+        - corporate_ca
     container_name: lms-orchestrator
     environment:
       PORT: "8000"
@@ -187,6 +219,13 @@ services:
       FISH_AUDIO_API_KEY: ${FISH_AUDIO_API_KEY:-}
       FISH_AUDIO_HOST_VOICE: ${FISH_AUDIO_HOST_VOICE:-}
       FISH_AUDIO_EXPERT_VOICE: ${FISH_AUDIO_EXPERT_VOICE:-}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
+      TLS_INSECURE_SKIP_VERIFY: ${TLS_INSECURE_SKIP_VERIFY:-false}
+      # Per-turn caps (SPEC-v1 §4.5); exceeding one ends the turn with error budget_exceeded.
+      MAX_TOKENS_PER_TURN: ${MAX_TOKENS_PER_TURN:-250000}
+      MAX_TOOL_CALLS_PER_TURN: ${MAX_TOOL_CALLS_PER_TURN:-40}
+      MAX_WALL_TIME_PER_TURN_MS: ${MAX_WALL_TIME_PER_TURN_MS:-120000}
+      MAX_AGENT_INVOCATIONS_PER_TURN: ${MAX_AGENT_INVOCATIONS_PER_TURN:-8}
     ports:
       - "${ORCHESTRATOR_PORT:-8000}:8000"
     volumes:
@@ -208,6 +247,9 @@ services:
     container_name: lms-frontend
     environment:
       PORT: "3000"
+      # Next standalone binds to $HOSTNAME (the container id by default). The healthcheck
+      # uses 127.0.0.1 because localhost resolves to ::1 first in this image.
+      HOSTNAME: 0.0.0.0
       NEXT_PUBLIC_API_URL: http://orchestrator:8000
     ports:
       - "${FRONTEND_PORT:-3000}:3000"
@@ -215,7 +257,7 @@ services:
       orchestrator:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/ || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/ || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -226,14 +268,17 @@ services:
     container_name: lms-ultra-frontend
     environment:
       PORT: "3100"
+      # Next standalone binds to $HOSTNAME (the container id by default). The healthcheck
+      # uses 127.0.0.1 because localhost resolves to ::1 first in this image.
+      HOSTNAME: 0.0.0.0
       NEXT_PUBLIC_API_URL: http://orchestrator:8000
     ports:
-      - "3100:3100"
+      - "${ULTRA_FRONTEND_PORT:-3100}:3100"
     depends_on:
       orchestrator:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3100/ || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3100/ || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -245,10 +290,15 @@ services:
     build:
       context: .
       dockerfile: src/data_mcp/Dockerfile
+      args:
+        CORPORATE_CA_PATH: ${CORPORATE_CA_PATH:-}
+      secrets:
+        - corporate_ca
     container_name: lms-db-seed
     command: ["python", "-m", "data_mcp.seed.all_courses", "--seed", "42"]
     environment:
       LMS_DATABASE_URL: postgresql://${POSTGRES_USER:-lms}:${POSTGRES_PASSWORD:-lms_dev}@postgres:5432/${POSTGRES_DB:-lms_db}
+      TLS_INSECURE_SKIP_VERIFY: ${TLS_INSECURE_SKIP_VERIFY:-false}
     depends_on:
       postgres:
         condition: service_healthy
@@ -310,6 +360,12 @@ services:
       - tempo
       - prometheus
     restart: unless-stopped
+
+# Optional corporate root CA for the Python images (BuildKit build secret).
+# The empty certs/.gitkeep default means "no extra CA"; see docs/setup.md.
+secrets:
+  corporate_ca:
+    file: ${CORPORATE_CA_PATH:-./certs/.gitkeep}
 
 volumes:
   pgdata:

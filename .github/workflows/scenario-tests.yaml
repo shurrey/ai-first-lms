@@ -1,0 +1,51 @@
+# Runs all scenarios end-to-end against the full compose stack. Manual only: it needs
+# the ANTHROPIC_API_KEY repo secret and makes real model calls.
+name: Scenario Integration Tests
+
+on:
+  workflow_dispatch:
+
+jobs:
+  scenario-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - run: uv sync --locked --extra dev
+
+      - name: Start full stack
+        run: docker compose up -d --build
+
+      - name: Wait for seed and orchestrator
+        run: |
+          seed_status=$(docker wait lms-db-seed)
+          if [ "$seed_status" != "0" ]; then
+            echo "::error::db-seed exited with $seed_status"
+            exit 1
+          fi
+          for _ in $(seq 1 60); do
+            if curl -fsS http://localhost:8000/healthz > /dev/null; then
+              echo "Orchestrator healthy"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::orchestrator not healthy after 300s"
+          exit 1
+
+      - name: Run all scenarios
+        run: uv run python src/platform/scripts/demo all --check
+
+      - name: Collect logs on failure
+        if: failure()
+        run: docker compose logs --tail=200
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

@@ -91,13 +91,60 @@ curl -X POST http://localhost:8000/api/session \
   -d '{"persona":"student","course_id":"cs101"}'
 ```
 
-## Corporate Proxy (Zscaler)
+## Corporate Network / TLS Inspection (Zscaler)
 
-If behind a corporate proxy with SSL inspection:
+On the corporate network, outbound HTTPS (Anthropic, Fish Audio) is re-signed by a corporate
+TLS-inspection root CA. Python's bundled CA list (certifi) does not contain it, so every Python
+HTTP client is built through the shared helper, which verifies against the OS trust store via
+[`truststore`](https://pypi.org/project/truststore/). Certificate verification is always on.
 
-- **Node.js:** Set `NODE_USE_SYSTEM_CA=1` in frontend Dockerfiles
-- **Python:** The orchestrator uses `httpx.AsyncClient(verify=False)` for Anthropic and Fish Audio API calls
-- **Docker pulls:** Use ECR mirror images (`public.ecr.aws/docker/library/`) if Docker Hub is blocked
+**Off the corporate network:** nothing to do, on the host or in containers.
+
+**On the host (macOS):** nothing to do. `truststore` reads the macOS Keychain, which already
+trusts the corporate root.
+
+**In containers:** the images are Debian, so `truststore` reads the container's OpenSSL store,
+which does not hold the corporate root. Bake it in at build time:
+
+```bash
+# 1. Export the corporate root from the Keychain as PEM. Use the CA's common name as shown
+#    in Keychain Access; `security find-certificate -a -c Zscaler | grep labl` lists matches.
+mkdir -p certs
+security find-certificate -a -c "Zscaler Root CA" -p \
+  /Library/Keychains/System.keychain > certs/corporate-root.pem
+
+# 2. Point the build at it (in .env, or exported in your shell).
+echo 'CORPORATE_CA_PATH=./certs/corporate-root.pem' >> .env
+
+# 3. Rebuild the Python images (orchestrator, MCP servers, db-seed).
+docker compose build orchestrator db-seed mcp-content mcp-roster mcp-assessments \
+  mcp-analytics mcp-sis mcp-communications mcp-standards
+docker compose up -d
+```
+
+How it works: compose passes `CORPORATE_CA_PATH` to `src/engine/Dockerfile` and
+`src/data_mcp/Dockerfile` as the BuildKit secret `corporate_ca`. When it is a non-empty PEM, the
+build copies it to `/usr/local/share/ca-certificates/corporate-root.crt` and runs
+`update-ca-certificates`; a non-PEM file fails the build. The images set
+`SSL_CERT_FILE` and `REQUESTS_CA_BUNDLE` to `/etc/ssl/certs/ca-certificates.crt`. With
+`CORPORATE_CA_PATH` unset, compose falls back to the empty `certs/.gitkeep` and no CA is added.
+The file may contain several certificates (e.g. root plus intermediate).
+
+- `certs/` is git-ignored except `certs/.gitkeep`, and `*.pem` files are ignored repo-wide.
+- Changing `CORPORATE_CA_PATH` triggers a rebuild of the CA layer. Replacing the file's contents
+  at the **same** path does not (BuildKit does not hash secrets); use
+  `docker compose build --no-cache <service>` after rotating the certificate.
+- A plain `docker build` without `--secret id=corporate_ca,src=...` also succeeds, with no CA.
+
+**Escape hatch:** `TLS_INSECURE_SKIP_VERIFY=true` disables verification in the shared HTTP
+helper only. It is `false` by default, logs an ERROR on every startup while enabled, and exists so
+a broken network day doesn't block a demo. Never commit it as `true`.
+
+**Other tooling behind the proxy:**
+
+- **Node.js:** set `NODE_USE_SYSTEM_CA=1` in the frontend Dockerfiles.
+- **Docker pulls:** use ECR mirror images (`public.ecr.aws/docker/library/`) if Docker Hub is
+  blocked.
 
 ## Rebuilding After Changes
 
@@ -122,3 +169,62 @@ docker compose up -d
 **MCP tools fail silently:** Check `docker logs lms-mcp-assessments` (or other MCP server). The `TypeError: 'NoneType' object is not callable` errors in MCP logs are harmless SSE disconnect noise.
 
 **Attestations fail:** If you see "Unknown MCP server for tool: attestations.attest", the `attestations` alias in `_MCP_SERVERS` (runner.py) maps to the assessments server.
+
+## Running Tests Locally
+
+```bash
+uv sync --extra dev   # pytest and ruff live in the dev extra
+uv run pytest src/engine -q
+uv run pytest src/agents -q
+```
+
+> **Warning: the data_mcp suite destroys its database.** `src/data_mcp/tests/test_migrations.py`
+> runs `DROP SCHEMA public CASCADE` against `LMS_DATABASE_URL`, and `conftest.py` seeds whatever
+> that URL points at (its default is the demo's `lms_db`). Always set it to a throwaway database,
+> and load the schema first, because the autouse seed fixture queries `persons` before any test runs:
+>
+> ```bash
+> docker exec lms-postgres createdb -U lms lms_test
+> docker exec -i lms-postgres psql -U lms -d lms_test -v ON_ERROR_STOP=1 < contracts/db-schema.sql
+> LMS_DATABASE_URL=postgresql://lms:lms_dev@localhost:5432/lms_test \
+>   uv run pytest src/data_mcp -q
+> ```
+
+## Continuous Integration
+
+Workflows live in `.github/workflows/`:
+
+| Workflow | Trigger | What it runs |
+|----------|---------|--------------|
+| `ci.yaml` | every push and PR to `main` | ruff S608 (string-built SQL), `verify=False` grep, pytest for engine / agents / data_mcp (Postgres service container), Playwright `*.smoke.spec.ts` (Ultra UI, mocked API), `docker compose config` |
+| `contract-invariants.yaml` | every push and PR to `main` | `src/platform/ci/scripts/check_contracts.py`, including the migrations-vs-schema check against a Postgres service container |
+| `scenario-tests.yaml` | manual (`workflow_dispatch`) | full `docker compose up` plus all scenarios; needs `ANTHROPIC_API_KEY` as a repo secret |
+
+### Make CI a required check on `main`
+
+Branch protection is a GitHub setting, not a file in the repo. A repo admin sets it once:
+
+1. GitHub → **Settings** → **Branches** (or **Rules → Rulesets**) → add a rule for `main`.
+2. Enable **Require a pull request before merging** and **Require status checks to pass**.
+3. Under required checks, add each job from `ci.yaml` and `contract-invariants.yaml` (they
+   appear after the workflows have run once): `ruff-s608`, `no-verify-false`, `test-engine`, `test-agents`, `test-data_mcp`,
+   `playwright-smoke`, `compose-config`, `contract-invariants`.
+4. Enable **Require branches to be up to date before merging**.
+
+Or with the `gh` CLI (admin token):
+
+```bash
+gh api -X PUT repos/{owner}/{repo}/branches/main/protection --input - <<'EOF'
+{
+  "required_status_checks": {
+    "strict": true,
+    "contexts": ["ruff-s608", "no-verify-false", "test-engine", "test-agents",
+                 "test-data_mcp", "playwright-smoke", "compose-config",
+                 "contract-invariants"]
+  },
+  "enforce_admins": false,
+  "required_pull_request_reviews": null,
+  "restrictions": null
+}
+EOF
+```

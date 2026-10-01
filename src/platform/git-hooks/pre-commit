@@ -18,9 +18,12 @@ if [ -z "$WORKSTREAM" ]; then
   exit 1
 fi
 
+# Workstream names use hyphens; the Python package directory uses an underscore.
+SRC_DIR="${WORKSTREAM//-/_}"
+
 # Allowed path prefixes for this workstream
 ALLOWED_PREFIXES=(
-  "src/${WORKSTREAM}/"
+  "src/${SRC_DIR}/"
   "tasks/open/"
   "tasks/claimed/${WORKSTREAM}/"
   "tasks/done/"
@@ -29,12 +32,19 @@ ALLOWED_PREFIXES=(
   "CLAUDE.md"
 )
 
-# Platform workstream also owns docker-compose.yaml and .env.example at repo root
+if [ "$WORKSTREAM" = "frontend" ]; then
+  ALLOWED_PREFIXES+=("src/ultra-frontend/")
+fi
+
+# Platform workstream also owns these repo-root files
 if [ "$WORKSTREAM" = "platform" ]; then
   ALLOWED_PREFIXES+=(
     "docker-compose.yaml"
     ".env.example"
     ".gitignore"
+    ".github/"
+    "docs/setup.md"
+    "certs/.gitkeep"
   )
 fi
 

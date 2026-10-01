@@ -1,0 +1,125 @@
+# Runs on every push and PR to main. Job ids are the required status-check names
+# (see docs/setup.md "Make CI a required check on main").
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ruff-s608:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked --extra dev
+      - name: Flag string-built SQL (ruff S608)
+        # graph_lib builds $n placeholders with f-strings and tests run fixed DDL; both are
+        # excluded so the gate covers mcp_servers, engine, agents and common.
+        run: >-
+          uv run ruff check --select S608 --output-format github src/
+          --extend-exclude "src/data_mcp/graph_lib,src/data_mcp/tests"
+
+  no-verify-false:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fail if TLS verification is disabled anywhere in src/
+        run: |
+          if grep -RIn --exclude-dir=node_modules "verify=False" src/; then
+            echo "::error::verify=False found; use the shared HTTP client helper instead"
+            exit 1
+          fi
+
+  test-engine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked --extra dev
+      - run: uv run pytest src/engine -q
+
+  test-agents:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked --extra dev
+      - run: uv run pytest src/agents -q
+
+  test-data_mcp:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: lms
+          POSTGRES_PASSWORD: lms_dev
+          POSTGRES_DB: lms_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U lms -d lms_db"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Throwaway service DB inside the job.
+      LMS_DATABASE_URL: postgresql://lms:lms_dev@localhost:5432/lms_db
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked --extra dev
+      # The session fixture seeds before any test runs, so the schema must exist first.
+      # test_migrations later drops the schema and rebuilds it with alembic.
+      - name: Apply schema
+        run: PGPASSWORD=lms_dev psql -v ON_ERROR_STOP=1 -h localhost -U lms -d lms_db -f contracts/db-schema.sql
+      - run: uv run pytest src/data_mcp -q
+
+  playwright-smoke:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/ultra-frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: src/ultra-frontend/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
+      # Smoke specs mock the API routes, so no backend is started.
+      - name: Run *.smoke.spec.ts
+        run: pnpm exec playwright test '\.smoke\.spec\.ts$'
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            src/ultra-frontend/playwright-report
+            src/ultra-frontend/test-results
+          if-no-files-found: ignore
+
+  compose-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate docker-compose.yaml
+        run: docker compose config -q
+      - name: Check smoke test scripts are executable
+        run: |
+          for f in src/platform/smoke-tests/test_*.sh; do
+            [ -x "$f" ] || { echo "FAIL: $f is not executable"; exit 1; }
+          done
