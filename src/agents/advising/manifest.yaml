@@ -10,6 +10,7 @@ agent:
   persona_scope:
   - student
   - advisor
+  - faculty
   model: claude-sonnet-4-6
   requires_pii:
   - email

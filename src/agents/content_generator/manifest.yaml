@@ -13,6 +13,7 @@ agent:
   - student
   - faculty
   - instructional_designer
+  - advisor
   model: claude-haiku-4-5-20251001
   requires_pii: []
   inputs:

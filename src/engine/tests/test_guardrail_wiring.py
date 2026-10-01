@@ -203,7 +203,7 @@ async def test_agent_without_manifest_is_denied():
 async def test_denied_step_stops_later_layers():
     runner = StubAgentRunner()
     set_agent_runner(runner)
-    state = _plan_state("advising", "faculty")
+    state = _plan_state("grading_assistant", "student")
     state["plan"]["steps"].append(
         {"step_id": "s2", "agent": "tutor", "input_summary": "x", "depends_on": ["s1"]},
     )
@@ -418,3 +418,13 @@ def test_build_provider_adds_otlp_exporter_only_when_endpoint_set():
     finally:
         with_endpoint.shutdown()
         without.shutdown()
+
+
+def test_scopes_cover_real_persona_flows():
+    from engine.guardrails.registry import get_permission_matrix
+
+    matrix = get_permission_matrix()
+    # Flows the UIs offer today: faculty prerequisite checks, advisor outreach plans.
+    assert "advising" in matrix.allowed_agents("faculty")
+    assert {"early_alert", "content_generator", "communication"} <= matrix.allowed_agents("advisor")
+    assert "grading_assistant" not in matrix.allowed_agents("admin")
