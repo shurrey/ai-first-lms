@@ -2,8 +2,11 @@ version: 1
 agent:
   name: early_alert
   version: 0.1.0
-  description: "Detects at-risk students with explanations and recommends interventions.\n\
-    Explains every risk score. Recommends \u2014 never acts.\n"
+  description: 'Detects at-risk students with explanations and recommends interventions.
+
+    Explains every risk score. Recommends — never acts.
+
+    '
   persona_scope:
   - faculty
   - advisor
@@ -34,10 +37,16 @@ agent:
     required:
     - at_risk
   mcp_tools:
+  - roster.get_student_context
+  - assessments.list_recent_evidence
+  - roster.list_by_course
   - analytics.query
-  - roster.get
-  - interventions.playbook
-  - graph.evidence_summary
+  - analytics.trend
+  - analytics.cohort_compare
+  - sis.get_transcript
+  - sis.catalog_search
+  - graph.mastery_map
+  - attestations.get_student_attestations
   composable_with:
   - engagement_analyst
   - communication

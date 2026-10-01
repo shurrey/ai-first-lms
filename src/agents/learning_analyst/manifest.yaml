@@ -1,0 +1,79 @@
+version: 1
+agent:
+  name: learning_analyst
+  version: 0.1.0
+  description: 'Background post-session analysis of student tutoring sessions. The
+    engine
+
+    runs it (engine/analyst.py) after a student session; it is never routed from
+
+    chat. Summarizes the session, appends to the learner profile, writes
+
+    student-facing insights and concept-review outcomes, and flags sessions for
+
+    instructor review. A shallow review can trigger a deep, multi-session review.
+
+    '
+  persona_scope:
+  - student
+  model: claude-haiku-4-5-20251001
+  requires_pii: []
+  inputs:
+    type: object
+    properties:
+      session_id:
+        type: string
+      person_id:
+        type: string
+      course_id:
+        type: string
+      deep:
+        type: boolean
+        default: false
+    required:
+    - session_id
+    - person_id
+    - course_id
+  outputs:
+    type: object
+    properties:
+      session_summary:
+        type: string
+      profile_additions:
+        type: string
+      review_flag:
+        type: boolean
+      review_reason:
+        type: string
+        nullable: true
+      student_insights:
+        type: array
+        items:
+          type: string
+      concepts_reviewed:
+        type: array
+        items:
+          type: object
+          properties:
+            id:
+              type: string
+            outcome:
+              type: string
+              enum:
+              - recalled
+              - struggled
+              - failed
+    required:
+    - session_summary
+  mcp_tools:
+  - roster.get_learner_profile
+  - roster.update_learner_profile
+  - roster.get_recent_turns
+  - roster.list_student_sessions
+  - roster.get_session_transcript
+  - attestations.get_student_attestations
+  - roster.update_student_insights
+  - roster.update_session_summary
+  - roster.save_concept_review
+  composable_with: []
+  requires_human_approval: false

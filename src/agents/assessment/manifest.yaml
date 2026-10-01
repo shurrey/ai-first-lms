@@ -2,8 +2,10 @@ version: 1
 agent:
   name: assessment
   version: 0.1.0
-  description: "Generates and validates assessments \u2014 quiz/exam questions, rubrics,\
-    \ item analysis.\n"
+  description: 'Generates and validates assessments — quiz/exam questions, rubrics,
+    item analysis.
+
+    '
   persona_scope:
   - faculty
   - instructional_designer
@@ -58,11 +60,19 @@ agent:
     required:
     - questions
   mcp_tools:
-  - questions.search_bank
-  - questions.create
-  - standards.lookup
-  - content.retrieve
-  - graph.node_for_outcome
+  - assessments.create_question
+  - assessments.search_bank
+  - assessments.get_rubric
+  - assessments.list_recent_evidence
+  - assessments.list_pending_credentials
+  - assessments.get_credential_evidence
+  - assessments.approve_credential
+  - assessments.list_issued_credentials
+  - roster.get_student
+  - roster.list_by_course
+  - graph.mastery_map
+  - attestations.get_student_attestations
+  - roster.list_student_sessions
   composable_with:
   - content_generator
   requires_human_approval: true

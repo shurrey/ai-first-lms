@@ -73,8 +73,9 @@ agent:
   - content.retrieve
   - content.search
   - content.save_draft
-  - standards.lookup
-  - graph.subgraph
+  - content.get_skill
+  - content.save_skill
+  - content.list_skills
   composable_with:
   - tutor
   - course_architect

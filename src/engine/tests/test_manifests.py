@@ -12,12 +12,13 @@ from engine.manifests import AgentManifest, ManifestRegistry, load_manifests
 
 
 def test_load_real_manifests():
-    """Load the actual contracts/agent-manifests.yaml and verify all 10 agents."""
+    """Ten routable agents plus the background learning_analyst."""
     registry = load_manifests()
-    assert len(registry) == 10
+    assert len(registry) == 11
     agents = registry.list_agents()
     assert "tutor" in agents
     assert "communication" in agents
+    assert "learning_analyst" in agents
 
 
 def test_get_manifest():
@@ -81,3 +82,23 @@ def test_manifest_fields_populated():
 
     comm = registry.get_manifest("communication")
     assert comm.model == "claude-haiku-4-5-20251001"
+
+
+def test_default_path_found_in_container_layout(tmp_path, monkeypatch):
+    """The image puts the engine at /app/engine and contracts at /app/contracts."""
+    import importlib.util
+    import shutil
+    import sys
+
+    repo = Path(__file__).resolve().parents[3]
+    (tmp_path / "engine").mkdir()
+    (tmp_path / "contracts").mkdir()
+    shutil.copy(repo / "src" / "engine" / "manifests.py", tmp_path / "engine" / "manifests.py")
+    shutil.copy(repo / "contracts" / "agent-manifests.yaml", tmp_path / "contracts")
+
+    spec = importlib.util.spec_from_file_location("container_manifests", tmp_path / "engine" / "manifests.py")
+    module = importlib.util.module_from_spec(spec)
+    # Pydantic resolves postponed annotations through sys.modules.
+    monkeypatch.setitem(sys.modules, "container_manifests", module)
+    spec.loader.exec_module(module)
+    assert "tutor" in module.load_manifests().list_agents()

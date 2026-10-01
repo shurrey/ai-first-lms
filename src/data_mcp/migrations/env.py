@@ -14,6 +14,10 @@ if config.config_file_name is not None:
 # Allow DATABASE_URL override from env
 url = os.environ.get("LMS_DATABASE_URL", config.get_main_option("sqlalchemy.url"))
 
+# SQLAlchemy 2.1 maps a bare postgresql:// to psycopg 3; the project ships psycopg2.
+if url and url.startswith("postgresql://"):
+    url = "postgresql+psycopg2://" + url[len("postgresql://"):]
+
 
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode — emit SQL to stdout."""

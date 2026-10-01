@@ -2,8 +2,11 @@ version: 1
 agent:
   name: advising
   version: 0.1.0
-  description: "Academic planning \u2014 degree audit, course recommendations, prerequisites,\n\
-    pathway mapping. In AI-native deployment also serves as Learning Path Navigator.\n"
+  description: 'Academic planning — degree audit, course recommendations, prerequisites,
+
+    pathway mapping. In AI-native deployment also serves as Learning Path Navigator.
+
+    '
   persona_scope:
   - student
   - advisor
@@ -47,12 +50,11 @@ agent:
     - audit
     - recommendations
   mcp_tools:
+  - roster.get_student_context
+  - roster.get_student
   - sis.get_transcript
   - sis.degree_audit
-  - sis.check_prerequisites
-  - catalog.search
-  - schedule.availability
-  - graph.path_to_mastery
+  - sis.catalog_search
   composable_with:
   - tutor
   - content_generator

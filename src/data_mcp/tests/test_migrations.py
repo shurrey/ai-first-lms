@@ -8,7 +8,8 @@ import subprocess
 import asyncpg
 import pytest
 
-DB_URL = os.environ.get("LMS_DATABASE_URL", "postgresql://lms:lms_dev@localhost:5432/lms_db")
+# These tests drop the public schema, so the default must never be the demo database.
+DB_URL = os.environ.get("LMS_DATABASE_URL", "postgresql://lms:lms_dev@localhost:5432/lms_test")
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 
@@ -48,7 +49,7 @@ def migrate_fresh() -> None:
 def test_alembic_current_shows_head() -> None:
     result = _run_alembic("current")
     assert result.returncode == 0, f"alembic current failed:\n{result.stderr}"
-    assert "001" in result.stdout, f"Expected 001 in output:\n{result.stdout}"
+    assert "002 (head)" in result.stdout, f"Expected 002 (head) in output:\n{result.stdout}"
 
 
 def test_schema_tables_exist() -> None:
@@ -65,6 +66,8 @@ def test_schema_tables_exist() -> None:
                 "rubrics", "submissions", "grades", "messages", "message_templates",
                 "standards_frameworks", "standards", "intervention_playbook",
                 "sessions", "turns", "events_log", "alembic_version",
+                "conversation_turns", "pending_credentials", "issued_credentials",
+                "system_settings", "concept_reviews",
             }
             missing = expected - tables
             assert not missing, f"Missing tables: {missing}"
@@ -106,6 +109,75 @@ def test_schema_enums_exist() -> None:
             await conn.close()
 
     asyncio.run(_check())
+
+
+def _fetch(sql: str) -> list[asyncpg.Record]:
+    async def _run() -> list[asyncpg.Record]:
+        conn = await asyncpg.connect(DB_URL)
+        try:
+            return await conn.fetch(sql)
+        finally:
+            await conn.close()
+
+    return asyncio.run(_run())
+
+
+def _enum_labels(type_name: str) -> list[str]:
+    rows = _fetch(
+        "SELECT e.enumlabel FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid "
+        f"WHERE t.typname = '{type_name}' ORDER BY e.enumsortorder"
+    )
+    return [r["enumlabel"] for r in rows]
+
+
+def test_enum_values_match_contract() -> None:
+    assert _enum_labels("node_kind") == [
+        "concept", "skill", "artifact", "assessment_item", "resource", "outcome",
+        "course", "module", "microcredential",
+    ]
+    assert _enum_labels("edge_kind") == [
+        "prerequisite_of", "part_of", "evidence_of", "aligned_with", "variant_of",
+        "contributes_to",
+    ]
+
+
+def test_columns_added_by_002_exist() -> None:
+    rows = _fetch(
+        "SELECT table_name, column_name FROM information_schema.columns "
+        "WHERE table_schema = 'public' AND (table_name, column_name) IN "
+        "(('sessions', 'ended_at'), ('attestations', 'session_id'))"
+    )
+    assert {(r["table_name"], r["column_name"]) for r in rows} == {
+        ("sessions", "ended_at"), ("attestations", "session_id"),
+    }
+    fks = _fetch(
+        "SELECT conname FROM pg_constraint WHERE conname = 'attestations_session_id_fkey'"
+    )
+    assert len(fks) == 1
+
+
+def test_indexes_added_by_002_exist() -> None:
+    rows = _fetch("SELECT indexname FROM pg_indexes WHERE schemaname = 'public'")
+    indexes = {r["indexname"] for r in rows}
+    expected = {
+        "idx_conversation_turns_lookup", "idx_conversation_turns_session",
+        "idx_pending_credentials_course", "idx_pending_credentials_person",
+        "idx_issued_credentials_person", "idx_concept_reviews_lookup",
+    }
+    assert expected <= indexes, f"Missing indexes: {expected - indexes}"
+
+
+def test_downgrade_to_001_and_back() -> None:
+    down = _run_alembic("downgrade", "001")
+    assert down.returncode == 0, f"downgrade failed:\n{down.stderr}"
+    rows = _fetch("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
+    tables = {r["tablename"] for r in rows}
+    assert "conversation_turns" not in tables
+    assert "microcredential" not in _enum_labels("node_kind")
+
+    up = _run_alembic("upgrade", "head")
+    assert up.returncode == 0, f"re-upgrade failed:\n{up.stderr}"
+    assert "microcredential" in _enum_labels("node_kind")
 
 
 def test_idempotent_upgrade() -> None:
