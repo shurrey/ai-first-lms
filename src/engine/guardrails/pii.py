@@ -19,6 +19,12 @@ _PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("us_passport", re.compile(r"\b[A-Z]\d{8}\b")),
 ]
 
+# Matches inside a UUID are never PII; an all-digit run of UUID segments can look
+# like a card or phone number.
+_UUID = re.compile(
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
+)
+
 
 @dataclass
 class PIIDetection:
@@ -46,12 +52,17 @@ def scan_and_redact(text: str, allowed_fields: list[str] | None = None) -> PIIFi
     allowed = set(allowed_fields or [])
     detections: list[PIIDetection] = []
     result_text = text
+    # Spans already taken (UUIDs, earlier detections); overlapping matches are skipped.
+    claimed: list[tuple[int, int]] = [(m.start(), m.end()) for m in _UUID.finditer(text)]
 
     for pii_type, pattern in _PATTERNS:
         if pii_type in allowed:
             continue
 
         for match in pattern.finditer(text):
+            if any(match.start() < end and start < match.end() for start, end in claimed):
+                continue
+            claimed.append((match.start(), match.end()))
             detections.append(PIIDetection(
                 pii_type=pii_type,
                 original=match.group(),

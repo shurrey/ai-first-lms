@@ -6,14 +6,31 @@ import json
 import logging
 from typing import Any, Protocol
 
-import anthropic
-import httpx
-
 from engine.graph.state import OrchestratorState
+from engine.guardrails.registry import get_permission_matrix
+from engine.http import make_anthropic_client
 
 logger = logging.getLogger(__name__)
 
 CONFIDENCE_THRESHOLD = 0.7
+
+# Agents the classifier may route to; background agents (e.g. learning_analyst) are excluded
+# even when a manifest grants them to the persona.
+# Fallback order when the classifier names no agent; the first one the persona may use wins.
+_DEFAULT_AGENT_ORDER = ("tutor", "early_alert", "advising", "engagement_analyst", "communication")
+
+
+def _default_agent(allowed: set[str] | frozenset[str]) -> str:
+    for name in _DEFAULT_AGENT_ORDER:
+        if name in allowed:
+            return name
+    return min(allowed) if allowed else "tutor"
+
+
+ROUTABLE_AGENTS = frozenset({
+    "tutor", "course_architect", "content_generator", "assessment", "grading_assistant",
+    "early_alert", "advising", "accessibility", "engagement_analyst", "communication",
+})
 
 INTERPRET_SYSTEM_PROMPT = """\
 You are the intent classifier for an AI-First LMS orchestrator. Given the user's \
@@ -61,8 +78,8 @@ For multi-agent actions, set the action to the pattern name above and include "a
 listing the agents involved. Example:
 {"action": "identify_and_help", "agent": "early_alert", "parameters": {"agents": ["early_alert", "content_generator", "communication"]}, ...}
 
-Consider the persona when choosing the agent. Students typically interact with tutor, \
-assessment, content_generator, and advising. Faculty interact with all agents.
+The user message lists the agents the persona is allowed to use. Choose only from that list; \
+an agent outside it will be refused.
 
 Return ONLY valid JSON, no markdown fences.
 """
@@ -80,20 +97,38 @@ class AnthropicLLMClient:
     """Real Anthropic API client."""
 
     def __init__(self) -> None:
-        self._client = anthropic.AsyncAnthropic(
-            http_client=httpx.AsyncClient(verify=False),
-        )
+        self._client = make_anthropic_client()
 
     async def create_message(
         self, model: str, system: str, messages: list[dict[str, str]], max_tokens: int
     ) -> str:
+        text, _ = await self.create_message_with_usage(model, system, messages, max_tokens)
+        return text
+
+    async def create_message_with_usage(
+        self, model: str, system: str, messages: list[dict[str, str]], max_tokens: int
+    ) -> tuple[str, int]:
+        """Like create_message, plus total tokens (input + output) for budget charging."""
         response = await self._client.messages.create(
             model=model,
             system=system,
             messages=messages,
             max_tokens=max_tokens,
         )
-        return response.content[0].text
+        tokens = response.usage.input_tokens + response.usage.output_tokens
+        return response.content[0].text, tokens
+
+
+def _parse_json_object(raw: str) -> dict[str, Any]:
+    """Parse the classifier's JSON object; tolerates markdown fences and surrounding prose."""
+    text = raw.strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end < start:
+        raise ValueError("no JSON object in response")
+    parsed = json.loads(text[start:end + 1])
+    if not isinstance(parsed, dict):
+        raise ValueError("response is not a JSON object")
+    return parsed
 
 
 # Module-level client, replaceable for testing
@@ -136,25 +171,37 @@ async def interpret(state: OrchestratorState) -> OrchestratorState:
             context_lines.append(f"[{role}]: {content}")
 
     context_block = "\n".join(context_lines)
-    user_prompt = f"Persona: {persona}\nCourse: {course_id}"
+    allowed = get_permission_matrix().allowed_agents(persona) & ROUTABLE_AGENTS
+    allowed_agents = ", ".join(sorted(allowed)) or "none"
+    default_agent = _default_agent(allowed)
+    user_prompt = f"Persona: {persona}\nAllowed agents: {allowed_agents}\nCourse: {course_id}"
     if context_block:
         user_prompt += f"\n\nRecent conversation:\n{context_block}"
     user_prompt += f"\n\nCurrent message: {message}"
 
-    raw_response = await client.create_message(
-        model="claude-sonnet-4-6",
-        system=INTERPRET_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_prompt}],
-        max_tokens=512,
-    )
+    call_args = {
+        "model": "claude-sonnet-4-6",
+        "system": INTERPRET_SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": user_prompt}],
+        "max_tokens": 512,
+    }
+    # Clients without usage reporting (test doubles) are not charged to the budget.
+    with_usage = getattr(client, "create_message_with_usage", None)
+    if with_usage is not None:
+        raw_response, tokens = await with_usage(**call_args)
+        budget = state.get("budget")
+        if budget is not None:
+            budget.add_tokens(tokens)
+    else:
+        raw_response = await client.create_message(**call_args)
 
     try:
-        parsed = json.loads(raw_response)
-    except json.JSONDecodeError:
+        parsed = _parse_json_object(raw_response)
+    except (json.JSONDecodeError, ValueError):
         logger.error("Failed to parse LLM interpretation response: %s", raw_response)
         parsed = {
             "action": "unknown",
-            "agent": "tutor",
+            "agent": default_agent,
             "parameters": {},
             "confidence": 0.0,
             "needs_clarification": True,
@@ -169,7 +216,7 @@ async def interpret(state: OrchestratorState) -> OrchestratorState:
 
     interpretation = {
         "action": parsed.get("action", "unknown"),
-        "agent": parsed.get("agent", "tutor"),
+        "agent": parsed.get("agent") or default_agent,
         "parameters": parsed.get("parameters", {}),
         "confidence": confidence,
     }

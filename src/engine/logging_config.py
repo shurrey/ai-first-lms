@@ -9,25 +9,32 @@ import sys
 import structlog
 
 
-def setup_logging() -> None:
-    """Configure structured JSON logging to stdout.
+_HANDLER_NAME = "engine-json-stdout"
 
-    Log level is configurable via LOG_LEVEL env var (default: INFO).
+
+def setup_logging() -> None:
+    """Configure JSON logging to stdout for structlog and stdlib loggers. Safe to call repeatedly.
+
+    Log level comes from LOG_LEVEL (default INFO). Only this module's own handler is
+    replaced on re-run; handlers added by others (e.g. pytest's caplog) are kept.
     """
     log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+    shared_processors: list[structlog.typing.Processor] = [
+        structlog.stdlib.add_logger_name,
+        structlog.stdlib.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso"),
+    ]
 
-    # Configure structlog
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
             structlog.stdlib.filter_by_level,
-            structlog.stdlib.add_logger_name,
-            structlog.stdlib.add_log_level,
+            *shared_processors,
             structlog.stdlib.PositionalArgumentsFormatter(),
-            structlog.processors.TimeStamper(fmt="iso"),
             structlog.processors.StackInfoRenderer(),
             structlog.processors.UnicodeDecoder(),
-            structlog.processors.JSONRenderer(),
+            # Rendering happens once, in the handler's formatter below.
+            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
         ],
         wrapper_class=structlog.stdlib.BoundLogger,
         context_class=dict,
@@ -35,14 +42,20 @@ def setup_logging() -> None:
         cache_logger_on_first_use=True,
     )
 
-    # Configure standard library logging to use structlog
     handler = logging.StreamHandler(sys.stdout)
+    handler.set_name(_HANDLER_NAME)
     handler.setFormatter(structlog.stdlib.ProcessorFormatter(
-        processor=structlog.processors.JSONRenderer(),
+        foreign_pre_chain=shared_processors,
+        processors=[
+            structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+            structlog.processors.format_exc_info,
+            structlog.processors.JSONRenderer(),
+        ],
     ))
 
     root_logger = logging.getLogger()
-    root_logger.handlers.clear()
+    for existing in [h for h in root_logger.handlers if h.get_name() == _HANDLER_NAME]:
+        root_logger.removeHandler(existing)
     root_logger.addHandler(handler)
     root_logger.setLevel(getattr(logging, log_level, logging.INFO))
 

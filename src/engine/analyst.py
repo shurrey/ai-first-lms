@@ -10,8 +10,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-import anthropic
-import httpx
+from engine.http import make_anthropic_client
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +101,7 @@ Return ONLY valid JSON matching this schema:
 
         # Call Claude — Haiku for shallow, Sonnet for deep
         model = "claude-sonnet-4-6" if deep else "claude-haiku-4-5-20251001"
-        client = anthropic.AsyncAnthropic(http_client=httpx.AsyncClient(verify=False))
+        client = make_anthropic_client()
         response = await client.messages.create(
             model=model,
             max_tokens=2000,

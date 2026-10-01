@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, TypedDict
 
+from engine.guardrails.budget import BudgetTracker
+
 
 class Turn(TypedDict, total=False):
     role: str  # "user" | "assistant"
@@ -64,5 +66,9 @@ class OrchestratorState(TypedDict, total=False):
     cost_usd: float
     tokens: int
     budget_exceeded: bool
+    # Per-turn caps; shared by reference across nodes and the agent runner.
+    budget: BudgetTracker
+    # ErrorPayload (contracts/events.md) that halted the turn; None while the turn is healthy.
+    turn_error: dict[str, Any] | None
     events_emitted: list[dict[str, Any]]
     needs_clarification: bool

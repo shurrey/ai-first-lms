@@ -11,11 +11,9 @@ logger = logging.getLogger(__name__)
 
 
 async def clarify(state: OrchestratorState) -> OrchestratorState:
-    """Emit a clarify event and prepare state for pause.
+    """Emit a clarify event; the turn ends here.
 
-    The orchestrator will checkpoint here. When the user responds via
-    POST /api/clarify, the graph resumes at the interpret node with the
-    clarification answer appended to the conversation.
+    The user's answer arrives as the next /api/converse turn (contracts/events.md `clarify`).
     """
     reason = state.get("clarification", "Could you clarify your request?")
     interpretation = state.get("interpretation")
@@ -50,7 +48,6 @@ async def clarify(state: OrchestratorState) -> OrchestratorState:
     return {
         **state,
         "events_emitted": events,
-        # Reset needs_clarification so after re-interpret we don't loop
         "needs_clarification": False,
     }
 

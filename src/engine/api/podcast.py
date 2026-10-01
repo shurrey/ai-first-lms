@@ -32,8 +32,7 @@ async def _pick_concepts_from_conversation(
     turn_store: Any,
 ) -> list[str]:
     """Use Claude to identify which concepts the tutor has been teaching from conversation history."""
-    import anthropic
-    import httpx
+    from engine.http import make_anthropic_client
 
     # Get recent conversation turns
     history = await turn_store.get_conversation_history(session_id)
@@ -59,9 +58,7 @@ async def _pick_concepts_from_conversation(
 
     concept_names = "\n".join(f"- {c['title']} (id: {c['id']})" for c in concept_list)
 
-    client = anthropic.AsyncAnthropic(
-        http_client=httpx.AsyncClient(verify=False),
-    )
+    client = make_anthropic_client()
 
     response = await client.messages.create(
         model="claude-haiku-4-5-20251001",

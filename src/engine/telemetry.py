@@ -2,52 +2,43 @@
 
 from __future__ import annotations
 
+import logging
 import os
 
 from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import (
-    BatchSpanProcessor,
-    ConsoleSpanExporter,
-    SimpleSpanProcessor,
-)
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
-_tracer: trace.Tracer | None = None
+logger = logging.getLogger(__name__)
 
 
 def setup_telemetry(app=None) -> None:  # type: ignore[no-untyped-def]
-    """Configure OpenTelemetry tracing.
+    """Configure OpenTelemetry tracing and instrument `app` if given. Safe to call repeatedly.
 
-    Exports to OTEL_EXPORTER_OTLP_ENDPOINT if set, otherwise to console.
+    Exports via OTLP/gRPC to OTEL_EXPORTER_OTLP_ENDPOINT when set; otherwise spans are
+    recorded but not exported. The global provider is set once per process.
     """
-    resource = Resource.create({
+    if not isinstance(trace.get_tracer_provider(), TracerProvider):
+        trace.set_tracer_provider(build_provider(os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")))
+
+    if app is not None and not getattr(app, "_is_instrumented_by_opentelemetry", False):
+        FastAPIInstrumentor.instrument_app(app)
+
+
+def build_provider(otlp_endpoint: str | None) -> TracerProvider:
+    """Tracer provider with an OTLP/gRPC batch exporter when `otlp_endpoint` is set."""
+    provider = TracerProvider(resource=Resource.create({
         "service.name": "ai-first-lms-engine",
         "service.version": "0.1.0",
-    })
-
-    provider = TracerProvider(resource=resource)
-
-    otlp_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+    }))
     if otlp_endpoint:
-        try:
-            from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
-                OTLPSpanExporter,
-            )
-            exporter = OTLPSpanExporter(endpoint=otlp_endpoint)
-            provider.add_span_processor(BatchSpanProcessor(exporter))
-        except ImportError:
-            provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
-    else:
-        # In dev/test, use console exporter (or no-op if not needed)
-        pass  # No exporter in test mode
-
-    trace.set_tracer_provider(provider)
-
-    # Instrument FastAPI if app provided
-    if app is not None:
-        FastAPIInstrumentor.instrument_app(app)
+        # An http:// endpoint makes the gRPC exporter use an insecure channel.
+        provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=otlp_endpoint)))
+        logger.info("OpenTelemetry exporting to %s", otlp_endpoint)
+    return provider
 
 
 def get_tracer(name: str = "engine") -> trace.Tracer:

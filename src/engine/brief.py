@@ -7,8 +7,7 @@ import logging
 import time
 from typing import Any, Protocol
 
-import anthropic
-import httpx
+from engine.http import make_anthropic_client
 
 logger = logging.getLogger(__name__)
 
@@ -573,9 +572,7 @@ class BriefGenerator:
     }
 
     def __init__(self) -> None:
-        self._client = anthropic.AsyncAnthropic(
-            http_client=httpx.AsyncClient(verify=False),
-        )
+        self._client = make_anthropic_client()
 
     async def generate(
         self,
@@ -789,7 +786,7 @@ class BriefGenerator:
         return {
             "students": student_grades,
             "assignments": sorted(assignment_titles),
-            "totalStudents": len(students),
+            "totalStudents": len(students_to_query),
         }
 
     async def _page_roster(self, persona: str, person_id: str, course_id: str) -> dict[str, Any]:
