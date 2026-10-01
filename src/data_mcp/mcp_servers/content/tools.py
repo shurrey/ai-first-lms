@@ -8,7 +8,36 @@ from typing import Any
 import asyncpg
 
 from data_mcp.mcp_base import ToolDef
-from data_mcp.mcp_servers._helpers import resolve_concept_id
+from data_mcp.mcp_servers._helpers import resolve_concept_id, validation_error
+
+# Values of the edge_kind enum in contracts/db-schema.sql.
+EDGE_KINDS = frozenset({
+    "prerequisite_of", "part_of", "evidence_of", "aligned_with", "variant_of", "contributes_to",
+})
+
+# Contract spelling ("in"/"out") and the server's original spelling both accepted.
+_NEIGHBOR_DIRECTIONS = {
+    "both": "both", "incoming": "incoming", "outgoing": "outgoing", "in": "incoming", "out": "outgoing",
+}
+
+
+def _parse_edge_kinds(raw: Any) -> list[str] | None:
+    """Normalise a kinds argument (a string, comma-separated string or list) to a validated list.
+
+    Returns None when no filter was given. Raises ValueError on any value outside EDGE_KINDS.
+    """
+    if raw is None or raw == "" or raw == []:
+        return None
+    if isinstance(raw, str):
+        values = [v.strip() for v in raw.split(",") if v.strip()]
+    elif isinstance(raw, list) and all(isinstance(v, str) for v in raw):
+        values = [v.strip() for v in raw]
+    else:
+        raise ValueError("kinds must be a string or a list of strings")
+    invalid = [v for v in values if v not in EDGE_KINDS]
+    if invalid or not values:
+        raise ValueError(f"invalid edge kind(s) {invalid!r}; allowed: {sorted(EDGE_KINDS)}")
+    return values
 
 
 def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
@@ -57,25 +86,16 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
         top_k = args.get("top_k", 10)
 
         async with pool.acquire() as conn:
-            # Step 1: keyword search via ILIKE
-            conditions = ["(ci.title ILIKE $1 OR ci.body_md ILIKE $1)"]
-            params: list[Any] = [f"%{query}%"]
-            idx = 2
-
-            if course_id:
-                conditions.append(f"ci.node_id IN (SELECT id FROM nodes WHERE metadata->>'course_id' = ${idx})")
-                params.append(str(course_id))
-                idx += 1
-
-            where = " AND ".join(conditions)
             keyword_rows = await conn.fetch(
-                f"""SELECT ci.id, ci.title,
-                           LEFT(ci.body_md, 200) AS snippet,
-                           1.0 AS score
-                    FROM content_items ci
-                    WHERE {where}
-                    LIMIT ${idx}""",
-                *params, top_k,
+                """SELECT ci.id, ci.title,
+                          LEFT(ci.body_md, 200) AS snippet,
+                          1.0 AS score
+                   FROM content_items ci
+                   WHERE (ci.title ILIKE $1 OR ci.body_md ILIKE $1)
+                     AND ($2::text IS NULL
+                          OR ci.node_id IN (SELECT id FROM nodes WHERE metadata->>'course_id' = $2))
+                   LIMIT $3""",
+                f"%{query}%", str(course_id) if course_id else None, top_k,
             )
 
             results = [
@@ -89,26 +109,19 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                 remaining = top_k - len(results)
                 seen_ids = {r["id"] for r in results}
 
-                sem_conditions = ["n.embedding IS NOT NULL"]
-                sem_params: list[Any] = [str(query_vec)]
-                sem_idx = 2
-
-                if course_id:
-                    sem_conditions.append(f"n.metadata->>'course_id' = ${sem_idx}")
-                    sem_params.append(str(course_id))
-                    sem_idx += 1
-
-                sem_where = " AND ".join(sem_conditions)
                 sem_rows = await conn.fetch(
-                    f"""SELECT ci.id, ci.title,
-                               LEFT(ci.body_md, 200) AS snippet,
-                               1 - (n.embedding <=> $1::vector) AS score
-                        FROM content_items ci
-                        JOIN nodes n ON n.id = ci.node_id
-                        WHERE {sem_where}
-                        ORDER BY n.embedding <=> $1::vector
-                        LIMIT ${sem_idx}""",
-                    *sem_params, remaining + len(seen_ids),  # fetch extra to account for dedup
+                    """SELECT ci.id, ci.title,
+                              LEFT(ci.body_md, 200) AS snippet,
+                              1 - (n.embedding <=> $1::vector) AS score
+                       FROM content_items ci
+                       JOIN nodes n ON n.id = ci.node_id
+                       WHERE n.embedding IS NOT NULL
+                         AND ($2::text IS NULL OR n.metadata->>'course_id' = $2)
+                       ORDER BY n.embedding <=> $1::vector
+                       LIMIT $3""",
+                    str(query_vec),
+                    str(course_id) if course_id else None,
+                    remaining + len(seen_ids),  # fetch extra to account for dedup
                 )
 
                 for r in sem_rows:
@@ -152,23 +165,14 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
         top_k = args.get("top_k", 10)
 
         async with pool.acquire() as conn:
-            conditions = ["ci.title ILIKE $1"]
-            params: list[Any] = [f"%{query}%"]
-            idx = 2
-
-            if kind:
-                conditions.append(f"ci.kind = ${idx}")
-                params.append(kind)
-                idx += 1
-
-            where = " AND ".join(conditions)
             rows = await conn.fetch(
-                f"""SELECT ci.id, ci.kind, ci.title,
-                           LEFT(ci.body_md, 200) AS snippet
-                    FROM content_items ci
-                    WHERE {where}
-                    LIMIT ${idx}""",
-                *params, top_k,
+                """SELECT ci.id, ci.kind, ci.title,
+                          LEFT(ci.body_md, 200) AS snippet
+                   FROM content_items ci
+                   WHERE ci.title ILIKE $1
+                     AND ($2::text IS NULL OR ci.kind = $2)
+                   LIMIT $3""",
+                f"%{query}%", kind or None, top_k,
             )
             return {
                 "items": [
@@ -197,22 +201,33 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
 
     async def graph_neighbors(args: dict[str, Any]) -> dict[str, Any]:
         node_id = args.get("node_id")
-        direction = args.get("direction", "both")
-        kind_filter = args.get("kinds")
         if not node_id:
             return {"error": "node_id is required"}
+        raw_direction = args.get("direction") or "both"
+        direction = _NEIGHBOR_DIRECTIONS.get(raw_direction) if isinstance(raw_direction, str) else None
+        if direction is None:
+            return validation_error(
+                f"direction must be one of {sorted(_NEIGHBOR_DIRECTIONS)}"
+            )
+        try:
+            kinds = _parse_edge_kinds(args.get("kinds"))
+        except ValueError as exc:
+            return validation_error(str(exc))
         async with pool.acquire() as conn:
-            nid = uuid.UUID(node_id)
-            queries = []
-            if direction in ("outgoing", "both"):
-                q = "SELECT e.to_node AS nid, e.kind AS ek FROM edges e WHERE e.from_node = $1"
-                if kind_filter: q += f" AND e.kind = '{kind_filter}'"
-                queries.append(q)
-            if direction in ("incoming", "both"):
-                q = "SELECT e.from_node AS nid, e.kind AS ek FROM edges e WHERE e.to_node = $1"
-                if kind_filter: q += f" AND e.kind = '{kind_filter}'"
-                queries.append(q)
-            rows = await conn.fetch(" UNION ".join(queries), nid)
+            rows = await conn.fetch(
+                """SELECT e.to_node AS nid, e.kind AS ek FROM edges e
+                   WHERE e.from_node = $1 AND $2::boolean
+                     AND ($4::text[] IS NULL OR e.kind = ANY($4::text[]::edge_kind[]))
+                   UNION
+                   SELECT e.from_node AS nid, e.kind AS ek FROM edges e
+                   WHERE e.to_node = $1 AND $3::boolean
+                     AND ($4::text[] IS NULL OR e.kind = ANY($4::text[]::edge_kind[]))
+                   ORDER BY nid, ek""",
+                uuid.UUID(node_id),
+                direction in ("outgoing", "both"),
+                direction in ("incoming", "both"),
+                kinds,
+            )
             nodes = []
             for r in rows:
                 node = await conn.fetchrow("SELECT id, title, kind FROM nodes WHERE id = $1", r["nid"])
@@ -462,8 +477,15 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
             name="graph.neighbors",
             description="Get neighboring nodes in the knowledge graph by edge direction and kind",
             input_schema={"type": "object", "properties": {
-                "node_id": {"type": "string"}, "direction": {"type": "string", "enum": ["both", "incoming", "outgoing"]},
-                "depth": {"type": "integer"}, "kinds": {"type": "string"},
+                "node_id": {"type": "string"}, "direction": {"type": "string", "enum": sorted(_NEIGHBOR_DIRECTIONS)},
+                "depth": {"type": "integer"},
+                "kinds": {
+                    "description": "Edge kind, comma-separated kinds, or a list of kinds",
+                    "anyOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"type": "string", "enum": sorted(EDGE_KINDS)}},
+                    ],
+                },
             }, "required": ["node_id"]},
             handler=graph_neighbors, mutates=False,
         ),

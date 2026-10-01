@@ -26,28 +26,18 @@ async def neighbors(
     Returns:
         {"nodes": [...], "edges": [...]}
     """
-    kind_filter = "AND e.kind = $2" if edge_kind else ""
-
+    edge_cols = "SELECT e.id, e.from_node, e.to_node, e.kind, e.weight, e.metadata FROM edges e"
+    kind_clause = "($2::text IS NULL OR e.kind::text = $2)"
     if direction == "out":
-        edge_sql = f"""
-            SELECT e.id, e.from_node, e.to_node, e.kind, e.weight, e.metadata
-            FROM edges e
-            WHERE e.from_node = ANY($1) {kind_filter}
-        """
+        edge_sql = edge_cols + " WHERE e.from_node = ANY($1) AND " + kind_clause
         next_col = "to_node"
     elif direction == "in":
-        edge_sql = f"""
-            SELECT e.id, e.from_node, e.to_node, e.kind, e.weight, e.metadata
-            FROM edges e
-            WHERE e.to_node = ANY($1) {kind_filter}
-        """
+        edge_sql = edge_cols + " WHERE e.to_node = ANY($1) AND " + kind_clause
         next_col = "from_node"
     else:  # both
-        edge_sql = f"""
-            SELECT e.id, e.from_node, e.to_node, e.kind, e.weight, e.metadata
-            FROM edges e
-            WHERE (e.from_node = ANY($1) OR e.to_node = ANY($1)) {kind_filter}
-        """
+        edge_sql = (
+            edge_cols + " WHERE (e.from_node = ANY($1) OR e.to_node = ANY($1)) AND " + kind_clause
+        )
         next_col = None  # handled below
 
     async with pool.acquire() as conn:
@@ -56,10 +46,7 @@ async def neighbors(
         frontier: list[UUID] = [node_id]
 
         for _ in range(depth):
-            params: list[Any] = [frontier]
-            if edge_kind:
-                params.append(edge_kind)
-            rows = await conn.fetch(edge_sql, *params)
+            rows = await conn.fetch(edge_sql, frontier, edge_kind)
 
             next_frontier: set[UUID] = set()
             for row in rows:

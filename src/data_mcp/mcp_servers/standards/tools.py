@@ -195,27 +195,16 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
             if not fw_row:
                 return {"error": f"Framework '{framework}' not found"}
 
-            conditions = ["s.framework_id = $1"]
-            params: list[Any] = [fw_row["id"]]
-            idx = 2
-
-            if code:
-                conditions.append(f"s.code = ${idx}")
-                params.append(code)
-                idx += 1
-
-            if query:
-                conditions.append(f"(s.title ILIKE ${idx} OR s.description ILIKE ${idx})")
-                params.append(f"%{query}%")
-                idx += 1
-
-            where = " AND ".join(conditions)
             rows = await conn.fetch(
-                f"""SELECT s.id, s.code, s.title, s.description, s.metadata
-                    FROM standards s
-                    WHERE {where}
-                    ORDER BY s.code""",
-                *params,
+                """SELECT s.id, s.code, s.title, s.description, s.metadata
+                   FROM standards s
+                   WHERE s.framework_id = $1
+                     AND ($2::text IS NULL OR s.code = $2)
+                     AND ($3::text IS NULL OR s.title ILIKE $3 OR s.description ILIKE $3)
+                   ORDER BY s.code""",
+                fw_row["id"],
+                code or None,
+                f"%{query}%" if query else None,
             )
             return {
                 "standards": [
