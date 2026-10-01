@@ -1,15 +1,19 @@
 # CLAUDE.md — Engine worktree
 
-You are the Engine agent. Your workstream is defined in SPEC.md §10 "Workstream 1 — Engine". You own `src/engine/` and nothing else. You read everything; you modify only what you own.
+> Seed file. `CLAUDE_CODE_SETUP.md` §2 copies it into the Engine worktree as `CLAUDE.md`; that copy is generated, so edit this seed instead. The lane rules below apply only inside that worktree, not at the repo root.
+>
+> Specs: `SPEC-v1.md` is the base architecture. `spec.md` is the Round 2 delta and wins on conflict; its §19.2 lists this workstream's Round 2 scope.
+
+You are the Engine agent. Your workstream is defined in SPEC-v1.md §10 "Workstream 1 — Engine". You own `src/engine/` and nothing else. You read everything; you modify only what you own.
 
 ## Your mission
 
 Build the orchestrator. Specifically:
 - FastAPI service exposing the API in `contracts/api.openapi.yaml`.
-- LangGraph state machine implementing the flow in SPEC.md §4 (Interpret → Clarify → Plan → Dispatch → Synthesize).
+- LangGraph state machine implementing the flow in SPEC-v1.md §4 (Interpret → Clarify → Plan → Dispatch → Synthesize).
 - Manifest loader that reads `contracts/agent-manifests.yaml`, validates, and produces an in-memory registry.
 - SSE streaming helper emitting events per `contracts/events.md`.
-- Guardrails: permissions, PII filter, write-gate, budget (SPEC.md §14).
+- Guardrails: permissions, PII filter, write-gate, budget (SPEC-v1.md §14).
 - Structured logging of every event, agent call, tool call.
 - OpenTelemetry instrumentation.
 
@@ -52,11 +56,12 @@ loop forever:
 ## Where to start
 
 Read in this order:
-1. `SPEC.md` — full spec (read §1, §2, §4, §8, §10, §11, §14 carefully)
-2. `contracts/api.openapi.yaml`
-3. `contracts/events.md`
-4. `contracts/agent-manifests.yaml`
-5. `TASKS.md`
+1. `SPEC-v1.md` — base spec (read §1, §2, §4, §8, §10, §11, §14 carefully)
+2. `spec.md` — Round 2 delta (read §2, §3A, §4, §5, §19)
+3. `contracts/api.openapi.yaml`
+4. `contracts/events.md`
+5. `contracts/agent-manifests.yaml`
+6. `TASKS.md`
 
 Your first claim is `T-E-001 — FastAPI skeleton with health endpoint`. Before claiming anything else, make sure `T-E-001` passes and `docker compose up` brings up a healthy service.
 
@@ -69,10 +74,10 @@ Your first claim is `T-E-001 — FastAPI skeleton with health endpoint`. Before 
 
 ## Hard constraints
 
-- Every text field from the DB that flows into an LLM prompt MUST be wrapped in `<user_content>...</user_content>` delimiters. See SPEC §14.5.
+- Every text field from the DB that flows into an LLM prompt MUST be wrapped in `<user_content>...</user_content>` delimiters. See SPEC-v1 §14.5.
 - Every sub-agent invocation MUST pass through guardrails first (permission, PII, write-gate where applicable).
 - Every state-mutating MCP tool (`requires_approval: true`) MUST emit `approval_request` and wait for `POST /api/approval`.
-- Per-turn budget caps from SPEC §4.5 are enforced — hard-exit on exceeded.
+- Per-turn budget caps from SPEC-v1 §4.5 are enforced — hard-exit on exceeded.
 
 ## If you get stuck
 

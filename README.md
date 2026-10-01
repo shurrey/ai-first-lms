@@ -10,25 +10,33 @@
 
 ## Start here
 
-1. Read `SPEC.md` — the master spec. Everything else is detail supporting it.
-2. Read `CLAUDE_CODE_SETUP.md` — how to run five concurrent Claude Code agents in worktrees.
-3. Read `TASKS.md` — the master task list and the claim protocol that keeps agents from duplicating work.
-4. If you are a Claude Code agent assigned to a workstream, read the corresponding file in `worktree-seeds/` — that becomes your worktree's `CLAUDE.md`.
-5. Never edit anything in `contracts/` without a human-approved contract-change task.
+1. Read `SPEC-v1.md`, the base architecture spec, then `spec.md`, the Round 2 delta. Where they conflict, `spec.md` wins.
+2. Read `CLAUDE.md` for how to run and test the repo.
+3. Read `CLAUDE_CODE_SETUP.md` for how to run five concurrent Claude Code agents in worktrees.
+4. Read `TASKS.md` for the task file format and the claim protocol that keeps agents from duplicating work.
+5. If you are a Claude Code agent assigned to a workstream, read the matching file in `worktree-seeds/`. It is copied into your worktree as its `CLAUDE.md`.
+6. Never edit anything in `contracts/` without a human-approved contract-change task.
 
-## Repo layout (the physical shape the agents build into)
+Run it with `docker compose up -d`. The Chat UI is at http://localhost:3000 and the Ultra UI at http://localhost:3100. See `docs/setup.md`.
+
+## Repo layout
 
 ```
 /
-├── SPEC.md                          # Master spec (read this first)
+├── SPEC-v1.md                       # Base architecture spec (formerly SPEC.md)
+├── spec.md                          # Round 2 delta; wins on conflict
+├── CLAUDE.md                        # Repo-level guide: run, test, contracts
 ├── CLAUDE_CODE_SETUP.md             # How to run 5 concurrent CC agents
-├── TASKS.md                         # Master task list + claim protocol
+├── TASKS.md                         # Task file format + claim protocol
 ├── README.md                        # This file
-├── contracts/                       # IMMUTABLE cross-workstream interfaces
-│   ├── api.openapi.yaml             # HTTP API the frontend consumes
+├── docker-compose.yaml              # Full local stack
+├── contracts/                       # Cross-workstream interfaces (change only via T-C-*)
+│   ├── api.openapi.yaml             # HTTP API the UIs consume
 │   ├── events.md                    # SSE event envelope schema
-│   ├── agent-manifests.yaml         # All 10 agent manifests
+│   ├── agent-manifests.yaml         # Agent manifests
+│   ├── mcp-tools.md                 # MCP tool signatures
 │   └── db-schema.sql                # Ground-truth schema
+├── docs/                            # Architecture, setup, API and agent docs
 ├── tasks/
 │   ├── open/                        # Unclaimed tasks
 │   ├── claimed/<worktree-id>/       # In-progress tasks
@@ -39,11 +47,12 @@
 │   ├── data-mcp.md
 │   ├── frontend.md
 │   └── platform.md
-└── src/                             # (Created during build)
+└── src/
     ├── engine/                      # Workstream 1
     ├── agents/                      # Workstream 2
-    ├── data-mcp/                    # Workstream 3
-    ├── frontend/                    # Workstream 4
+    ├── data_mcp/                    # Workstream 3
+    ├── frontend/                    # Workstream 4: Chat UI (:3000)
+    ├── ultra-frontend/              # Workstream 4: Ultra UI (:3100)
     └── platform/                    # Workstream 5
 ```
 
@@ -52,9 +61,9 @@
 | # | Workstream | Owns | Depends on (contracts) |
 |---|------------|------|------------------------|
 | 1 | Engine | Orchestrator, planning loop, guardrails, streaming | All manifests, events |
-| 2 | Agents | 10 sub-agent implementations + prompts | Manifests, MCP tool signatures |
+| 2 | Agents | Sub-agent prompts, manifests, evals | Manifests, MCP tool signatures |
 | 3 | Data & MCP | Postgres schema, seed data, 7 MCP servers | db-schema.sql, MCP tool signatures |
-| 4 | Frontend | Next.js UI, canvas, activity panel, streaming | api.openapi.yaml, events.md |
+| 4 | Frontend | Both Next.js UIs: canvas, activity panel, streaming | api.openapi.yaml, events.md |
 | 5 | Platform | Docker Compose, CI, observability, demo runner | Everything |
 
 Workstreams do not share source files. They share contracts.

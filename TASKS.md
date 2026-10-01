@@ -156,7 +156,7 @@ Below is the seed catalog — the initial tasks that populate `tasks/open/` befo
 
 ### Integration (Workstream I — human + integration agent)
 
-- `T-I-001` — Author initial `contracts/*` from SPEC §8
+- `T-I-001` — Author initial `contracts/*` from SPEC-v1 §8
 - `T-I-002` — Kickoff checklist (section 11 of CLAUDE_CODE_SETUP)
 - `T-I-003` — Weekly integration: run all scenarios, write status report
 - `T-I-004` — Week-3 midpoint review

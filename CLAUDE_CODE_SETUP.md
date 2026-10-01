@@ -1,6 +1,6 @@
 # CLAUDE_CODE_SETUP.md
 
-How to run five concurrent Claude Code agents in ralph-wiggum loops against this repo. Read `SPEC.md` first — this document assumes you understand the workstream decomposition and coordination protocol.
+How to run five concurrent Claude Code agents in ralph-wiggum loops against this repo. Read `SPEC-v1.md` (base architecture) first, then `spec.md` (Round 2 delta, which wins on conflict). This document assumes you understand the workstream decomposition and coordination protocol.
 
 ---
 
@@ -24,21 +24,22 @@ git remote add origin <your-remote>
 git push -u origin main
 
 # Create the five worktrees, each on its own branch that tracks main
-# (we push to main directly — see SPEC §17.3)
+# (we push to main directly — see SPEC-v1 §17.3)
 git worktree add ../ai-first-lms-engine    engine    -b engine
 git worktree add ../ai-first-lms-agents    agents    -b agents
 git worktree add ../ai-first-lms-data      data      -b data
 git worktree add ../ai-first-lms-frontend  frontend  -b frontend
 git worktree add ../ai-first-lms-platform  platform  -b platform
 
-# Copy the worktree seed files into place as CLAUDE.md in each
+# Copy the worktree seed files into place as CLAUDE.md in each.
+# These copies are generated: edit worktree-seeds/<ws>.md, then re-copy.
 cp worktree-seeds/engine.md       ../ai-first-lms-engine/CLAUDE.md
 cp worktree-seeds/agents.md       ../ai-first-lms-agents/CLAUDE.md
 cp worktree-seeds/data-mcp.md     ../ai-first-lms-data/CLAUDE.md
 cp worktree-seeds/frontend.md     ../ai-first-lms-frontend/CLAUDE.md
 cp worktree-seeds/platform.md     ../ai-first-lms-platform/CLAUDE.md
 
-# Each worktree also gets a copy of SPEC.md, TASKS.md, and contracts/
+# Each worktree also gets a copy of SPEC-v1.md, spec.md, TASKS.md, and contracts/
 # (these are the same files via git, but we're being explicit)
 ```
 
@@ -103,7 +104,7 @@ claude
 Each session reads its `CLAUDE.md` on start. Give each session the same kickoff prompt:
 
 ```
-Read CLAUDE.md. Read SPEC.md for context. Then enter the ralph-wiggum loop.
+Read CLAUDE.md. Read SPEC-v1.md and spec.md (Round 2; wins on conflict) for context. Then enter the ralph-wiggum loop.
 Begin by claiming your first task. Work indefinitely until all tasks in your
 workstream are in tasks/done/ or you are blocked.
 ```
@@ -188,7 +189,7 @@ Each worktree has a `.claude/` directory with:
       "write": ["contracts/**", "src/!(<WORKSTREAM>)/**", ".github/**"]
     }
   },
-  "context_files": ["CLAUDE.md", "SPEC.md"]
+  "context_files": ["CLAUDE.md", "SPEC-v1.md", "spec.md"]
 }
 ```
 
@@ -284,7 +285,7 @@ Set a daily budget alarm on your Anthropic account. If cost is a concern, downsh
 
 Before letting the agents run autonomously, do this:
 
-1. (Human) Populate `contracts/` with the initial snapshot from SPEC.md. This is the source of truth; agents do not create it.
+1. (Human) Populate `contracts/` with the initial snapshot from SPEC-v1.md. This is the source of truth; agents do not create it.
 2. (Human) Populate `tasks/open/` with the initial task set from TASKS.md. Use the seed tasks in TASKS.md as the starting catalog.
 3. (Human) Verify `docker compose up` starts at least Postgres cleanly.
 4. (Human) Verify CI runs (even if mostly trivial) on a no-op PR.

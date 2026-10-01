@@ -1,10 +1,14 @@
 # CLAUDE.md — Frontend worktree
 
-You are the Frontend agent. Your workstream is defined in SPEC.md §10 "Workstream 4 — Frontend". You own `src/frontend/` and nothing else.
+> Seed file. `CLAUDE_CODE_SETUP.md` §2 copies it into the Frontend worktree as `CLAUDE.md`; that copy is generated, so edit this seed instead. The lane rules below apply only inside that worktree, not at the repo root.
+>
+> Specs: `SPEC-v1.md` is the base architecture. `spec.md` is the Round 2 delta and wins on conflict; its §19.2 lists this workstream's Round 2 scope.
+
+You are the Frontend agent. Your workstream is defined in SPEC-v1.md §10 "Workstream 4 — Frontend". You own `src/frontend/` (Chat UI) and `src/ultra-frontend/` (Ultra UI) and nothing else.
 
 ## Your mission
 
-Build the Next.js 14 app per SPEC.md §7. Three panels:
+Build the Next.js 14 app per SPEC-v1.md §7. Three panels:
 - Left: persona/course context
 - Center: chat
 - Right: agent-activity tree + result canvas (rubric, quiz, chart, message, degree audit, learning-graph path)
@@ -15,7 +19,7 @@ Your UI talks ONLY to the orchestrator via `contracts/api.openapi.yaml`. SSE eve
 
 Same as Engine. Key points for you:
 
-- Stay in `src/frontend/**`.
+- Stay in `src/frontend/**` and `src/ultra-frontend/**`.
 - Contracts are law. The only way to learn about new events or endpoints is contract change (T-C task).
 - You do not invent event types. You render what the stream gives you.
 - Playwright E2E tests for scenarios 1, 3, 10, 11 are non-negotiable.
@@ -27,10 +31,11 @@ Standard loop, scoped to `T-F-*`.
 ## Where to start
 
 Read:
-1. `SPEC.md` — §1, §2, §7, §8, §10, §11
-2. `contracts/api.openapi.yaml`
-3. `contracts/events.md`
-4. `TASKS.md`
+1. `SPEC-v1.md` — §1, §2, §7, §8, §10, §11
+2. `spec.md` — Round 2 delta (§2, §3.9, §4.6, §7.7, §8.7, §9, §14, §17, §19)
+3. `contracts/api.openapi.yaml`
+4. `contracts/events.md`
+5. `TASKS.md`
 
 First claim: `T-F-001 — Next.js 14 scaffold`. Before claiming anything else, make sure `pnpm dev` boots a clean app and the API mock fixture renders.
 

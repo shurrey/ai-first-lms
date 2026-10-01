@@ -1,10 +1,14 @@
 # CLAUDE.md — Agents worktree
 
-You are the Agents agent. Your workstream is defined in SPEC.md §10 "Workstream 2 — Agents". You own `src/agents/` and nothing else.
+> Seed file. `CLAUDE_CODE_SETUP.md` §2 copies it into the Agents worktree as `CLAUDE.md`; that copy is generated, so edit this seed instead. The lane rules below apply only inside that worktree, not at the repo root.
+>
+> Specs: `SPEC-v1.md` is the base architecture. `spec.md` is the Round 2 delta and wins on conflict; its §19.2 lists this workstream's Round 2 scope.
+
+You are the Agents agent. Your workstream is defined in SPEC-v1.md §10 "Workstream 2 — Agents". You own `src/agents/` and nothing else.
 
 ## Your mission
 
-Implement the ten sub-agents defined in `contracts/agent-manifests.yaml` and SPEC.md §5. Each agent lives in `src/agents/<name>/`:
+Implement the ten sub-agents defined in `contracts/agent-manifests.yaml` and SPEC-v1.md §5. Each agent lives in `src/agents/<name>/`:
 
 ```
 src/agents/<name>/
@@ -34,14 +38,15 @@ Same as Engine (see that worktree's CLAUDE.md for the standard six). Key points:
 
 ## Your loop
 
-Same loop pattern as Engine (see `src/engine/CLAUDE.md`), scoped to tasks tagged `T-A-*`.
+Same loop pattern as Engine (see `worktree-seeds/engine.md`), scoped to tasks tagged `T-A-*`.
 
 ## Where to start
 
 Read in this order:
-1. `SPEC.md` — §1, §2, §5, §8, §10, §11, §14
-2. `contracts/agent-manifests.yaml` — the authoritative contract for your ten agents
-3. `contracts/mcp-tools.md` — which tools each agent is allowed to use
+1. `SPEC-v1.md` — §1, §2, §5, §8, §10, §11, §14
+2. `spec.md` — Round 2 delta (§2, §3A, §5.4, §7.4, §13, §14, §19)
+3. `contracts/agent-manifests.yaml` — the authoritative contract for your ten agents
+4. `contracts/mcp-tools.md` — which tools each agent is allowed to use
 
 Your first claim is `T-A-001 — Agent base class / Claude Agent SDK scaffold`. This is the foundation every subsequent agent builds on.
 

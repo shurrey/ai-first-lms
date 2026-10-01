@@ -1,79 +1,76 @@
-# CLAUDE.md — Engine worktree
+# CLAUDE.md — AI-First LMS prototype (repo root)
 
-You are the Engine agent. Your workstream is defined in SPEC.md §10 "Workstream 1 — Engine". You own `src/engine/` and nothing else. You read everything; you modify only what you own.
+This is the repo-level guide. It describes the whole project. No single workstream agent owns the repo root.
 
-## Your mission
+## What this is
 
-Build the orchestrator. Specifically:
-- FastAPI service exposing the API in `contracts/api.openapi.yaml`.
-- LangGraph state machine implementing the flow in SPEC.md §4 (Interpret → Clarify → Plan → Dispatch → Synthesize).
-- Manifest loader that reads `contracts/agent-manifests.yaml`, validates, and produces an in-memory registry.
-- SSE streaming helper emitting events per `contracts/events.md`.
-- Guardrails: permissions, PII filter, write-gate, budget (SPEC.md §14).
-- Structured logging of every event, agent call, tool call.
-- OpenTelemetry instrumentation.
+An engine-first, AI-native learning system built around mastery. One orchestrator (FastAPI + LangGraph) plans and dispatches specialized sub-agents. The agents reach data only through MCP servers backed by Postgres and a learning graph. Two UIs sit on that one orchestrator:
 
-## Your rules
+- **Chat UI** (`src/frontend`, http://localhost:3000): chat-first, with agent activity and result canvases.
+- **Ultra UI** (`src/ultra-frontend`, http://localhost:3100): an LMS-shaped course UI with an AI panel.
 
-1. **Stay in your lane.** You edit `src/engine/**`, `tasks/claimed/engine/**`, and the task-transition files only. Nothing else.
-2. **Contracts are law.** `contracts/*` defines your interfaces with every other workstream. You do not edit these. If you need a change, open a `T-C-*` task, move your current task to `tasks/blocked/`, stop.
-3. **Tests are the acceptance bar.** Unit tests for every non-trivial function. A task is not done until its acceptance checklist is green AND tests pass.
-4. **Conventional commits.** `feat(engine): T-E-003 — SSE streaming helper` is the format.
-5. **No production shortcuts.** Prototype quality, not production quality — but no obvious tech debt booby traps (no silent exception-swallowing, no hardcoded secrets, no global mutable state).
+New concepts belong in the engine and the learning graph, not in either UI.
 
-## Your loop
+## Specs
 
-```
-loop forever:
-  git pull origin main
-  task = find_next_unclaimed_task_tagged_engine()   # tasks/open/T-E-*.md
-  if task is None: sleep 60s; continue
+- `SPEC-v1.md` is the base architecture: orchestrator, agents, MCP servers, contracts and the coordination protocol. It was formerly `SPEC.md`.
+- `spec.md` is the Round 2 delta ("Earning the L"). **Where the two conflict, `spec.md` wins.** Phase −1 (§3A, stabilize the foundation) gates all Round 2 feature work.
+- On macOS a bare `SPEC.md` resolves case-insensitively to `spec.md`. Always use the exact names above.
 
-  # claim
-  git mv tasks/open/<id>.md tasks/claimed/engine/<id>.md
-  git commit -m "claim: <id>"
-  try: git push origin main
-  catch: git pull --rebase; try next task
+## Workstreams
 
-  # work
-  read task; write a TodoWrite plan; implement; run tests
-  if tests fail after 3 iterations:
-    git mv tasks/claimed/engine/<id>.md tasks/blocked/<id>.md
-    write a short note in the task file explaining what's blocked
-    commit; push; STOP this task, go to top of loop
+| # | Workstream | Directory | Task prefix |
+|---|---|---|---|
+| 1 | Engine (orchestrator, guardrails, streaming, `/api/*`) | `src/engine/` | `T-E-*` |
+| 2 | Agents (system prompts, manifests, evals) | `src/agents/` | `T-A-*` |
+| 3 | Data & MCP (schema, migrations, seed, 7 MCP servers, graph lib) | `src/data_mcp/` | `T-D-*` |
+| 4 | Frontend (both UIs) | `src/frontend/`, `src/ultra-frontend/` | `T-F-*` |
+| 5 | Platform (compose, CI, observability, scenarios) | `src/platform/`, `docker-compose.yaml` | `T-P-*` |
 
-  # finish
-  git commit -am "<type>(engine): <id> — <summary>"
-  git mv tasks/claimed/engine/<id>.md tasks/done/<id>.md
-  git commit -am "done: <id>"
-  git push origin main
+Contract changes are `T-C-*` and integration work is `T-I-*`. The live agent loop is `src/engine/agents/runner.py`, which loads the prompts from `src/agents/*/system_prompt.md`. The `src/agents/*/agent.py` classes are not on the live path (spec.md §2, §5.4).
+
+## Run
+
+```bash
+cp .env.example .env        # set ANTHROPIC_API_KEY
+docker compose up -d        # db-seed runs once and seeds 4 courses, 50 students
 ```
 
-## Where to start
+| Service | Port |
+|---|---|
+| Chat UI / Ultra UI | 3000 / 3100 |
+| Orchestrator | 8000 (`/healthz`) |
+| MCP: content, roster, assessments, analytics, sis, communications, standards | 7001–7007 |
+| Postgres (`lms_db`, user `lms`) | 5432 |
+| Grafana / Tempo / Prometheus | 3001 / 3200 / 9090 |
+| OTel collector (gRPC / HTTP / metrics) | 4317 / 4318 / 8889 |
 
-Read in this order:
-1. `SPEC.md` — full spec (read §1, §2, §4, §8, §10, §11, §14 carefully)
-2. `contracts/api.openapi.yaml`
-3. `contracts/events.md`
-4. `contracts/agent-manifests.yaml`
-5. `TASKS.md`
+More detail, including the corporate-proxy notes, is in `docs/setup.md`.
 
-Your first claim is `T-E-001 — FastAPI skeleton with health endpoint`. Before claiming anything else, make sure `T-E-001` passes and `docker compose up` brings up a healthy service.
+## Test
 
-## Interactions with other workstreams
+```bash
+uv sync --extra dev
+uv run pytest src/engine -q
+uv run pytest src/agents -q
+LMS_DATABASE_URL=postgresql://lms:lms_dev@localhost:5432/lms_test uv run pytest src/data_mcp -q
+```
 
-- **Agents (WS2):** you invoke them. Their interface is defined by each agent's manifest. You call them by loading `src/agents/<name>/agent.py` — but you do not modify those files.
-- **Data & MCP (WS3):** you do not talk to the database directly. All data access is via sub-agents → MCP. You only touch the DB through `sessions`, `turns`, `events_log` which are your own tables.
-- **Frontend (WS4):** contract is `contracts/api.openapi.yaml` and `contracts/events.md`. Nothing else.
-- **Platform (WS5):** they run you in a container. They own `docker-compose.yaml`. If you need a new env var or port, open a task against Platform.
+- The data_mcp suite **drops the `public` schema** of whatever `LMS_DATABASE_URL` points at. Its default is the demo `lms_db`. Always point it at a throwaway database such as `lms_test`, never `lms_db`.
+- Ultra UI smoke (Playwright, mocked API, the CI gate): `cd src/ultra-frontend && pnpm test:smoke`. It starts its own dev server on :3110 (`SMOKE_PORT`).
+- Chat UI E2E (Playwright): `cd src/frontend && pnpm test:e2e`. It starts its own dev server on :3120 (`E2E_PORT`).
+- Scenarios against the live stack: `uv run python src/platform/scripts/demo <id|all> --check`.
 
-## Hard constraints
+## Contracts
 
-- Every text field from the DB that flows into an LLM prompt MUST be wrapped in `<user_content>...</user_content>` delimiters. See SPEC §14.5.
-- Every sub-agent invocation MUST pass through guardrails first (permission, PII, write-gate where applicable).
-- Every state-mutating MCP tool (`requires_approval: true`) MUST emit `approval_request` and wait for `POST /api/approval`.
-- Per-turn budget caps from SPEC §4.5 are enforced — hard-exit on exceeded.
+`contracts/` holds the interfaces between workstreams: `api.openapi.yaml`, `events.md`, `agent-manifests.yaml`, `mcp-tools.md` and `db-schema.sql`. Do not edit them as a side effect of other work. A contract change needs a `T-C-*` task and human approval before dependent work starts (SPEC-v1 §8, spec.md §18). Use the `contract-change` skill. `src/platform/ci/scripts/check_contracts.py` checks the invariants.
 
-## If you get stuck
+## Tasks
 
-Move the task to `tasks/blocked/` with a concrete note of what you need. Don't guess your way into incorrect behavior; a human will unblock you.
+- `tasks/open/` holds unstarted work, and `tasks/done/` holds finished work. `TASKS.md` describes the file format.
+- Inside a worktree, a claimed task moves to `tasks/claimed/<ws>/`, and a stuck one moves to `tasks/blocked/` with a note.
+- Round 2 task IDs use the `1xx` range (spec.md §19.3). Phase −1 uses 097–100.
+
+## Worktrees and lane rules
+
+The lane rule ("you edit only `src/<workstream>/`") applies **only inside a workstream worktree**. Each worktree's `CLAUDE.md` is generated by copying `worktree-seeds/<ws>.md` (see `CLAUDE_CODE_SETUP.md` §2). At the repo root, read anything and edit what the task in hand requires.
