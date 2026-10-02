@@ -11,10 +11,10 @@ import asyncio
 import uuid
 from typing import Any
 
-import asyncpg
 import anthropic
-import httpx
+import asyncpg
 
+from common.http import log_tls_mode, make_anthropic_client
 from data_mcp.settings import settings
 
 SKILL_PROMPT = """\
@@ -121,7 +121,8 @@ async def main(course_slug: str = "cs101", full: bool = True) -> None:
         return
 
     conn = await asyncpg.connect(settings.database_url)
-    client = anthropic.AsyncAnthropic(http_client=httpx.AsyncClient(verify=False))
+    log_tls_mode()
+    client = make_anthropic_client()
 
     try:
         modules = await get_modules_and_concepts(conn, course_id)

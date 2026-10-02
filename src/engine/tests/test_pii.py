@@ -74,3 +74,9 @@ def test_detection_includes_original():
 def test_redaction_placeholder():
     result = scan_and_redact("SSN: 111-22-3333")
     assert f"SSN: {REDACTION}" == result.text
+
+
+def test_uuid_digits_are_not_redacted():
+    text = "course 12345678-1234-1234-1234-123456789012 card 4111 1111 1111 1111"
+    result = scan_and_redact(text)
+    assert result.text == "course 12345678-1234-1234-1234-123456789012 card [REDACTED]"

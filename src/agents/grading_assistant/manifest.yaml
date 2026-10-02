@@ -37,9 +37,9 @@ agent:
     required:
     - drafts
   mcp_tools:
-  - submissions.get
-  - rubrics.get
-  - grades.draft
-  - grades.commit
+  - assessments.get_submission
+  - assessments.get_rubric
+  - assessments.draft_grade
+  - assessments.commit_grade
   composable_with: []
   requires_human_approval: true

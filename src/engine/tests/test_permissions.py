@@ -30,13 +30,13 @@ def test_faculty_can_use_grading_assistant(matrix):
     assert check.allowed is True
 
 
-def test_student_cannot_access_messages_send(matrix):
-    check = matrix.check_tool("student", "messages.send")
+def test_student_cannot_access_communications_send_message(matrix):
+    check = matrix.check_tool("student", "communications.send_message")
     assert check.allowed is False
 
 
-def test_faculty_can_access_grades_commit(matrix):
-    check = matrix.check_tool("faculty", "grades.commit")
+def test_faculty_can_access_assessments_commit_grade(matrix):
+    check = matrix.check_tool("faculty", "assessments.commit_grade")
     assert check.allowed is True
 
 
@@ -78,4 +78,4 @@ def test_allowed_agents_returns_set(matrix):
 def test_allowed_tools_returns_set(matrix):
     tools = matrix.allowed_tools("faculty")
     assert isinstance(tools, set)
-    assert "grades.commit" in tools
+    assert "assessments.commit_grade" in tools

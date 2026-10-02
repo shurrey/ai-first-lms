@@ -10,9 +10,16 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import anthropic
-import httpx
+from opentelemetry import trace
+
+from engine.guardrails.budget import BudgetTracker
+from engine.guardrails.injection import INJECTION_GUARDRAIL_INSTRUCTION, wrap_tool_text
+from engine.http import make_anthropic_client
+from engine.logging_config import get_logger
+from engine.telemetry import span_tool
 
 logger = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 # Map agent names to their source directories (for loading system prompts)
 _AGENTS_DIR = Path(__file__).resolve().parent.parent.parent / "agents"
@@ -340,10 +347,10 @@ class ClaudeAgentRunner:
         "learning_analyst": "learning_analyst",
     }
 
-    def __init__(self, model: str = "claude-sonnet-4-6") -> None:
-        self._client = anthropic.AsyncAnthropic(
-            http_client=httpx.AsyncClient(verify=False),
-        )
+    def __init__(
+        self, model: str = "claude-sonnet-4-6", client: anthropic.AsyncAnthropic | None = None
+    ) -> None:
+        self._client = client if client is not None else make_anthropic_client()
         self._model = model
         self._prompt_cache: dict[str, str] = {}
 
@@ -366,12 +373,13 @@ class ClaudeAgentRunner:
         self, agent_name: str, inputs: dict[str, Any]
     ) -> dict[str, Any]:
         on_event = inputs.pop("_on_event", None)
+        budget: BudgetTracker | None = inputs.pop("_budget", None)
         logger.info("ClaudeAgentRunner: invoking %s with tools", agent_name)
         start = time.monotonic()
 
         await _ensure_tool_schemas()
         base_prompt = self._load_system_prompt(agent_name)
-        system_prompt = base_prompt + _TOOL_USE_ADDENDUM
+        system_prompt = base_prompt + _TOOL_USE_ADDENDUM + INJECTION_GUARDRAIL_INSTRUCTION
         message = inputs.get("message", "")
         persona = inputs.get("persona", "student")
         person_id = inputs.get("person_id", "")
@@ -436,7 +444,10 @@ class ClaudeAgentRunner:
 
         try:
             return await asyncio.wait_for(
-                self._tool_loop(agent_name, system_prompt, messages, claude_tools, tool_name_map, tool_call_records, start, on_event, session_id),
+                self._tool_loop(
+                    agent_name, system_prompt, messages, claude_tools, tool_name_map,
+                    tool_call_records, start, on_event, session_id, budget,
+                ),
                 timeout=90.0,
             )
         except asyncio.TimeoutError:
@@ -471,11 +482,17 @@ class ClaudeAgentRunner:
         start: float,
         on_event: Any = None,
         session_id: str = "",
+        budget: BudgetTracker | None = None,
     ) -> dict[str, Any]:
         total_input_tokens = 0
         total_output_tokens = 0
+        budget_reason = ""
 
         for _round in range(_MAX_TOOL_ROUNDS):
+                if budget is not None and (exceeded := budget.check()).exceeded:
+                    budget_reason = exceeded.reason
+                    break
+
                 response = await self._client.messages.create(
                     model=self._model,
                     system=system_prompt,
@@ -486,6 +503,8 @@ class ClaudeAgentRunner:
 
                 total_input_tokens += response.usage.input_tokens
                 total_output_tokens += response.usage.output_tokens
+                if budget is not None:
+                    budget.add_tokens(response.usage.input_tokens + response.usage.output_tokens)
 
                 # If Claude is done (no tool use), extract final text
                 if response.stop_reason == "end_turn":
@@ -519,6 +538,11 @@ class ClaudeAgentRunner:
                     tool_results = []
                     for block in response.content:
                         if block.type == "tool_use":
+                            if budget is not None:
+                                budget.add_tool_call()
+                                if (exceeded := budget.check()).exceeded:
+                                    budget_reason = exceeded.reason
+                                    break
                             mcp_name = tool_name_map.get(block.name, block.name)
                             tool_args = dict(block.input)
 
@@ -530,11 +554,18 @@ class ClaudeAgentRunner:
                                 )
 
                             tool_start = time.monotonic()
-                            result_text = await _call_mcp_tool(mcp_name, tool_args)
+                            span = span_tool(mcp_name, agent_name)
+                            with trace.use_span(span, end_on_exit=True):
+                                result_text = await _call_mcp_tool(mcp_name, tool_args)
+                                success = "error" not in result_text.lower()[:50]
+                                span.set_attribute("success", success)
                             tool_ms = (time.monotonic() - tool_start) * 1000
-
-                            logger.info(
-                                "Tool %s returned in %.0fms", mcp_name, tool_ms
+                            log.info(
+                                "tool_call",
+                                tool=mcp_name,
+                                agent=agent_name,
+                                latency_ms=round(tool_ms, 1),
+                                success=success,
                             )
 
                             record = {
@@ -542,7 +573,7 @@ class ClaudeAgentRunner:
                                 "arguments": tool_args,
                                 "result_summary": result_text[:200],
                                 "latency_ms": round(tool_ms, 1),
-                                "success": "error" not in result_text.lower()[:50],
+                                "success": success,
                             }
                             tool_call_records.append(record)
                             if on_event:
@@ -558,9 +589,11 @@ class ClaudeAgentRunner:
                             tool_results.append({
                                 "type": "tool_result",
                                 "tool_use_id": block.id,
-                                "content": result_text,
+                                "content": wrap_tool_text(mcp_name, result_text),
                             })
 
+                    if budget_reason:
+                        break
                     messages.append({"role": "user", "content": tool_results})
                     continue
 
@@ -580,6 +613,18 @@ class ClaudeAgentRunner:
             "Agent %s done in %.0fms (%d tokens, %d tool calls, $%.4f)",
             agent_name, elapsed_ms, total_tokens, len(tool_call_records), cost_usd,
         )
+
+        if budget_reason:
+            log.warning("budget_exceeded", agent=agent_name, reason=budget_reason,
+                        **(budget.summary() if budget else {}))
+            return {
+                "output": {"error": "budget_exceeded"},
+                "cost_usd": round(cost_usd, 6),
+                "tokens": total_tokens,
+                "success": False,
+                "tool_calls": tool_call_records,
+                "budget_exceeded": True,
+            }
 
         output = _parse_agent_output(final_text)
 

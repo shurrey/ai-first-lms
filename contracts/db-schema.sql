@@ -1,6 +1,7 @@
 -- db-schema.sql
 -- Source of truth for the database schema. DO NOT EDIT without a T-C-* contract-change task.
--- Alembic migrations in src/data-mcp/migrations/ MUST match this file exactly.
+-- Alembic migrations in src/data_mcp/migrations/ MUST match this file exactly
+-- (checked by src/platform/ci/scripts/check_schema_matches_migrations.py).
 
 -- Extensions
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";

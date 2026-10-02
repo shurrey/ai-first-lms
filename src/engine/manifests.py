@@ -51,12 +51,13 @@ class ManifestRegistry:
 def load_manifests(path: str | Path | None = None) -> ManifestRegistry:
     """Load and validate agent manifests from a YAML file.
 
-    Defaults to contracts/agent-manifests.yaml relative to the repo root.
+    Defaults to the nearest contracts/agent-manifests.yaml above this file: the repo root
+    locally, /app in the container image.
     """
     if path is None:
-        # Walk up from this file to find contracts/
-        repo_root = Path(__file__).resolve().parent.parent.parent
-        path = repo_root / "contracts" / "agent-manifests.yaml"
+        here = Path(__file__).resolve()
+        candidates = [d / "contracts" / "agent-manifests.yaml" for d in here.parents]
+        path = next((c for c in candidates if c.exists()), candidates[-1])
     else:
         path = Path(path)
 

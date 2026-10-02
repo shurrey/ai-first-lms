@@ -1,33 +1,41 @@
 """Analytics MCP server tool handlers."""
 from __future__ import annotations
 
-import json
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
+from uuid import UUID
 
 import asyncpg
 
 from data_mcp.mcp_base import ToolDef
+from data_mcp.mcp_servers._helpers import validation_error
 
 # ---------------------------------------------------------------------------
 # Schema description (static)
 # ---------------------------------------------------------------------------
+
+# Dimensions analytics.query may break down by, per source table. Column names
+# cannot be bound as parameters, so each one is a CASE branch in the static SQL
+# below and this whitelist is checked before any query runs.
+EVIDENCE_DIMENSIONS = frozenset({"kind", "node_id", "person_id", "source", "observed_at"})
+ATTESTATION_DIMENSIONS = frozenset({"level", "node_id", "person_id", "issuer_id"})
+
+# Mirrors the evidence_kind enum in contracts/db-schema.sql.
+EVIDENCE_KINDS = (
+    "attempt", "completion", "mastery_check", "artifact_submission",
+    "dialogue_turn", "engagement_event",
+)
 
 _SCHEMA_DESCRIPTION = {
     "tables": [
         "nodes", "edges", "evidence", "attestations", "persons",
         "enrollments", "sessions", "turns", "events_log",
     ],
-    "events": [
-        "attempt", "completion", "mastery_check", "artifact_submission",
-        "dialogue_turn", "engagement_event",
-    ],
+    "events": list(EVIDENCE_KINDS),
     "metrics": [
         "evidence_count", "avg_score", "mastery_rate", "engagement_count",
     ],
-    "dimensions": [
-        "course_id", "person_id", "node_id", "kind", "observed_at",
-    ],
+    "dimensions": sorted(EVIDENCE_DIMENSIONS | ATTESTATION_DIMENSIONS),
 }
 
 
@@ -35,53 +43,140 @@ _SCHEMA_DESCRIPTION = {
 # Helpers
 # ---------------------------------------------------------------------------
 
+_EVIDENCE_METRICS = frozenset({"evidence_count", "avg_score", "engagement_count"})
+_TREND_INTERVALS = frozenset({"hour", "day", "week", "month"})
+
+# One statement serves query, trend and cohort_compare. A NULL dimension ($8)
+# or bucket field ($9) collapses that grouping column to a single NULL group.
+_EVIDENCE_AGG_SQL = """
+SELECT
+    CASE $8::text
+        WHEN 'kind'      THEN e.kind::text
+        WHEN 'node_id'   THEN e.node_id::text
+        WHEN 'person_id' THEN e.person_id::text
+        WHEN 'source'    THEN e.source
+        WHEN 'observed_at' THEN e.observed_at::text
+    END AS dimension,
+    date_trunc($9::text, e.observed_at) AS bucket,
+    CASE WHEN $7::text = 'avg_score' THEN AVG(e.score) ELSE COUNT(*) END AS value,
+    COUNT(DISTINCT e.person_id) AS sample_size
+FROM evidence e
+WHERE ($1::text IS NULL
+       OR e.node_id IN (SELECT id FROM nodes WHERE metadata->>'course_id' = $1))
+  AND ($2::uuid IS NULL OR e.person_id = $2)
+  AND ($3::timestamptz IS NULL OR e.observed_at >= $3)
+  AND ($4::timestamptz IS NULL OR e.observed_at <= $4)
+  AND ($5::text IS NULL OR e.kind = $5::text::evidence_kind)
+  AND ($6::uuid IS NULL OR e.node_id = $6)
+  AND ($7::text <> 'avg_score' OR e.score IS NOT NULL)
+  AND ($7::text <> 'engagement_count' OR e.kind = 'engagement_event')
+GROUP BY 1, 2
+ORDER BY 2
+"""
+
+_MASTERY_RATE_SQL = """
+SELECT
+    CASE $3::text
+        WHEN 'level'     THEN a.level::text
+        WHEN 'node_id'   THEN a.node_id::text
+        WHEN 'person_id' THEN a.person_id::text
+        WHEN 'issuer_id' THEN a.issuer_id::text
+    END AS dimension,
+    CASE WHEN COUNT(*) = 0 THEN 0
+         ELSE COUNT(*) FILTER (WHERE a.level = 'mastery')::float / COUNT(*) END AS value,
+    COUNT(DISTINCT a.person_id) AS sample_size
+FROM attestations a
+WHERE ($1::text IS NULL
+       OR a.node_id IN (SELECT id FROM nodes WHERE metadata->>'course_id' = $1))
+  AND ($2::uuid IS NULL OR a.person_id = $2)
+GROUP BY 1
+"""
+
+
 def _parse_ts(s: str | None) -> datetime | None:
     if not s:
         return None
     return datetime.fromisoformat(s.replace("Z", "+00:00"))
 
 
-def _window_conditions(
-    window: dict[str, str],
-    col: str,
-    params: list[Any],
-    idx: int,
-) -> tuple[list[str], int]:
-    """Return (conditions, next_idx) for a time-window filter."""
-    conditions: list[str] = []
-    start = window.get("start")
-    end = window.get("end")
-    if start:
-        conditions.append(f"{col} >= ${idx}::timestamptz")
-        params.append(_parse_ts(start))
-        idx += 1
-    if end:
-        conditions.append(f"{col} <= ${idx}::timestamptz")
-        params.append(_parse_ts(end))
-        idx += 1
-    return conditions, idx
+def _scope_params(scope: dict[str, Any]) -> list[Any]:
+    """Bind values for the (course_id, person_id) scope filter; None means unfiltered."""
+    course_id = scope.get("course_id")
+    person_id = scope.get("person_id")
+    return [
+        str(course_id) if course_id is not None else None,
+        str(person_id) if person_id is not None else None,
+    ]
 
 
-def _scope_conditions(
+def _evidence_params(
     scope: dict[str, Any],
-    table_alias: str,
-    params: list[Any],
-    idx: int,
-) -> tuple[list[str], int]:
-    """Return (conditions, next_idx) for a scope filter (course_id / person_id)."""
-    conditions: list[str] = []
-    if "course_id" in scope:
-        conditions.append(
-            f"{table_alias}.node_id IN "
-            f"(SELECT id FROM nodes WHERE metadata->>'course_id' = ${idx})"
-        )
-        params.append(str(scope["course_id"]))
-        idx += 1
-    if "person_id" in scope:
-        conditions.append(f"{table_alias}.person_id = ${idx}::uuid")
-        params.append(str(scope["person_id"]))
-        idx += 1
-    return conditions, idx
+    window: dict[str, str],
+    metric: str,
+    filters: dict[str, Any] | None = None,
+    dimension: str | None = None,
+    bucket: str | None = None,
+) -> list[Any]:
+    """Bind values $1..$9 for _EVIDENCE_AGG_SQL, in placeholder order."""
+    filters = filters or {}
+    return [
+        *_scope_params(scope),
+        _parse_ts(window.get("start")),
+        _parse_ts(window.get("end")),
+        filters.get("kind"),
+        str(filters["node_id"]) if filters.get("node_id") is not None else None,
+        metric,
+        dimension,
+        bucket,
+    ]
+
+
+def _check_breakdown(breakdown: Any, allowed: frozenset[str]) -> str | None:
+    """Return an error message if breakdown is not an allowed dimension, else None."""
+    if breakdown is None or (isinstance(breakdown, str) and breakdown in allowed):
+        return None
+    return f"Invalid breakdown {breakdown!r}; allowed: {sorted(allowed)}"
+
+
+def _check_filters(filters: Any) -> str | None:
+    """Return an error message if filters is malformed or filters.kind is not an evidence kind."""
+    if not isinstance(filters, dict):
+        return f"Invalid filters {filters!r}; expected an object"
+    kind = filters.get("kind")
+    if kind is not None and not (isinstance(kind, str) and kind in EVIDENCE_KINDS):
+        return f"Invalid filters.kind {kind!r}; allowed: {sorted(EVIDENCE_KINDS)}"
+    return None
+
+
+def _check_shape(scope: Any, window: Any, metric: Any, filters: Any = None) -> str | None:
+    """Return an error message for arguments asyncpg would reject or that would raise, else None."""
+    if not isinstance(scope, dict):
+        return f"Invalid scope {scope!r}; expected an object"
+    if not isinstance(window, dict):
+        return f"Invalid window {window!r}; expected an object"
+    if not isinstance(metric, str):
+        return f"Invalid metric {metric!r}; expected a string"
+    uuids = {"scope.person_id": scope.get("person_id")}
+    if isinstance(filters, dict):
+        uuids["filters.node_id"] = filters.get("node_id")
+    for name, value in uuids.items():
+        if value is None:
+            continue
+        try:
+            UUID(str(value))
+        except ValueError:
+            return f"Invalid {name} {value!r}; expected a UUID"
+    for bound in ("start", "end"):
+        value = window.get(bound)
+        try:
+            _parse_ts(value)
+        except (TypeError, ValueError, AttributeError):
+            return f"Invalid window.{bound} {value!r}; expected an ISO-8601 timestamp"
+    return None
+
+
+def _to_float(value: Any) -> float:
+    return float(value) if value is not None else 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -95,97 +190,56 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
         scope: dict[str, Any] = args.get("scope", {})
         metric: str = args.get("metric", "evidence_count")
         window: dict[str, str] = args.get("window", {})
-        breakdown: str | None = args.get("breakdown")
+        breakdown: str | None = args.get("breakdown") or None
         filters: dict[str, Any] = args.get("filters") or {}
 
-        async with pool.acquire() as conn:
-            params: list[Any] = []
-            idx = 1
-            conditions: list[str] = []
-
-            scope_conds, idx = _scope_conditions(scope, "e", params, idx)
-            conditions.extend(scope_conds)
-
-            win_conds, idx = _window_conditions(window, "e.observed_at", params, idx)
-            conditions.extend(win_conds)
-
-            # Extra filters (kind, node_id)
-            if "kind" in filters:
-                conditions.append(f"e.kind = ${idx}")
-                params.append(filters["kind"])
-                idx += 1
-            if "node_id" in filters:
-                conditions.append(f"e.node_id = ${idx}::uuid")
-                params.append(str(filters["node_id"]))
-                idx += 1
-
-            where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-
-            if metric == "evidence_count":
-                agg = "COUNT(*)"
-            elif metric == "avg_score":
-                conditions_inner = conditions + ["e.score IS NOT NULL"]
-                where = f"WHERE {' AND '.join(conditions_inner)}" if conditions_inner else ""
-                agg = "AVG(e.score)"
-            elif metric == "engagement_count":
-                conditions_inner = conditions + ["e.kind = 'engagement_event'"]
-                where = f"WHERE {' AND '.join(conditions_inner)}" if conditions_inner else ""
-                agg = "COUNT(*)"
-            elif metric == "mastery_rate":
-                agg = (
-                    "CASE WHEN COUNT(*) = 0 THEN 0 "
-                    "ELSE COUNT(*) FILTER (WHERE a.level = 'mastery')::float / COUNT(*) END"
-                )
-            else:
-                return {"rows": [], "metadata": {"error": f"Unknown metric: {metric}"}}
-
-            if metric == "mastery_rate":
-                # Use attestations table
-                att_conditions: list[str] = []
-                att_params: list[Any] = []
-                att_idx = 1
-                att_scope_conds, att_idx = _scope_conditions(scope, "a", att_params, att_idx)
-                att_conditions.extend(att_scope_conds)
-                att_where = f"WHERE {' AND '.join(att_conditions)}" if att_conditions else ""
-
-                group_clause = ""
-                select_extra = ""
-                if breakdown:
-                    select_extra = f", a.{breakdown} AS dimension"
-                    group_clause = f"GROUP BY a.{breakdown}"
-
-                sql = (
-                    f"SELECT {agg} AS value, COUNT(DISTINCT person_id) AS sample_size"
-                    f"{select_extra} FROM attestations a {att_where} {group_clause}"
-                )
-                rows = await conn.fetch(sql, *att_params)
-            else:
-                group_clause = ""
-                select_extra = ""
-                if breakdown:
-                    select_extra = f", e.{breakdown} AS dimension"
-                    group_clause = f"GROUP BY e.{breakdown}"
-
-                sql = (
-                    f"SELECT {agg} AS value, COUNT(DISTINCT person_id) AS sample_size"
-                    f"{select_extra} FROM evidence e {where} {group_clause}"
-                )
-                rows = await conn.fetch(sql, *params)
-
-            result_rows = []
-            for r in rows:
-                row: dict[str, Any] = {
-                    "value": float(r["value"]) if r["value"] is not None else 0.0,
-                    "sample_size": int(r["sample_size"]) if r["sample_size"] is not None else 0,
-                }
-                if breakdown and "dimension" in r.keys():
-                    row["dimension"] = str(r["dimension"]) if r["dimension"] is not None else None
-                result_rows.append(row)
-
+        shape_error = _check_shape(scope, window, metric, filters)
+        if shape_error:
             return {
-                "rows": result_rows,
-                "metadata": {"metric": metric, "scope": scope, "window": window},
+                **validation_error(shape_error),
+                "rows": [],
+                "metadata": {"error": shape_error},
             }
+        if metric == "mastery_rate":
+            error = _check_breakdown(breakdown, ATTESTATION_DIMENSIONS)
+        elif metric in _EVIDENCE_METRICS:
+            error = _check_breakdown(breakdown, EVIDENCE_DIMENSIONS)
+        else:
+            return {"rows": [], "metadata": {"error": f"Unknown metric: {metric}"}}
+        error = error or _check_filters(filters)
+        if error:
+            return {
+                **validation_error(error),
+                "rows": [],
+                "metadata": {"error": error, "metric": metric},
+            }
+
+        async with pool.acquire() as conn:
+            if metric == "mastery_rate":
+                rows = await conn.fetch(_MASTERY_RATE_SQL, *_scope_params(scope), breakdown)
+            else:
+                rows = await conn.fetch(
+                    _EVIDENCE_AGG_SQL,
+                    *_evidence_params(scope, window, metric, filters, dimension=breakdown),
+                )
+
+        result_rows = []
+        for r in rows:
+            row: dict[str, Any] = {
+                "value": _to_float(r["value"]),
+                "sample_size": int(r["sample_size"]) if r["sample_size"] is not None else 0,
+            }
+            if breakdown:
+                row["dimension"] = r["dimension"]
+            result_rows.append(row)
+        # An ungrouped aggregate over zero rows still reports one zero-valued row.
+        if not breakdown and not result_rows:
+            result_rows.append({"value": 0.0, "sample_size": 0})
+
+        return {
+            "rows": result_rows,
+            "metadata": {"metric": metric, "scope": scope, "window": window},
+        }
 
     async def describe_schema(args: dict[str, Any]) -> dict[str, Any]:
         return _SCHEMA_DESCRIPTION
@@ -194,102 +248,56 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
         scope: dict[str, Any] = args.get("scope", {})
         metric: str = args.get("metric", "evidence_count")
         window: dict[str, str] = args.get("window", {})
-        interval: str = args.get("interval", "day")
-
-        # Map interval to Postgres date_trunc argument
-        trunc_map = {
-            "hour": "hour",
-            "day": "day",
-            "week": "week",
-            "month": "month",
-        }
-        trunc = trunc_map.get(interval, "day")
+        interval = args.get("interval", "day")
+        shape_error = _check_shape(scope, window, metric)
+        if shape_error:
+            return {**validation_error(shape_error), "series": []}
+        trunc = interval if isinstance(interval, str) and interval in _TREND_INTERVALS else "day"
+        # mastery_rate is attestation-based; its trend falls back to evidence count.
+        evidence_metric = metric if metric in _EVIDENCE_METRICS else "evidence_count"
 
         async with pool.acquire() as conn:
-            params: list[Any] = []
-            idx = 1
-            conditions: list[str] = []
-
-            scope_conds, idx = _scope_conditions(scope, "e", params, idx)
-            conditions.extend(scope_conds)
-
-            win_conds, idx = _window_conditions(window, "e.observed_at", params, idx)
-            conditions.extend(win_conds)
-
-            where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-
-            if metric == "avg_score":
-                conditions = conditions + ["e.score IS NOT NULL"]
-                where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-                agg = "AVG(e.score)"
-            elif metric == "engagement_count":
-                conditions = conditions + ["e.kind = 'engagement_event'"]
-                where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-                agg = "COUNT(*)"
-            elif metric == "mastery_rate":
-                # Mastery rate trend not supported via evidence; fall back to count
-                agg = "COUNT(*)"
-            else:
-                agg = "COUNT(*)"
-
-            sql = (
-                f"SELECT date_trunc('{trunc}', e.observed_at) AS bucket, "
-                f"{agg} AS y "
-                f"FROM evidence e {where} "
-                f"GROUP BY bucket ORDER BY bucket"
+            rows = await conn.fetch(
+                _EVIDENCE_AGG_SQL,
+                *_evidence_params(scope, window, evidence_metric, bucket=trunc),
             )
-            rows = await conn.fetch(sql, *params)
 
-            series = []
-            for r in rows:
-                bucket = r["bucket"]
-                x = bucket.isoformat() if bucket else None
-                series.append({"x": x, "y": float(r["y"]) if r["y"] is not None else 0.0})
-
-            return {"series": series}
+        return {"series": [
+            {"x": r["bucket"].isoformat() if r["bucket"] else None, "y": _to_float(r["value"])}
+            for r in rows
+        ]}
 
     async def cohort_compare(args: dict[str, Any]) -> dict[str, Any]:
         scope: dict[str, Any] = args.get("scope", {})
         cohorts: list[dict[str, Any]] = args.get("cohorts", [])
         metric: str = args.get("metric", "evidence_count")
         window: dict[str, str] = args.get("window", {})
+        shape_error = _check_shape(scope, window, metric)
+        if not shape_error and not isinstance(cohorts, list):
+            shape_error = f"Invalid cohorts {cohorts!r}; expected an array"
+        for cohort in cohorts if not shape_error else []:
+            cohort_scope = cohort.get("scope", {}) if isinstance(cohort, dict) else None
+            if not isinstance(cohort_scope, dict):
+                shape_error = f"Invalid cohort {cohort!r}; expected an object with a scope object"
+                break
+            shape_error = _check_shape({**scope, **cohort_scope}, window, metric)
+            if shape_error:
+                break
+        if shape_error:
+            return {**validation_error(shape_error), "cohort_results": []}
+        evidence_metric = metric if metric in _EVIDENCE_METRICS else "evidence_count"
 
         async with pool.acquire() as conn:
             cohort_results = []
-
             for cohort in cohorts:
                 cohort_scope = {**scope, **cohort.get("scope", {})}
-                params: list[Any] = []
-                idx = 1
-                conditions: list[str] = []
-
-                scope_conds, idx = _scope_conditions(cohort_scope, "e", params, idx)
-                conditions.extend(scope_conds)
-
-                win_conds, idx = _window_conditions(window, "e.observed_at", params, idx)
-                conditions.extend(win_conds)
-
-                where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-
-                if metric == "avg_score":
-                    conditions = conditions + ["e.score IS NOT NULL"]
-                    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-                    agg = "AVG(e.score)"
-                elif metric == "engagement_count":
-                    conditions = conditions + ["e.kind = 'engagement_event'"]
-                    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-                    agg = "COUNT(*)"
-                else:
-                    agg = "COUNT(*)"
-
-                sql = (
-                    f"SELECT {agg} AS value, COUNT(DISTINCT person_id) AS sample_size "
-                    f"FROM evidence e {where}"
+                row = await conn.fetchrow(
+                    _EVIDENCE_AGG_SQL,
+                    *_evidence_params(cohort_scope, window, evidence_metric),
                 )
-                row = await conn.fetchrow(sql, *params)
                 cohort_results.append({
                     "cohort": cohort.get("label", str(cohort)),
-                    "value": float(row["value"]) if row and row["value"] is not None else 0.0,
+                    "value": _to_float(row["value"]) if row else 0.0,
                     "sample_size": int(row["sample_size"]) if row and row["sample_size"] is not None else 0,
                 })
 
@@ -333,7 +341,13 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                     "scope": {"type": "object"},
                     "metric": {"type": "string"},
                     "window": {"type": "object"},
-                    "breakdown": {"type": "string"},
+                    "breakdown": {
+                        "type": "string",
+                        "description": (
+                            f"Evidence metrics: one of {sorted(EVIDENCE_DIMENSIONS)}; "
+                            f"mastery_rate: one of {sorted(ATTESTATION_DIMENSIONS)}"
+                        ),
+                    },
                     "filters": {"type": "object"},
                 },
                 "required": ["scope", "metric", "window"],

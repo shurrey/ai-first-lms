@@ -1,6 +1,8 @@
 # agent-manifests.yaml
-# Source of truth for the ten sub-agents. DO NOT EDIT without a T-C-* contract-change task.
+# Source of truth for the ten routable sub-agents plus the background learning_analyst.
+# DO NOT EDIT without a T-C-* contract-change task.
 # Each agent has a local copy at src/agents/<name>/manifest.yaml that CI verifies matches.
+# mcp_tools must equal _AGENT_TOOLS in src/engine/agents/runner.py; tools are described in mcp-tools.md.
 
 version: 1
 
@@ -34,10 +36,17 @@ agents:
     mcp_tools:
       - content.retrieve
       - content.search
+      - content.get_skill
       - roster.get_student_context
       - assessments.list_recent_evidence
+      - graph.mastery_map
       - graph.neighbors
-      - graph.path_to_mastery
+      - graph.prerequisites
+      - attestations.get_student_attestations
+      - attestations.attest
+      - roster.get_learner_profile
+      - roster.get_goals
+      - roster.set_goal
     composable_with: [content_generator, assessment]
     requires_human_approval: false
     example_queries:
@@ -73,8 +82,10 @@ agents:
     mcp_tools:
       - standards.lookup
       - content.library_search
-      - graph.subgraph_for_outcomes
       - content.save_draft
+      - content.get_skill
+      - content.save_skill
+      - content.list_skills
     composable_with: [content_generator, assessment]
     requires_human_approval: true
 
@@ -84,7 +95,7 @@ agents:
       Generates learning materials — summaries, worked examples, study guides,
       reading guides, slide drafts, practice problems. Serves both faculty and
       students directly; also invoked by orchestrator on behalf of other agents.
-    persona_scope: [student, faculty, instructional_designer]
+    persona_scope: [student, faculty, instructional_designer, advisor]
     model: claude-haiku-4-5-20251001       # cheap by default; orchestrator can upgrade
     requires_pii: []
     inputs:
@@ -107,8 +118,9 @@ agents:
       - content.retrieve
       - content.search
       - content.save_draft
-      - standards.lookup
-      - graph.subgraph
+      - content.get_skill
+      - content.save_skill
+      - content.list_skills
     composable_with: [tutor, course_architect, assessment, communication]
     requires_human_approval: false
 
@@ -136,11 +148,19 @@ agents:
         warnings:  {type: array, items: {type: string}}   # weak items, overlapping distractors, etc.
       required: [questions]
     mcp_tools:
-      - questions.search_bank
-      - questions.create
-      - standards.lookup
-      - content.retrieve
-      - graph.node_for_outcome
+      - assessments.create_question
+      - assessments.search_bank
+      - assessments.get_rubric
+      - assessments.list_recent_evidence
+      - assessments.list_pending_credentials
+      - assessments.get_credential_evidence
+      - assessments.approve_credential
+      - assessments.list_issued_credentials
+      - roster.get_student
+      - roster.list_by_course
+      - graph.mastery_map
+      - attestations.get_student_attestations
+      - roster.list_student_sessions
     composable_with: [content_generator]
     requires_human_approval: true     # saving to question bank requires approval
 
@@ -166,10 +186,10 @@ agents:
         # each draft: submission_id, scores{criterion: n}, feedback{criterion: md}, holistic_md, confidence, flags
       required: [drafts]
     mcp_tools:
-      - submissions.get
-      - rubrics.get
-      - grades.draft
-      - grades.commit                       # gated, requires approval
+      - assessments.get_submission
+      - assessments.get_rubric
+      - assessments.draft_grade
+      - assessments.commit_grade
     composable_with: []
     requires_human_approval: true
 
@@ -196,10 +216,16 @@ agents:
         methodology_note: {type: string}
       required: [at_risk]
     mcp_tools:
+      - roster.get_student_context
+      - assessments.list_recent_evidence
+      - roster.list_by_course
       - analytics.query
-      - roster.get
-      - interventions.playbook
-      - graph.evidence_summary
+      - analytics.trend
+      - analytics.cohort_compare
+      - sis.get_transcript
+      - sis.catalog_search
+      - graph.mastery_map
+      - attestations.get_student_attestations
     composable_with: [engagement_analyst, communication, content_generator]
     requires_human_approval: false
 
@@ -208,7 +234,7 @@ agents:
     description: |
       Academic planning — degree audit, course recommendations, prerequisites,
       pathway mapping. In AI-native deployment also serves as Learning Path Navigator.
-    persona_scope: [student, advisor]
+    persona_scope: [student, advisor, faculty]
     model: claude-sonnet-4-6
     requires_pii: [email, display_name]    # for personalized audit
     inputs:
@@ -228,12 +254,11 @@ agents:
         path_visualization: {type: object, nullable: true}  # learning graph projection
       required: [audit, recommendations]
     mcp_tools:
+      - roster.get_student_context
+      - roster.get_student
       - sis.get_transcript
       - sis.degree_audit
-      - sis.check_prerequisites
-      - catalog.search
-      - schedule.availability
-      - graph.path_to_mastery
+      - sis.catalog_search
     composable_with: [tutor, content_generator]
     requires_human_approval: false
 
@@ -261,10 +286,7 @@ agents:
       required: [proposals]
     mcp_tools:
       - content.retrieve
-      - content.save_draft
-      - media.process
-      - translation.translate
-      - compliance.check_wcag
+      - content.search
     composable_with: [content_generator]
     requires_human_approval: true
 
@@ -292,10 +314,11 @@ agents:
         query_used:   {type: string, nullable: true}   # shown to the user for transparency
       required: [narrative_md]
     mcp_tools:
+      - roster.list_by_course
+      - assessments.list_recent_evidence
       - analytics.query
-      - analytics.describe_schema
-      - charts.render
-      - graph.aggregate
+      - analytics.trend
+      - analytics.cohort_compare
     composable_with: []
     requires_human_approval: false
 
@@ -323,9 +346,55 @@ agents:
         send_ready_payload: {type: object} # staged; not sent until approval
       required: [drafts]
     mcp_tools:
-      - roster.get
-      - messages.draft
-      - messages.send                      # gated
-      - templates.list
+      - roster.list_by_course
+      - roster.get_student_context
     composable_with: []
     requires_human_approval: true
+
+  - name: learning_analyst
+    version: "0.1.0"
+    description: |
+      Background post-session analysis of student tutoring sessions. The engine
+      runs it (engine/analyst.py) after a student session; it is never routed from
+      chat. Summarizes the session, appends to the learner profile, writes
+      student-facing insights and concept-review outcomes, and flags sessions for
+      instructor review. A shallow review can trigger a deep, multi-session review.
+    persona_scope: [student]              # runs in the background for student sessions
+    model: claude-haiku-4-5-20251001       # shallow review; deep review uses claude-sonnet-4-6
+    requires_pii: []                      # transcript turns are labelled Student/Tutor; no name is sent
+    inputs:
+      type: object
+      properties:
+        session_id: {type: string}
+        person_id:  {type: string}
+        course_id:  {type: string}
+        deep:       {type: boolean, default: false}   # adds up to 5 prior session transcripts
+      required: [session_id, person_id, course_id]
+    outputs:
+      type: object
+      properties:
+        session_summary:   {type: string}             # -> roster.update_session_summary
+        profile_additions: {type: string}             # appended, then roster.update_learner_profile
+        review_flag:       {type: boolean}
+        review_reason:     {type: string, nullable: true}
+        student_insights:  {type: array, items: {type: string}}   # -> roster.update_student_insights
+        concepts_reviewed:                            # -> roster.save_concept_review, one per item
+          type: array
+          items:
+            type: object
+            properties:
+              id:      {type: string}                 # concept UUID or title
+              outcome: {type: string, enum: [recalled, struggled, failed]}
+      required: [session_summary]
+    mcp_tools:
+      - roster.get_learner_profile
+      - roster.update_learner_profile
+      - roster.get_recent_turns
+      - roster.list_student_sessions
+      - roster.get_session_transcript
+      - attestations.get_student_attestations
+      - roster.update_student_insights
+      - roster.update_session_summary
+      - roster.save_concept_review
+    composable_with: []
+    requires_human_approval: false

@@ -2,8 +2,12 @@ version: 1
 agent:
   name: communication
   version: 0.1.0
-  description: "Drafts and sends messages \u2014 announcements, reminders, personalized outreach.\nNever sends without explicit\
-    \ human approval.\n"
+  description: 'Drafts and sends messages — announcements, reminders, personalized
+    outreach.
+
+    Never sends without explicit human approval.
+
+    '
   persona_scope:
   - faculty
   - advisor
@@ -49,9 +53,7 @@ agent:
     required:
     - drafts
   mcp_tools:
-  - roster.get
-  - messages.draft
-  - messages.send
-  - templates.list
+  - roster.list_by_course
+  - roster.get_student_context
   composable_with: []
   requires_human_approval: true

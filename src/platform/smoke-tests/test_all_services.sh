@@ -67,7 +67,8 @@ echo ""
 
 # Frontend
 echo "Frontend:"
-check_http "frontend"       "http://localhost:3000/healthz" || true
+check_http "frontend"       "http://localhost:3000/" || true
+check_http "ultra-frontend" "http://localhost:3100/" || true
 echo ""
 
 # Observability

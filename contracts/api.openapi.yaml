@@ -1,30 +1,70 @@
 openapi: 3.1.0
 info:
   title: AI-First LMS Prototype — Orchestrator API
-  version: 0.1.0
+  version: 0.2.0
   description: |
-    Contract between the frontend and the orchestrator. Source of truth.
+    Contract between the frontends and the orchestrator. Source of truth.
     Do not edit without a T-C-* contract-change task.
 
-    The frontend calls only these endpoints. Sub-agents and MCP servers are
+    The frontends call only these endpoints. Sub-agents and MCP servers are
     NOT exposed through this API.
+
+    Error convention for the data-backed read/write endpoints (/api/mastery,
+    /api/roster, /api/student*, /api/transcript, credential and settings
+    endpoints): they proxy an MCP tool and return its JSON as-is. A tool-level
+    failure (unknown id, missing argument, MCP server unreachable) is returned
+    as HTTP 200 with body `{"error": "<message>"}`, not as a 4xx/5xx. Callers
+    must check for the `error` key. Request-body validation failures are 422.
+
+    There is no authentication in this version; every endpoint is open.
 
 servers:
   - url: http://localhost:8000
     description: Local dev
-  - url: https://demo.ailms.internal
-    description: Demo VM
+
+tags:
+  - name: core
+    description: Session, conversation turn, streaming and approval flow
+  - name: roster
+    description: Faculty / advisor roster, mastery and transcript views
+  - name: credentials
+    description: Microcredential review, issuance and system settings
+  - name: podcast
+    description: Personalized audio lesson generation
 
 paths:
   /healthz:
     get:
+      tags: [core]
       summary: Liveness probe
+      operationId: healthz
       responses:
-        "200": {description: ok}
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: {type: string, const: ok}
 
   /api/session:
     post:
-      summary: Create a session for a given persona and course
+      tags: [core]
+      summary: Create a session for a persona and course, and start its opening brief
+      operationId: createSession
+      description: |
+        `course_id` accepts a course UUID or one of the demo slugs
+        `cs101`, `math201`, `eng102`, `bio150`, or `all` (cross-course view for
+        advisor/admin). Slugs are resolved to UUIDs; the resolved value is
+        returned as `course_uuid`.
+
+        When `person_id` is omitted, a seeded demo person is assigned from the
+        persona + course. If a person is resolved, a brief is generated in the
+        background on turn `brief_turn_id`; open `stream_url` to receive it.
+        If no person is resolved, no brief is generated and `stream_url` still
+        points at an empty turn that never completes.
       requestBody:
         required: true
         content:
@@ -34,8 +74,15 @@ paths:
               required: [persona, course_id]
               properties:
                 persona: {type: string, enum: [student, faculty, advisor, admin]}
-                person_id: {type: string}
-                course_id: {type: string}
+                person_id: {type: [string, "null"]}
+                course_id:
+                  type: string
+                  description: Course UUID, a demo slug, or `all`.
+                page:
+                  type: [string, "null"]
+                  description: |
+                    Optional page context for the brief. Values used by the
+                    Ultra UI: content, gradebook, roster, calendar, analytics.
       responses:
         "201":
           description: created
@@ -43,12 +90,30 @@ paths:
             application/json:
               schema:
                 type: object
+                required: [session_id]
                 properties:
                   session_id: {type: string}
+                  person_id: {type: [string, "null"]}
+                  course_uuid:
+                    type: [string, "null"]
+                    description: Resolved course UUID, or `all`.
+                  brief_turn_id:
+                    type: [string, "null"]
+                    description: Always `brief-<session_id>`.
+                  stream_url:
+                    type: [string, "null"]
+                    description: Relative URL of the brief turn's SSE stream.
+        "422":
+          description: Invalid persona or malformed body
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorDetail"}
 
   /api/converse:
     post:
+      tags: [core]
       summary: Submit a user message and begin a turn
+      operationId: converse
       requestBody:
         required: true
         content:
@@ -59,23 +124,44 @@ paths:
               properties:
                 session_id: {type: string}
                 message: {type: string}
-                context_override: {type: object, nullable: true}
+                context_override:
+                  type: [object, "null"]
+                  description: Accepted but currently ignored by the orchestrator.
       responses:
         "202":
           description: |
-            Turn accepted. Caller must open a GET /api/stream for the returned turn_id
-            to receive events.
+            Turn accepted. Caller must open GET /api/stream for the returned
+            turn_id to receive events.
           content:
             application/json:
               schema:
                 type: object
+                required: [turn_id, stream_url]
                 properties:
                   turn_id: {type: string}
                   stream_url: {type: string}
+        "404":
+          description: Session not found (sessions are held in engine memory)
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorDetail"}
+        "422":
+          description: Malformed body
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ValidationError"}
 
   /api/stream:
     get:
-      summary: SSE stream of events for an in-progress turn
+      tags: [core]
+      summary: SSE stream of events for a turn
+      operationId: stream
+      description: |
+        Emits envelopes per contracts/events.md, then closes when the turn's
+        status becomes `completed` or `error`. An unknown turn_id yields one
+        `error` event (`code: internal`, "Turn not found") and closes.
+        Each SSE message has `event:` set to the envelope's event type and
+        `id:` set to its sequence number.
       parameters:
         - in: query
           name: session_id
@@ -87,18 +173,28 @@ paths:
           schema: {type: string}
         - in: query
           name: since_sequence
-          description: Resume from this sequence (inclusive). Supports reconnect.
-          schema: {type: integer}
+          required: false
+          description: |
+            Number of already-received events to skip, for reconnect. Pass the
+            last received `sequence` value. Default 0 (replay from the start).
+          schema: {type: integer, minimum: 0, default: 0}
       responses:
         "200":
-          description: |
-            text/event-stream of envelopes per contracts/events.md.
+          description: text/event-stream of envelopes per contracts/events.md.
           content:
-            text/event-stream: {}
+            text/event-stream:
+              schema: {type: string}
+        "422":
+          description: Missing session_id or turn_id
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ValidationError"}
 
   /api/approval:
     post:
+      tags: [core]
       summary: Submit a human approval/edit/rejection for a pending step
+      operationId: submitApproval
       requestBody:
         required: true
         content:
@@ -111,14 +207,40 @@ paths:
                 turn_id: {type: string}
                 approval_id: {type: string}
                 decision: {type: string, enum: [approve, edit, reject]}
-                edited_payload: {type: object, nullable: true}
-                note: {type: string, nullable: true}
+                edited_payload: {type: [object, "null"]}
+                note: {type: [string, "null"]}
       responses:
-        "202": {description: accepted; orchestrator will resume the turn}
+        "202":
+          description: accepted; orchestrator will resume the turn
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, approval_id, decision]
+                properties:
+                  status: {type: string, const: accepted}
+                  approval_id: {type: string}
+                  decision: {type: string, enum: [approve, edit, reject]}
+        "404":
+          description: No pending approval with this approval_id
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorDetail"}
+        "422":
+          description: Malformed body or unknown decision
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ValidationError"}
 
   /api/clarify:
     post:
+      tags: [core]
       summary: Answer a clarification request; resume the turn
+      operationId: clarify
+      x-implementation-status: not_implemented
+      description: |
+        Not implemented in the engine. src/frontend/lib/api.ts calls it, and
+        the request currently returns 404. Kept as designed.
       requestBody:
         required: true
         content:
@@ -135,12 +257,16 @@ paths:
 
   /api/sessions/{session_id}/history:
     get:
+      tags: [core]
       summary: Conversation history for a session
+      operationId: getSessionHistory
+      x-implementation-status: not_implemented
+      description: |
+        Not implemented in the engine. src/frontend/lib/api.ts calls it, and
+        the request currently returns 404. Kept as designed. The closest live
+        endpoint is GET /api/transcript/{session_id}.
       parameters:
-        - in: path
-          name: session_id
-          required: true
-          schema: {type: string}
+        - $ref: "#/components/parameters/SessionIdPath"
       responses:
         "200":
           description: ok
@@ -149,4 +275,670 @@ paths:
               schema:
                 type: object
                 properties:
-                  turns: {type: array}
+                  turns: {type: array, items: {type: object}}
+
+  /api/mastery/{person_id}/{course_id}:
+    get:
+      tags: [roster]
+      summary: Live mastery map for a student in a course
+      operationId: getMastery
+      description: Proxies MCP tool `graph.mastery_map`.
+      parameters:
+        - $ref: "#/components/parameters/PersonIdPath"
+        - $ref: "#/components/parameters/CourseIdPath"
+      responses:
+        "200":
+          description: Mastery map, or `{error}`
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/MasteryMap"
+                  - $ref: "#/components/schemas/ToolError"
+
+  /api/roster/{course_id}:
+    get:
+      tags: [roster]
+      summary: Students in a course with session activity, most recently active first
+      operationId: getRoster
+      parameters:
+        - $ref: "#/components/parameters/CourseIdPath"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [students, total]
+                properties:
+                  students:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, name, session_count, last_active, total_turns]
+                      properties:
+                        id: {type: string, format: uuid}
+                        name: {type: string}
+                        session_count: {type: integer}
+                        last_active: {type: [string, "null"], format: date-time}
+                        total_turns: {type: integer}
+                  total: {type: integer}
+
+  /api/student/{person_id}/sessions:
+    get:
+      tags: [roster]
+      summary: A student's tutoring sessions, newest first
+      operationId: getStudentSessions
+      parameters:
+        - $ref: "#/components/parameters/PersonIdPath"
+        - in: query
+          name: course_id
+          required: false
+          description: Limit to one course.
+          schema: {type: string, format: uuid}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [student_name, sessions]
+                properties:
+                  student_name:
+                    type: string
+                    description: '"Unknown" if the person is not found.'
+                  sessions:
+                    type: array
+                    items: {$ref: "#/components/schemas/SessionSummary"}
+
+  /api/student/{person_id}/courses:
+    get:
+      tags: [roster]
+      summary: Courses a student is enrolled in, with mastery and session summary
+      operationId: getStudentCourses
+      parameters:
+        - $ref: "#/components/parameters/PersonIdPath"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [student_name, courses]
+                properties:
+                  student_name: {type: string}
+                  courses:
+                    type: array
+                    items:
+                      type: object
+                      required: [course_id, title, mastery, total_concepts,
+                                 microcredentials_earned, microcredentials_total,
+                                 session_count, last_active]
+                      properties:
+                        course_id: {type: string, format: uuid}
+                        title: {type: string}
+                        mastery:
+                          type: integer
+                          description: Count of concepts at mastery level.
+                        total_concepts: {type: integer}
+                        microcredentials_earned: {type: integer}
+                        microcredentials_total: {type: integer}
+                        session_count: {type: integer}
+                        last_active: {type: [string, "null"], format: date-time}
+
+  /api/student-insights/{person_id}:
+    get:
+      tags: [roster]
+      summary: Student-facing learning insights written by the learning analyst
+      operationId: getStudentInsights
+      parameters:
+        - $ref: "#/components/parameters/PersonIdPath"
+      responses:
+        "200":
+          description: |
+            `insights` is `persons.attributes.student_insights`, or [] if unset.
+            Item shape is whatever the learning analyst wrote.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [insights]
+                properties:
+                  insights: {type: array, items: {}}
+
+  /api/student-goals/{person_id}:
+    get:
+      tags: [roster]
+      summary: A student's learning goals
+      operationId: getStudentGoals
+      description: Proxies MCP tool `roster.get_goals`.
+      parameters:
+        - $ref: "#/components/parameters/PersonIdPath"
+      responses:
+        "200":
+          description: Goals, or `{error}`
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    required: [goals]
+                    properties:
+                      goals:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            description: {type: string}
+                            target_date: {type: [string, "null"]}
+                            created_at: {type: string, format: date-time}
+                            status: {type: string}
+                  - $ref: "#/components/schemas/ToolError"
+
+  /api/transcript/{session_id}:
+    get:
+      tags: [roster]
+      summary: Persisted conversation transcript for a session
+      operationId: getTranscript
+      description: Proxies MCP tool `roster.get_session_transcript`.
+      parameters:
+        - $ref: "#/components/parameters/SessionIdPath"
+      responses:
+        "200":
+          description: Transcript, or `{error}`
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    required: [session_id, student_name, course_title, created_at, turns]
+                    properties:
+                      session_id: {type: string, format: uuid}
+                      student_name: {type: string}
+                      course_title: {type: string}
+                      created_at: {type: string, format: date-time}
+                      turns:
+                        type: array
+                        items:
+                          type: object
+                          required: [role, content, created_at]
+                          properties:
+                            role: {type: string, enum: [user, assistant]}
+                            content: {type: string}
+                            created_at: {type: string, format: date-time}
+                  - $ref: "#/components/schemas/ToolError"
+
+  /api/pending-credentials/{course_id}:
+    get:
+      tags: [credentials]
+      summary: Pending microcredentials awaiting instructor review in a course
+      operationId: getPendingCredentials
+      description: Proxies MCP tool `assessments.list_pending_credentials`.
+      parameters:
+        - $ref: "#/components/parameters/CourseIdPath"
+        - in: query
+          name: person_id
+          required: false
+          description: Limit to one student.
+          schema: {type: string, format: uuid}
+      responses:
+        "200":
+          description: Pending list, or `{error}`
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    required: [pending]
+                    properties:
+                      pending:
+                        type: array
+                        items:
+                          type: object
+                          required: [id, person_id, student_name, microcredential_id,
+                                     credential_title, created_at]
+                          properties:
+                            id: {type: string, format: uuid}
+                            person_id: {type: string, format: uuid}
+                            student_name: {type: string}
+                            microcredential_id: {type: string, format: uuid}
+                            credential_title: {type: string}
+                            created_at: {type: string, format: date-time}
+                  - $ref: "#/components/schemas/ToolError"
+
+  /api/credential-evidence/{pending_id}:
+    get:
+      tags: [credentials]
+      summary: Evidence for a pending microcredential
+      operationId: getCredentialEvidence
+      description: Proxies MCP tool `assessments.get_credential_evidence`.
+      parameters:
+        - $ref: "#/components/parameters/PendingIdPath"
+      responses:
+        "200":
+          description: Evidence, or `{error}`
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    required: [pending_id, student_name, credential_title, created_at,
+                               session_count, concepts]
+                    properties:
+                      pending_id: {type: string, format: uuid}
+                      student_name: {type: string}
+                      credential_title: {type: string}
+                      created_at: {type: string, format: date-time}
+                      session_count: {type: integer}
+                      concepts:
+                        type: array
+                        items:
+                          type: object
+                          required: [id, title, level, attested_at]
+                          properties:
+                            id: {type: string, format: uuid}
+                            title: {type: string}
+                            level:
+                              oneOf:
+                                - $ref: "#/components/schemas/MasteryLevel"
+                                - type: "null"
+                            attested_at: {type: [string, "null"], format: date-time}
+                  - $ref: "#/components/schemas/ToolError"
+
+  /api/approve-credential/{pending_id}:
+    post:
+      tags: [credentials]
+      summary: Approve a pending microcredential and issue an Open Badges 3.0 credential
+      operationId: approveCredential
+      description: |
+        Proxies MCP tool `assessments.approve_credential`. Does not go through
+        the approval_request / POST /api/approval gate; the click is the approval.
+      parameters:
+        - $ref: "#/components/parameters/PendingIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/ReviewerBody"}
+      responses:
+        "200":
+          description: Approved, or `{error}` (not found / already processed)
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ApproveResult"
+                  - $ref: "#/components/schemas/ToolError"
+        "422":
+          description: Missing reviewer_id
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ValidationError"}
+
+  /api/approve-credentials/bulk:
+    post:
+      tags: [credentials]
+      summary: Approve several pending microcredentials
+      operationId: bulkApproveCredentials
+      description: |
+        Calls `assessments.approve_credential` once per id, sequentially. Each
+        result is reported independently; one failure does not stop the rest.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/ReviewerBody"
+                - type: object
+                  required: [pending_ids]
+                  properties:
+                    pending_ids:
+                      type: array
+                      items: {type: string, format: uuid}
+      responses:
+        "200":
+          description: One result per pending_id, in request order
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      required: [pending_id]
+                      properties:
+                        pending_id: {type: string}
+                        approved: {type: boolean}
+                        credential_id: {type: string, format: uuid}
+                        error: {type: string}
+        "422":
+          description: Malformed body
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ValidationError"}
+
+  /api/credentials/{person_id}:
+    get:
+      tags: [credentials]
+      summary: Issued credentials for a student, newest first
+      operationId: getIssuedCredentials
+      description: Proxies MCP tool `assessments.list_issued_credentials`.
+      parameters:
+        - $ref: "#/components/parameters/PersonIdPath"
+      responses:
+        "200":
+          description: Credentials, or `{error}`
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    required: [credentials]
+                    properties:
+                      credentials:
+                        type: array
+                        items:
+                          type: object
+                          required: [id, credential_title, course_title, issued_at, issued_by]
+                          properties:
+                            id: {type: string, format: uuid}
+                            credential_title: {type: string}
+                            course_title: {type: string}
+                            issued_at: {type: string, format: date-time}
+                            issued_by:
+                              type: string
+                              description: Reviewer display name.
+                  - $ref: "#/components/schemas/ToolError"
+
+  /api/settings:
+    get:
+      tags: [credentials]
+      summary: Read system settings
+      operationId: getSettings
+      description: Proxies MCP tool `assessments.get_settings`.
+      parameters:
+        - in: query
+          name: key
+          required: false
+          description: Return one setting instead of all.
+          schema: {type: string}
+      responses:
+        "200":
+          description: |
+            With `key`: `{key, value}` (value null if unset). Without: `{settings}`
+            mapping each key to its JSON value.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    required: [key, value]
+                    properties:
+                      key: {type: string}
+                      value: {}
+                  - type: object
+                    required: [settings]
+                    properties:
+                      settings:
+                        type: object
+                        additionalProperties: {}
+                  - $ref: "#/components/schemas/ToolError"
+    post:
+      tags: [credentials]
+      summary: Create or replace one system setting
+      operationId: saveSetting
+      description: Proxies MCP tool `assessments.save_settings`. A null value is rejected.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key, value]
+              properties:
+                key: {type: string}
+                value:
+                  description: Any JSON value; stored in system_settings.value (jsonb).
+      responses:
+        "200":
+          description: Saved, or `{error}`
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    required: [saved]
+                    properties:
+                      saved: {type: boolean, const: true}
+                  - $ref: "#/components/schemas/ToolError"
+        "422":
+          description: Malformed body
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ValidationError"}
+
+  /api/generate-podcast:
+    post:
+      tags: [podcast]
+      summary: Generate a personalized two-voice audio lesson
+      operationId: generatePodcast
+      description: |
+        Concept selection: explicit `concept_ids`, else concepts inferred from
+        the session's conversation, else the student's emerging/proficient
+        concepts. At most 5 concepts are used. Synchronous: the request returns
+        once audio (or a text-only fallback) has been rendered.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [person_id, course_id]
+              properties:
+                person_id: {type: string, format: uuid}
+                course_id: {type: string, format: uuid}
+                session_id:
+                  type: [string, "null"]
+                  description: In-memory session whose conversation guides concept choice.
+                concept_ids:
+                  type: [array, "null"]
+                  items: {type: string}
+      responses:
+        "200":
+          description: Podcast, or `{error}`
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    required: [podcast_id, audio_url, script, segment_count, title]
+                    properties:
+                      podcast_id: {type: string}
+                      audio_url:
+                        type: string
+                        description: |
+                          `/audio/<podcast_id>.mp3`, or `/audio/<podcast_id>.txt`
+                          when audio rendering is unavailable.
+                      script: {type: string}
+                      segment_count: {type: integer}
+                      title: {type: string}
+                  - $ref: "#/components/schemas/ToolError"
+        "422":
+          description: Malformed body
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ValidationError"}
+
+  /audio/{filename}:
+    get:
+      tags: [podcast]
+      summary: Serve a generated podcast file
+      operationId: serveAudio
+      parameters:
+        - in: path
+          name: filename
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: |
+            The file (`audio/mpeg` for .mp3, `text/plain` for .txt). A missing
+            file returns 200 with JSON `{"error": "Audio file not found"}`.
+          content:
+            audio/mpeg:
+              schema: {type: string, contentEncoding: binary}
+            text/plain:
+              schema: {type: string}
+            application/json:
+              schema: {$ref: "#/components/schemas/ToolError"}
+
+components:
+  parameters:
+    PersonIdPath:
+      in: path
+      name: person_id
+      required: true
+      schema: {type: string, format: uuid}
+    CourseIdPath:
+      in: path
+      name: course_id
+      required: true
+      schema: {type: string, format: uuid}
+    SessionIdPath:
+      in: path
+      name: session_id
+      required: true
+      schema: {type: string}
+    PendingIdPath:
+      in: path
+      name: pending_id
+      required: true
+      schema: {type: string, format: uuid}
+
+  schemas:
+    ToolError:
+      type: object
+      required: [error]
+      properties:
+        error: {type: string}
+
+    ErrorDetail:
+      description: FastAPI HTTPException body.
+      type: object
+      required: [detail]
+      properties:
+        detail: {}
+
+    ValidationError:
+      description: FastAPI request-validation body.
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          type: array
+          items:
+            type: object
+            properties:
+              loc: {type: array, items: {}}
+              msg: {type: string}
+              type: {type: string}
+
+    MasteryLevel:
+      type: string
+      enum: [emerging, proficient, mastery]
+
+    MasteryMap:
+      type: object
+      required: [student_name, course_title, microcredentials, summary]
+      properties:
+        student_name: {type: string}
+        course_title: {type: string}
+        microcredentials:
+          type: array
+          items:
+            type: object
+            required: [id, title, earned, progress, total_concepts, modules]
+            properties:
+              id: {type: string, format: uuid}
+              title: {type: string}
+              earned:
+                type: boolean
+                description: True when every concept is at mastery.
+              progress: {$ref: "#/components/schemas/LevelCounts"}
+              total_concepts: {type: integer}
+              modules:
+                type: array
+                items:
+                  type: object
+                  required: [id, title, concepts]
+                  properties:
+                    id: {type: string, format: uuid}
+                    title: {type: string}
+                    concepts:
+                      type: array
+                      items:
+                        type: object
+                        required: [id, title, level]
+                        properties:
+                          id: {type: string, format: uuid}
+                          title: {type: string}
+                          level:
+                            type: string
+                            enum: [not_started, emerging, proficient, mastery]
+        summary:
+          allOf:
+            - $ref: "#/components/schemas/LevelCounts"
+            - type: object
+              required: [total_concepts, microcredentials_earned, microcredentials_total]
+              properties:
+                total_concepts: {type: integer}
+                microcredentials_earned: {type: integer}
+                microcredentials_total: {type: integer}
+
+    LevelCounts:
+      type: object
+      required: [mastery, proficient, emerging, not_started]
+      properties:
+        mastery: {type: integer}
+        proficient: {type: integer}
+        emerging: {type: integer}
+        not_started: {type: integer}
+
+    SessionSummary:
+      type: object
+      required: [session_id, course_id, course_title, created_at, turn_count, first_message]
+      properties:
+        session_id: {type: string, format: uuid}
+        course_id: {type: [string, "null"], format: uuid}
+        course_title: {type: string}
+        created_at: {type: string, format: date-time}
+        turn_count: {type: integer}
+        first_message:
+          type: string
+          description: First user message, truncated to 100 characters.
+
+    ReviewerBody:
+      type: object
+      required: [reviewer_id]
+      properties:
+        reviewer_id:
+          type: string
+          format: uuid
+          description: persons.id of the approving instructor.
+
+    ApproveResult:
+      type: object
+      required: [approved, credential_id]
+      properties:
+        approved: {type: boolean, const: true}
+        credential_id:
+          type: string
+          format: uuid
+          description: Id embedded in the OB3 credential (`urn:uuid:<id>`).

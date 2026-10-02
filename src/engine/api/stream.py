@@ -52,7 +52,9 @@ async def _event_generator(
             yield _error_event(session_id, turn_id, sequence_counter, "Turn not found")
             return
 
-        # Get new events since last check
+        # Read status before events: everything stored before the turn finished is then
+        # drained in this pass, even if the turn finishes while we are yielding.
+        finished = turn.status in ("completed", "error")
         events = await turn_store.get_events(turn_id, since_sequence=last_seen)
 
         for event_data in events:
@@ -72,8 +74,7 @@ async def _event_generator(
             sequence_counter += 1
             last_seen += 1
 
-        # If turn is completed or errored, stop streaming
-        if turn.status in ("completed", "error"):
+        if finished:
             logger.info("Turn %s status=%s, closing stream", turn_id, turn.status)
             return
 

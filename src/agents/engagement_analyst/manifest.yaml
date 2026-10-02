@@ -41,9 +41,10 @@ agent:
     required:
     - narrative_md
   mcp_tools:
+  - roster.list_by_course
+  - assessments.list_recent_evidence
   - analytics.query
-  - analytics.describe_schema
-  - charts.render
-  - graph.aggregate
+  - analytics.trend
+  - analytics.cohort_compare
   composable_with: []
   requires_human_approval: false

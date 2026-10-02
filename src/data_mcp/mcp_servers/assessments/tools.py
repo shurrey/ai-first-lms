@@ -9,7 +9,11 @@ from typing import Any
 import asyncpg
 
 from data_mcp.mcp_base import ToolDef
-from data_mcp.mcp_servers._helpers import parse_json_column, resolve_concept_id
+from data_mcp.mcp_servers._helpers import (
+    parse_json_column,
+    resolve_concept_id,
+    validation_error,
+)
 
 
 def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
@@ -58,33 +62,16 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
         aligned_nodes = args.get("aligned_nodes")
 
         async with pool.acquire() as conn:
-            conditions: list[str] = []
-            params: list[Any] = []
-            idx = 1
-
-            if bank_id:
-                conditions.append(f"q.bank_id = ${idx}")
-                params.append(uuid.UUID(bank_id))
-                idx += 1
-
-            if query:
-                conditions.append(f"q.stem ILIKE ${idx}")
-                params.append(f"%{query}%")
-                idx += 1
-
-            if aligned_nodes:
-                node_uuids = [uuid.UUID(n) for n in aligned_nodes]
-                conditions.append(f"q.aligned_nodes && ${idx}::uuid[]")
-                params.append(node_uuids)
-                idx += 1
-
-            where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
             rows = await conn.fetch(
-                f"""SELECT q.id, q.type, q.stem, q.options, q.bloom_level, q.difficulty, q.aligned_nodes
-                    FROM questions q
-                    {where}
-                    LIMIT 50""",
-                *params,
+                """SELECT q.id, q.type, q.stem, q.options, q.bloom_level, q.difficulty, q.aligned_nodes
+                   FROM questions q
+                   WHERE ($1::uuid IS NULL OR q.bank_id = $1)
+                     AND ($2::text IS NULL OR q.stem ILIKE $2)
+                     AND ($3::uuid[] IS NULL OR q.aligned_nodes && $3)
+                   LIMIT 50""",
+                uuid.UUID(bank_id) if bank_id else None,
+                f"%{query}%" if query else None,
+                [uuid.UUID(n) for n in aligned_nodes] if aligned_nodes else None,
             )
             return {
                 "questions": [
@@ -289,29 +276,28 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
         person_id = args["person_id"]
         node_ids = args.get("node_ids")
         since_days = args.get("since_days", 30)
+        if isinstance(since_days, str) and since_days.strip().isdigit():
+            since_days = int(since_days)
+        if isinstance(since_days, bool) or not isinstance(since_days, int) or since_days < 0:
+            return {
+                **validation_error(
+                    f"Invalid since_days {since_days!r}; expected a non-negative integer"
+                ),
+                "evidence": [],
+            }
 
         async with pool.acquire() as conn:
-            conditions = [
-                "e.person_id = $1",
-                "e.observed_at >= now() - ($2 || ' days')::interval",
-            ]
-            params: list[Any] = [uuid.UUID(person_id), str(since_days)]
-            idx = 3
-
-            if node_ids:
-                node_uuids = [uuid.UUID(n) for n in node_ids]
-                conditions.append(f"e.node_id = ANY(${idx}::uuid[])")
-                params.append(node_uuids)
-                idx += 1
-
-            where = " AND ".join(conditions)
             rows = await conn.fetch(
-                f"""SELECT e.id, e.node_id, e.kind, e.score, e.confidence, e.source, e.observed_at
-                    FROM evidence e
-                    WHERE {where}
-                    ORDER BY e.observed_at DESC
-                    LIMIT 100""",
-                *params,
+                """SELECT e.id, e.node_id, e.kind, e.score, e.confidence, e.source, e.observed_at
+                   FROM evidence e
+                   WHERE e.person_id = $1
+                     AND e.observed_at >= now() - make_interval(days => $2)
+                     AND ($3::uuid[] IS NULL OR e.node_id = ANY($3))
+                   ORDER BY e.observed_at DESC
+                   LIMIT 100""",
+                uuid.UUID(person_id),
+                since_days,
+                [uuid.UUID(n) for n in node_ids] if node_ids else None,
             )
             return {
                 "evidence": [

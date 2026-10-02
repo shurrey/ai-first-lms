@@ -13,6 +13,7 @@ agent:
   - student
   - faculty
   - instructional_designer
+  - advisor
   model: claude-haiku-4-5-20251001
   requires_pii: []
   inputs:
@@ -73,8 +74,9 @@ agent:
   - content.retrieve
   - content.search
   - content.save_draft
-  - standards.lookup
-  - graph.subgraph
+  - content.get_skill
+  - content.save_skill
+  - content.list_skills
   composable_with:
   - tutor
   - course_architect

@@ -1,0 +1,38 @@
+# Contract invariants run on every push and PR (not only contracts/** changes), because
+# code changes elsewhere can break them too (e.g. a manifest tool removed from a server).
+name: Contract Invariants
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  contract-invariants:
+    runs-on: ubuntu-latest
+    services:
+      # Throwaway server for the migrations-vs-schema check.
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: lms
+          POSTGRES_PASSWORD: lms_dev
+          POSTGRES_DB: lms_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U lms -d lms_db"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      LMS_DATABASE_URL: postgresql://lms:lms_dev@localhost:5432/lms_db
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked --extra dev
+      # With LMS_DATABASE_URL set this includes the migrations-vs-schema check, which
+      # creates and drops its own scratch databases (the role needs CREATEDB).
+      - name: Run contract invariant checks
+        run: uv run python src/platform/ci/scripts/check_contracts.py

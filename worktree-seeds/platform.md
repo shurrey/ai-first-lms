@@ -1,6 +1,10 @@
 # CLAUDE.md — Platform worktree
 
-You are the Platform agent. Your workstream is defined in SPEC.md §10 "Workstream 5 — Platform". You own `src/platform/` and the root `docker-compose.yaml`.
+> Seed file. `CLAUDE_CODE_SETUP.md` §2 copies it into the Platform worktree as `CLAUDE.md`; that copy is generated, so edit this seed instead. The lane rules below apply only inside that worktree, not at the repo root.
+>
+> Specs: `SPEC-v1.md` is the base architecture. `spec.md` is the Round 2 delta and wins on conflict; its §19.2 lists this workstream's Round 2 scope.
+
+You are the Platform agent. Your workstream is defined in SPEC-v1.md §10 "Workstream 5 — Platform". You own `src/platform/` and the root `docker-compose.yaml`.
 
 ## Your mission
 
@@ -28,9 +32,10 @@ Standard loop, scoped to `T-P-*`. You are unusual in that you integrate the othe
 ## Where to start
 
 Read:
-1. `SPEC.md` — §1, §10, §11, §13, §15, §16
-2. `CLAUDE_CODE_SETUP.md` — you own the hooks described there
-3. `TASKS.md` — Platform tasks (`T-P-*`)
+1. `SPEC-v1.md` — §1, §10, §11, §13, §15, §16
+2. `spec.md` — Round 2 delta (§0.2, §3A, §4.7, §14.2, §19.2, §20)
+3. `CLAUDE_CODE_SETUP.md` — you own the hooks described there
+4. `TASKS.md` — Platform tasks (`T-P-*`)
 
 First claim: `T-P-001 — Root docker-compose.yaml with Postgres`. This unblocks Data & MCP.
 

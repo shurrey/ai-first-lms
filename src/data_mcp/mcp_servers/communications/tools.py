@@ -80,10 +80,6 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
             recipient_count = 0
             if isinstance(audience, dict):
                 # audience may be {course_id: ..., role: ...} — count matching persons
-                conditions = []
-                params: list[Any] = []
-                idx = 1
-
                 course_id = audience.get("course_id")
                 role = audience.get("role")
                 person_ids = audience.get("person_ids")
@@ -91,30 +87,15 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                 if person_ids:
                     recipient_count = len(person_ids)
                 elif course_id or role:
-                    base = "SELECT COUNT(*) FROM persons p"
-                    joins = []
-                    wheres = []
-
-                    if course_id:
-                        joins.append(
-                            "JOIN enrollments e ON e.person_id = p.id"
-                        )
-                        wheres.append(f"e.course_node = ${idx}::uuid")
-                        params.append(str(course_id))
-                        idx += 1
-
-                    if role:
-                        wheres.append(f"p.roles @> ARRAY[${idx}::text]")
-                        params.append(role)
-                        idx += 1
-
-                    sql = base
-                    if joins:
-                        sql += " " + " ".join(joins)
-                    if wheres:
-                        sql += " WHERE " + " AND ".join(wheres)
-
-                    count_row = await conn.fetchrow(sql, *params)
+                    count_row = await conn.fetchrow(
+                        """SELECT COUNT(*) FROM persons p
+                           WHERE ($1::uuid IS NULL OR EXISTS (
+                                     SELECT 1 FROM enrollments e
+                                     WHERE e.person_id = p.id AND e.course_node = $1))
+                             AND ($2::text IS NULL OR p.roles @> ARRAY[$2::text])""",
+                        str(course_id) if course_id else None,
+                        role or None,
+                    )
                     recipient_count = count_row["count"] if count_row else 0
                 else:
                     # Broadcast — count all active persons

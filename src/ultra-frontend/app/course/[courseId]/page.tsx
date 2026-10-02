@@ -66,7 +66,6 @@ export default function ContentPage({ params }: { params: Promise<{ courseId: st
 
       if (persona === "student") {
         fetch(`${API_BASE}/api/mastery/${pid}/${courseId}`)
-        .then((r) => r.json())
           .then((r) => r.json())
           .then((d) => { if (d.summary) setData(d); setLoading(false); })
           .catch(() => setLoading(false));

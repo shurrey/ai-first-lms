@@ -44,3 +44,8 @@ htmlcov/
 
 # Worktree markers (each worktree has one; not shared)
 .workstream
+
+# Corporate root CA for container builds (see docs/setup.md); only the placeholder is tracked
+certs/*
+!certs/.gitkeep
+*.pem

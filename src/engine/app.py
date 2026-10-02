@@ -12,10 +12,16 @@ from engine.api.session import router as session_router
 from engine.api.stream import router as stream_router
 from engine.db import SessionStore, TurnStore
 from engine.guardrails.approval import ApprovalGate
+from engine.http import log_tls_mode
+from engine.logging_config import setup_logging
+from engine.telemetry import setup_telemetry
 
 
 def create_app() -> FastAPI:
     """Application factory for the AI-First LMS orchestrator."""
+    setup_logging()
+    log_tls_mode()
+
     app = FastAPI(
         title="AI-First LMS Orchestrator",
         version="0.1.0",
@@ -45,4 +51,5 @@ def create_app() -> FastAPI:
     app.include_router(roster_router)
     app.include_router(credentials_router)
 
+    setup_telemetry(app)
     return app

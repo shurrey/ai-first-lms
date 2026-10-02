@@ -2,8 +2,11 @@ version: 1
 agent:
   name: accessibility
   version: 0.1.0
-  description: "WCAG compliance scanning and content adaptation \u2014 alt-text, captions,\n\
-    readability simplification, translation.\n"
+  description: 'WCAG compliance scanning and content adaptation — alt-text, captions,
+
+    readability simplification, translation.
+
+    '
   persona_scope:
   - faculty
   - instructional_designer
@@ -47,10 +50,7 @@ agent:
     - proposals
   mcp_tools:
   - content.retrieve
-  - content.save_draft
-  - media.process
-  - translation.translate
-  - compliance.check_wcag
+  - content.search
   composable_with:
   - content_generator
   requires_human_approval: true

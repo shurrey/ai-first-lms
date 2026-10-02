@@ -56,10 +56,17 @@ agent:
   mcp_tools:
   - content.retrieve
   - content.search
+  - content.get_skill
   - roster.get_student_context
   - assessments.list_recent_evidence
+  - graph.mastery_map
   - graph.neighbors
-  - graph.path_to_mastery
+  - graph.prerequisites
+  - attestations.get_student_attestations
+  - attestations.attest
+  - roster.get_learner_profile
+  - roster.get_goals
+  - roster.set_goal
   composable_with:
   - content_generator
   - assessment

@@ -37,3 +37,8 @@ def parse_json_column(value: Any) -> dict[str, Any]:
     if isinstance(value, str):
         return json.loads(value)
     return value
+
+
+def validation_error(message: str) -> dict[str, Any]:
+    """Tool error for a rejected argument, returned before any SQL runs."""
+    return {"error": message, "code": "validation_error"}

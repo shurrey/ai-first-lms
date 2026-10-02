@@ -19,7 +19,7 @@ echo "=== Pre-push: running $WORKSTREAM tests ==="
 case "$WORKSTREAM" in
   engine)
     if [ -d "src/engine/tests" ]; then
-      uv run pytest src/engine/tests/ -x -q 2>&1 || {
+      uv run --extra dev pytest src/engine -x -q 2>&1 || {
         echo "BLOCKED: Engine tests failed. Fix before pushing."
         exit 1
       }
@@ -27,15 +27,22 @@ case "$WORKSTREAM" in
     ;;
   agents)
     if [ -d "src/agents" ]; then
-      uv run pytest src/agents/ -x -q --ignore=src/agents/*/tests/eval_cases.yaml 2>&1 || {
+      uv run --extra dev pytest src/agents -x -q 2>&1 || {
         echo "BLOCKED: Agent tests failed. Fix before pushing."
         exit 1
       }
     fi
     ;;
-  data-mcp)
-    if [ -d "src/data-mcp/tests" ]; then
-      uv run pytest src/data-mcp/tests/ -x -q 2>&1 || {
+  data_mcp|data-mcp)
+    # The suite drops the public schema of LMS_DATABASE_URL, so refuse the demo DB.
+    case "${LMS_DATABASE_URL%%\?*}" in
+      ""|*/lms_db)
+        echo "BLOCKED: set LMS_DATABASE_URL to a throwaway DB (e.g. .../lms_test); see docs/setup.md."
+        exit 1
+        ;;
+    esac
+    if [ -d "src/data_mcp/tests" ]; then
+      uv run --extra dev pytest src/data_mcp -x -q 2>&1 || {
         echo "BLOCKED: Data & MCP tests failed. Fix before pushing."
         exit 1
       }

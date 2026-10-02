@@ -2,8 +2,12 @@ version: 1
 agent:
   name: course_architect
   version: 0.1.0
-  description: "Drafts course structures \u2014 outcomes, modules, standards alignment, syllabi.\nAlways produces drafts for\
-    \ faculty approval.\n"
+  description: 'Drafts course structures — outcomes, modules, standards alignment,
+    syllabi.
+
+    Always produces drafts for faculty approval.
+
+    '
   persona_scope:
   - faculty
   - instructional_designer
@@ -47,8 +51,10 @@ agent:
   mcp_tools:
   - standards.lookup
   - content.library_search
-  - graph.subgraph_for_outcomes
   - content.save_draft
+  - content.get_skill
+  - content.save_skill
+  - content.list_skills
   composable_with:
   - content_generator
   - assessment

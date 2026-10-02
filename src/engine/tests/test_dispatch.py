@@ -72,6 +72,7 @@ async def test_dispatch_multi_agent_sequential():
         "session_id": "s1",
         "turn_id": "t1",
         "current_message": "Help students",
+        "persona": "faculty",
         "plan": {
             "strategy": "plan_then_execute",
             "steps": [
@@ -100,6 +101,7 @@ async def test_dispatch_parallel_agents():
         "session_id": "s1",
         "turn_id": "t1",
         "current_message": "Analyze risk",
+        "persona": "faculty",
         "plan": {
             "strategy": "plan_then_execute",
             "steps": [
@@ -114,6 +116,7 @@ async def test_dispatch_parallel_agents():
 
     result = await dispatch(state)
     assert len(result["agent_results"]) == 2
+    assert all(r["success"] for r in result["agent_results"])
 
 
 async def test_dispatch_handles_agent_error():

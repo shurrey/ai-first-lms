@@ -10,8 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-import anthropic
-import httpx
+from engine.http import make_anthropic_client, make_sync_http_client
 
 logger = logging.getLogger(__name__)
 
@@ -60,9 +59,7 @@ async def generate_podcast_script(
     learner_profile: str,
 ) -> str:
     """Generate a podcast script from concept skill content using Claude."""
-    client = anthropic.AsyncAnthropic(
-        http_client=httpx.AsyncClient(verify=False),
-    )
+    client = make_anthropic_client()
 
     concept_details = ""
     for c in concepts:
@@ -130,12 +127,11 @@ async def render_audio(segments: list[dict[str, str]], podcast_id: str) -> str:
         from fish_audio_sdk import Session, TTSRequest
 
         session = Session(apikey=FISH_AUDIO_API_KEY)
-        # Bypass Zscaler SSL inspection — replace internal httpx clients
-        session._sync_client = httpx.Client(
+        # The SDK builds its own httpx.Client with certifi; swap in one that verifies via the OS store.
+        session._sync_client = make_sync_http_client(
             base_url=session._base_url,
             headers=dict(session._sync_client.headers),
             timeout=None,
-            verify=False,
         )
 
         audio_chunks: list[bytes] = []

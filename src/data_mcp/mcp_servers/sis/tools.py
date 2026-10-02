@@ -306,33 +306,8 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
         term = args.get("term")
 
         async with pool.acquire() as conn:
-            conditions: list[str] = ["n.kind = 'course'"]
-            params: list[Any] = []
-            idx = 1
-
-            if query:
-                conditions.append(f"(n.title ILIKE ${idx} OR n.description ILIKE ${idx})")
-                params.append(f"%{query}%")
-                idx += 1
-
-            if subject:
-                conditions.append(f"n.tags @> ARRAY[${idx}::text]")
-                params.append(subject.lower())
-                idx += 1
-
-            if level:
-                conditions.append(f"n.metadata->>'level' = ${idx}")
-                params.append(str(level))
-                idx += 1
-
-            if term:
-                conditions.append(f"n.metadata->>'term' = ${idx}")
-                params.append(term)
-                idx += 1
-
-            where = " AND ".join(conditions)
             rows = await conn.fetch(
-                f"""
+                """
                 SELECT
                     n.id                            AS course_id,
                     n.title                         AS title,
@@ -342,11 +317,18 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                     n.metadata->>'level'            AS level,
                     n.tags                          AS tags
                 FROM nodes n
-                WHERE {where}
+                WHERE n.kind = 'course'
+                  AND ($1::text IS NULL OR n.title ILIKE $1 OR n.description ILIKE $1)
+                  AND ($2::text IS NULL OR n.tags @> ARRAY[$2::text])
+                  AND ($3::text IS NULL OR n.metadata->>'level' = $3)
+                  AND ($4::text IS NULL OR n.metadata->>'term' = $4)
                 ORDER BY n.title
                 LIMIT 50
                 """,
-                *params,
+                f"%{query}%" if query else None,
+                subject.lower() if subject else None,
+                str(level) if level else None,
+                term or None,
             )
 
             return {

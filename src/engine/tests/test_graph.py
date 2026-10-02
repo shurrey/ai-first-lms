@@ -94,3 +94,23 @@ def test_graph_has_expected_nodes():
     graph = build_graph()
     expected = {"interpret", "clarify", "plan", "dispatch", "synthesize"}
     assert expected == set(graph.nodes.keys())
+
+
+async def test_low_confidence_turn_ends_after_one_clarify():
+    class _CountingUnsureLLM:
+        calls = 0
+
+        async def create_message(self, model, system, messages, max_tokens):
+            _CountingUnsureLLM.calls += 1
+            return json.dumps({"action": "unknown", "agent": "tutor", "confidence": 0.2,
+                               "clarification_reason": "Which topic?"})
+
+    set_llm_client(_CountingUnsureLLM())
+    result = await build_graph().compile().ainvoke({
+        "session_id": "sess-1", "turn_id": "turn-1", "persona": "student",
+        "current_message": "hmm", "events_emitted": [], "needs_clarification": False,
+    })
+
+    assert _CountingUnsureLLM.calls == 1
+    assert [e["event"] for e in result["events_emitted"]].count("clarify") == 1
+    assert result.get("plan") is None

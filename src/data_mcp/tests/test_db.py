@@ -8,7 +8,9 @@ from data_mcp import db
 from data_mcp.settings import Settings
 
 
-def test_settings_defaults() -> None:
+def test_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    for var in ("LMS_DATABASE_URL", "LMS_DB_POOL_MIN", "LMS_DB_POOL_MAX"):
+        monkeypatch.delenv(var, raising=False)
     s = Settings()
     assert s.database_url == "postgresql://lms:lms_dev@localhost:5432/lms_db"
     assert s.db_pool_min == 2
