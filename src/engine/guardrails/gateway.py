@@ -15,14 +15,17 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from engine.auth.access_log import AccessLog, AccessResource
 from engine.auth.directory import ScopeDirectory
 from engine.auth.models import AuthContext
 from engine.auth.scope import (
     ALL_COURSES,
+    SensitiveRead,
     actable_course_ids,
     can_view_student,
     is_course_staff,
     record_access,
+    record_sensitive_read,
 )
 from engine.guardrails.approval import (
     ApprovalGate,
@@ -38,6 +41,7 @@ from engine.guardrails.registry import get_manifest_registry, get_tool_roles
 from engine.guardrails.tool_roles import ToolRoles
 from engine.logging_config import get_logger
 from engine.manifests import AgentManifest, ManifestRegistry
+from engine.provenance import ProvenanceRecorder, ProvenanceTrail, ToolCallFacts, call_key
 from engine.turn_repository import ToolCallOutcome, ToolCallRow, TurnRepository
 
 log = get_logger(__name__)
@@ -76,6 +80,21 @@ STUDENT_SESSION_TOOLS = frozenset({"attestations.attest", "roster.save_concept_r
 TOP_LEVEL_OBJECT_KEYS = frozenset({"submission_id", "grade_id", "draft_id", "pending_id",
                                    "concept_id", "session_id", "bank_id"})
 
+# Reads that write a data_access_log row for a non-self requester (spec.md §12.3):
+# tool -> (resource, argument holding the resource id). roster.get and roster.get_student
+# return persons.attributes, which carries the learner profile and analyst insights;
+# roster.list_student_sessions returns each session's first message.
+SENSITIVE_READS: dict[str, tuple[AccessResource, str | None]] = {
+    "roster.get_session_transcript": ("transcript", "session_id"),
+    "roster.get_recent_turns": ("transcript", None),
+    "roster.list_student_sessions": ("transcript", None),
+    "roster.get_learner_profile": ("profile", None),
+    "roster.get_goals": ("profile", None),
+    "roster.get": ("profile", None),
+    "roster.get_student": ("profile", None),
+    "assessments.get_submission": ("submission", "submission_id"),
+}
+
 UNRESOLVED = "That record could not be found within this account's access."
 UNKNOWN_DRAFT = ("That draft was not made in a conversation this service remembers; "
                  "draft it again first.")
@@ -100,6 +119,11 @@ EventSink = Callable[[dict[str, Any]], Awaitable[None]]
 
 class TurnStatusSink(Protocol):
     async def update_status(self, turn_id: str, status: str) -> None: ...
+
+
+def _collect_actions(ctx: GatewayContext, facts: ToolCallFacts) -> None:
+    if ctx.ai_action_ids is not None:
+        ctx.ai_action_ids.extend(i for i in facts.recorded if i not in ctx.ai_action_ids)
 
 
 def approval_timeout_s() -> float:
@@ -142,6 +166,9 @@ class GatewayContext:
     course_id: str = ""  # the session's course, used to scope an approver
     emit: EventSink | None = None  # live event sink; without it gated tools are denied
     agent_clock: ActiveClock | None = None  # paused, like the budget clock, during approvals
+    provenance: ProvenanceTrail | None = None  # the agent run's model, prompt hash, sources
+    # Shared list receiving the id of every ai_actions row written for this context's calls.
+    ai_action_ids: list[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -153,6 +180,7 @@ class ToolResult:
     guardrail: dict[str, Any] | None = None  # GuardrailPayload (contracts/events.md) on denial
     summary: str = ""  # redacted, unwrapped, at most SUMMARY_CHARS; for events and logs
     approval: dict[str, Any] | None = None  # {approval_id, decision, approved_by} when gated
+    value: Any = None  # parsed, redacted, unwrapped result; None unless the call succeeded
 
     @property
     def success(self) -> bool:
@@ -203,47 +231,57 @@ class ToolGateway:
         *,
         directory: ScopeDirectory | None = None,
         objects: ObjectDirectory | None = None,
+        access_log: AccessLog | None = None,
         turns: TurnRepository | None = None,
         manifests: ManifestRegistry | None = None,
         tool_roles: dict[str, ToolRoles] | None = None,
         approvals: ApprovalGate | None = None,
         turn_status: TurnStatusSink | None = None,
         approval_timeout: float | None = None,
+        provenance: ProvenanceRecorder | None = None,
     ) -> None:
         """`approval_timeout` is in seconds; defaults to APPROVAL_TIMEOUT_MINUTES (30)."""
         self._executor = executor
         self._directory = directory
         self._objects = objects
+        self._access_log = access_log
         self._turns = turns
         self._manifests = manifests
         self._tool_roles = tool_roles
         self._approvals = approvals
         self._turn_status = turn_status
         self._approval_timeout = approval_timeout
+        self._provenance = provenance
         self.drafts = DraftLedger()
 
     async def invoke(
-        self, ctx: GatewayContext, agent: str, tool: str, args: dict[str, Any]
+        self, ctx: GatewayContext, agent: str, tool: str, args: dict[str, Any],
+        *, call_id: str = "",
     ) -> ToolResult:
         """Raises BudgetExceededError (call not executed or recorded) when over a cap, and
-        ApprovalTimeoutError when a gated call is not decided in time."""
+        ApprovalTimeoutError when a gated call is not decided in time. `call_id` (the model's
+        tool-use id) makes provenance writes idempotent per tool call."""
         start = time.monotonic()
         current = dict(args)
         try:
             manifest = self._check_allow_list(agent, tool)
             auth = self._check_permission(ctx, tool)
-            current = await self._apply_identity(auth, tool, current)
+            purpose = _purpose(agent, tool)
+            current = await self._apply_identity(auth, tool, current, purpose)
             current = self._bind_student_session(auth, tool, current, ctx.session_id)
-            await self._check_objects(auth, tool, current, ctx.session_id)
+            await self._check_objects(auth, tool, current, ctx.session_id, purpose)
         except ToolDenied as denied:
             result = self._denied(ctx, agent, tool, current, denied, start)
             await self._record(ctx, agent, tool, result)
             return result
 
         approval: dict[str, Any] | None = None
+        proposed = current
         if self.requires_approval(tool, current):
             held = await self._hold_for_approval(ctx, manifest, agent, tool, current, start)
             if isinstance(held, ToolResult):
+                if held.approval is not None and held.approval.get("decision") == "reject":
+                    await self._provenance_rejected(ctx, agent, tool, proposed, held, call_id)
                 return held
             current, approval = held
             start = time.monotonic()  # latency_ms is the call's, not the person's wait
@@ -259,11 +297,57 @@ class ToolGateway:
         outcome: ToolCallOutcome = "error" if _looks_like_error(raw) else "ok"
         if outcome == "ok":
             self.drafts.record_result(tool, auth.person_id, current, raw)
-        text, summary = self._guard_result(ctx, manifest, tool, raw)
+        text, summary, value = self._guard_result(ctx, manifest, tool, raw)
         result = ToolResult(text, outcome, current, (time.monotonic() - start) * 1000,
-                            summary=summary, approval=approval)
+                            summary=summary, approval=approval,
+                            value=value if outcome == "ok" else None)
         await self._record(ctx, agent, tool, result)
+        if outcome == "ok":
+            await self._provenance_succeeded(ctx, agent, tool, proposed, result, raw, call_id)
         return result
+
+    # --- provenance write points (spec.md §6.4) ------------------------------------------
+
+    def _facts(self, ctx: GatewayContext, agent: str, tool: str, proposed: dict[str, Any],
+               result: ToolResult, parsed: dict[str, Any] | None, call_id: str
+               ) -> ToolCallFacts:
+        assert ctx.auth is not None
+        return ToolCallFacts(
+            agent=agent, tool=tool, call_key=call_key(ctx.turn_id, call_id, tool, proposed),
+            requester_id=ctx.auth.person_id, args=result.args, proposed=proposed,
+            result=parsed, session_id=ctx.session_id, turn_id=ctx.turn_id,
+            course_id=ctx.course_id, approval=result.approval, trail=ctx.provenance,
+        )
+
+    async def _provenance_succeeded(
+        self, ctx: GatewayContext, agent: str, tool: str, proposed: dict[str, Any],
+        result: ToolResult, raw: str, call_id: str,
+    ) -> None:
+        parsed = parse_object(raw)
+        if ctx.provenance is not None:
+            ctx.provenance.observe(tool, result.args, parsed)
+        if self._provenance is None:
+            return
+        facts = self._facts(ctx, agent, tool, proposed, result, parsed, call_id)
+        await self._provenance.tool_succeeded(facts, self._submission_facts)
+        _collect_actions(ctx, facts)
+
+    async def _provenance_rejected(
+        self, ctx: GatewayContext, agent: str, tool: str, proposed: dict[str, Any],
+        result: ToolResult, call_id: str,
+    ) -> None:
+        if self._provenance is not None:
+            facts = self._facts(ctx, agent, tool, proposed, result, None, call_id)
+            await self._provenance.tool_rejected(facts)
+            _collect_actions(ctx, facts)
+
+    async def _submission_facts(self, submission_id: str) -> tuple[str | None, str | None]:
+        """(author, course) of a submission; either is None when it cannot be resolved."""
+        submission = await self._read("assessments.get_submission",
+                                      {"submission_id": submission_id}) or {}
+        owner = submission.get("person_id")
+        return (owner if isinstance(owner, str) else None,
+                await self._submission_course(submission_id))
 
     # --- step 5: write-gate ---------------------------------------------------------------
 
@@ -365,11 +449,12 @@ class ToolGateway:
         self._check_edit(request, args)
         self._check_allow_list(request.agent, tool)
         self._check_role(approver, tool)
-        out = await self._apply_identity(approver, tool, args)
+        purpose = _purpose(request.agent, tool)
+        out = await self._apply_identity(approver, tool, args, purpose)
         for key in APPROVER_ARGS:
             if key in out:
                 out[key] = approver.person_id
-        await self._check_objects(approver, tool, out, request.session_id)
+        await self._check_objects(approver, tool, out, request.session_id, purpose)
         course = await self._approval_course(request, out)
         if not await self._covers_course(approver, course):
             record_access(approver, request.requester_id, course, f"approve:{tool}", False)
@@ -593,15 +678,15 @@ class ToolGateway:
 
     def _guard_result(
         self, ctx: GatewayContext, manifest: AgentManifest, tool: str, raw: str
-    ) -> tuple[str, str]:
-        """(model text, event summary). JSON objects and arrays keep their shape; other text
-        is wrapped whole; JSON numbers, booleans and null pass through."""
+    ) -> tuple[str, str, Any]:
+        """(model text, event summary, redacted value). JSON objects and arrays keep their
+        shape; other text is wrapped whole; JSON numbers, booleans and null pass through."""
         try:
             parsed: Any = json.loads(raw)
         except (json.JSONDecodeError, ValueError):
             parsed = raw
         if not isinstance(parsed, (str, dict, list)):
-            return raw, raw[:SUMMARY_CHARS]
+            return raw, raw[:SUMMARY_CHARS], parsed
         redaction = scan_and_redact_result(
             parsed,
             allowed_fields=manifest.requires_pii,
@@ -614,10 +699,10 @@ class ToolGateway:
                      redacted=redaction.redacted)
         value = redaction.value
         if isinstance(value, str):
-            return wrap_user_content(value, source_for_tool(tool)), value[:SUMMARY_CHARS]
+            return wrap_user_content(value, source_for_tool(tool)), value[:SUMMARY_CHARS], value
         summary = json.dumps(value, ensure_ascii=False, default=str)[:SUMMARY_CHARS]
         wrapped = json.dumps(wrap_tool_value(tool, value), ensure_ascii=False, default=str)
-        return wrapped, summary
+        return wrapped, summary, value
 
     def redact_context(self, agent: str, text: str) -> str:
         """Outgoing prompt text (the user's message, history): PII patterns only, no names."""
@@ -656,7 +741,7 @@ class ToolGateway:
     # --- step 3: identity and scope (spec.md §4.5) ---------------------------------------
 
     async def _apply_identity(
-        self, auth: AuthContext, tool: str, args: dict[str, Any]
+        self, auth: AuthContext, tool: str, args: dict[str, Any], purpose: str
     ) -> dict[str, Any]:
         """Requester, author and grader ids are always the caller; a student's attestation
         carries no issuer, anyone else's carries the caller. A student's subject id is forced
@@ -682,20 +767,22 @@ class ToolGateway:
                     out[key] = auth.person_id
         if tool == AUDIENCE_TOOL and "audience" in out:
             out["audience"] = _parse_audience(out["audience"])
-        tree = await self._scope_tree(auth, out, None, f"tool:{tool}")
+        tree = await self._scope_tree(auth, out, None, purpose, self._profile_read(tool))
         assert isinstance(tree, dict)
         return tree
 
     async def _scope_tree(
-        self, auth: AuthContext, value: Any, outer_course: str | None, purpose: str
+        self, auth: AuthContext, value: Any, outer_course: str | None, purpose: str,
+        read: SensitiveRead | None = None,
     ) -> Any:
         """Scope-check identity keys at every depth; a nested dict inherits the nearest
-        enclosing course_id."""
+        enclosing course_id. `read` is logged for the top-level subject only."""
         if isinstance(value, list):
-            return [await self._scope_tree(auth, item, outer_course, purpose) for item in value]
+            return [await self._scope_tree(auth, item, outer_course, purpose)
+                    for item in value]
         if not isinstance(value, dict):
             return value
-        out = await self._scope_subjects(auth, value, outer_course, purpose)
+        out = await self._scope_subjects(auth, value, outer_course, purpose, read)
         course = _course_arg(out) or outer_course
         for key, item in out.items():
             if key not in SUBJECT_LIST_ARGS and isinstance(item, (dict, list)):
@@ -703,7 +790,8 @@ class ToolGateway:
         return out
 
     async def _scope_subjects(
-        self, auth: AuthContext, args: dict[str, Any], outer_course: str | None, purpose: str
+        self, auth: AuthContext, args: dict[str, Any], outer_course: str | None, purpose: str,
+        read: SensitiveRead | None = None,
     ) -> dict[str, Any]:
         out = dict(args)
         course = _course_arg(out) or outer_course
@@ -719,7 +807,7 @@ class ToolGateway:
                 continue
             if not isinstance(value, str) or not value:
                 raise ScopeDenied(f"{key} must name one learner.")
-            if not await self._can_view(auth, value, course, purpose):
+            if not await self._can_view(auth, value, course, purpose, read):
                 raise ScopeDenied("That learner is outside this account's access.")
         for key in SUBJECT_LIST_ARGS:
             if out.get(key) is None:
@@ -768,16 +856,17 @@ class ToolGateway:
     # --- step 3, object level: tools keyed by an id other than a person or course ---------
 
     async def _check_objects(
-        self, auth: AuthContext, tool: str, args: dict[str, Any], current_session: str
+        self, auth: AuthContext, tool: str, args: dict[str, Any], current_session: str,
+        purpose: str,
     ) -> None:
         """Raises ScopeDenied unless the object the call names belongs to someone (or a
         course) the caller may act on. `current_session` is the caller's own session."""
-        purpose = f"tool:{tool}"
         nested = _nested_object_keys(args)
         if nested:
             raise ScopeDenied(f"{nested[0]} must be a top-level argument.")
         if tool in SUBMISSION_TOOLS:
-            await self._check_submission(auth, args.get("submission_id"), purpose)
+            await self._check_submission(auth, args.get("submission_id"), purpose,
+                                         self._object_read(tool, args))
         elif tool == "assessments.commit_grade":
             draft = self.drafts.get("grade", args.get("grade_id"))
             if draft is None:
@@ -807,7 +896,7 @@ class ToolGateway:
         if tool not in SESSION_EXEMPT_TOOLS and (
                 "session_id" in args or tool in SESSION_REQUIRED_TOOLS):
             await self._check_session(auth, tool, args.get("session_id"), current_session,
-                                      purpose)
+                                      purpose, self._object_read(tool, args))
 
     @staticmethod
     def _bind_student_session(auth: AuthContext, tool: str, args: dict[str, Any],
@@ -856,8 +945,22 @@ class ToolGateway:
                                                                    purpose)):
                 raise ScopeDenied("That learner is outside this account's access.")
 
+    def _profile_read(self, tool: str) -> SensitiveRead | None:
+        entry = SENSITIVE_READS.get(tool)
+        if entry is None or entry[1] is not None:
+            return None
+        return SensitiveRead(self._access_log, entry[0])
+
+    def _object_read(self, tool: str, args: dict[str, Any]) -> SensitiveRead | None:
+        entry = SENSITIVE_READS.get(tool)
+        if entry is None or entry[1] is None:
+            return None
+        object_id = args.get(entry[1])
+        return SensitiveRead(self._access_log, entry[0],
+                             object_id if isinstance(object_id, str) else None)
+
     async def _check_submission(self, auth: AuthContext, submission_id: Any,
-                                purpose: str) -> None:
+                                purpose: str, read: SensitiveRead | None = None) -> None:
         """The submission must be the caller's own, or its author viewable through the
         submission's course; an unresolved course is refused for everyone but admins."""
         if not isinstance(submission_id, str) or not submission_id:
@@ -867,13 +970,18 @@ class ToolGateway:
         owner = submission.get("person_id")
         if not isinstance(owner, str) or not owner:
             raise ScopeDenied(UNRESOLVED)
-        if owner == auth.person_id or auth.active_role == "admin":
+        if owner == auth.person_id:
+            return
+        if auth.active_role == "admin":
+            record_access(auth, owner, None, purpose, True)
+            if read is not None:
+                await record_sensitive_read(auth, owner, purpose, read)
             return
         course = await self._submission_course(submission_id)
         if course is None:
             record_access(auth, owner, None, purpose, False)
             raise ScopeDenied(UNRESOLVED)
-        if not await self._can_view(auth, owner, course, purpose):
+        if not await self._can_view(auth, owner, course, purpose, read):
             raise ScopeDenied("That submission is outside this account's access.")
 
     async def _check_pending(self, auth: AuthContext, tool: str, pending_id: Any,
@@ -903,7 +1011,8 @@ class ToolGateway:
             raise ScopeDenied(UNRESOLVED)
 
     async def _check_session(self, auth: AuthContext, tool: str, session_id: Any,
-                             current_session: str, purpose: str) -> None:
+                             current_session: str, purpose: str,
+                             read: SensitiveRead | None = None) -> None:
         if session_id in (None, ""):
             if tool in SESSION_REQUIRED_TOOLS:
                 raise ScopeDenied("session_id must name one session.")
@@ -917,7 +1026,7 @@ class ToolGateway:
             raise ScopeDenied(UNRESOLVED)
         owner = await self._directory.session_owner(session_id)
         if owner is None or not await self._can_view(auth, owner.person_id, owner.course_id,
-                                                     purpose):
+                                                     purpose, read):
             raise ScopeDenied("That session is outside this account's access.")
 
     async def _check_node(self, auth: AuthContext, node_id: Any, purpose: str,
@@ -971,7 +1080,8 @@ class ToolGateway:
             raise ScopeDenied("Only admins can message everyone; name a course or people.")
 
     async def _can_view(
-        self, auth: AuthContext, student_id: str, course: str | None, purpose: str
+        self, auth: AuthContext, student_id: str, course: str | None, purpose: str,
+        read: SensitiveRead | None = None,
     ) -> bool:
         if student_id == auth.person_id:
             return True
@@ -980,7 +1090,7 @@ class ToolGateway:
             record_access(auth, student_id, course, purpose, False)
             return False
         return await can_view_student(
-            auth, student_id, course, purpose=purpose, directory=self._directory
+            auth, student_id, course, purpose=purpose, directory=self._directory, read=read
         )
 
     # --- denial and provenance (step 10) -------------------------------------------------
@@ -1038,6 +1148,10 @@ class ToolGateway:
                 return
         log.info("tool_call_provenance", turn_id=ctx.turn_id, agent=agent, tool=tool,
                  outcome=row.outcome, latency_ms=row.latency_ms, persisted=persisted)
+
+
+def _purpose(agent: str, tool: str) -> str:
+    return f"gateway:{agent}:{tool}"
 
 
 def _nested_object_keys(value: Any, depth: int = 0) -> list[str]:

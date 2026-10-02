@@ -10,7 +10,9 @@ from fastapi import APIRouter, Request
 from engine.auth.deps import CurrentUser
 from engine.auth.models import AuthContext
 from engine.auth.scope import (
+    AccessLogDep,
     Directory,
+    SensitiveRead,
     forbidden,
     learner_view_course_ids,
     record_access,
@@ -77,13 +79,16 @@ async def get_roster(course_id: str, ctx: CurrentUser) -> dict[str, Any]:
 
 @router.get("/api/student/{person_id}/sessions")
 async def get_student_sessions(
-    person_id: str, ctx: CurrentUser, directory: Directory, course_id: str | None = None
+    person_id: str, ctx: CurrentUser, directory: Directory, access_log: AccessLogDep,
+    course_id: str | None = None,
 ) -> dict[str, Any]:
-    """Get session list for a student, optionally filtered by course."""
+    """Session list for a student; each entry's first_message is a transcript excerpt,
+    so a non-self read is logged as one."""
     from engine.agents.runner import _call_mcp_json
 
     await require_student_view(ctx, person_id, course_id, purpose="sessions",
-                               directory=directory, capability="transcripts_of_others")
+                               directory=directory, capability="transcripts_of_others",
+                               read=SensitiveRead(access_log, "transcript"))
 
     args: dict[str, Any] = {"person_id": person_id}
     if course_id:
@@ -153,13 +158,14 @@ async def get_student_courses(
 
 @router.get("/api/student-insights/{person_id}")
 async def get_student_insights(
-    person_id: str, ctx: CurrentUser, directory: Directory
+    person_id: str, ctx: CurrentUser, directory: Directory, access_log: AccessLogDep
 ) -> dict[str, Any]:
-    """Get student-facing learning insights."""
+    """Get student-facing learning insights (written by the learning analyst)."""
     from engine.agents.runner import _call_mcp_json
 
     await require_student_view(ctx, person_id, purpose="insights",
-                               directory=directory, capability="learner_profile_of_others")
+                               directory=directory, capability="learner_profile_of_others",
+                               read=SensitiveRead(access_log, "analyst_summary"))
 
     data = await _call_mcp_json("roster.get", {"person_id": person_id})
     attrs = data.get("attributes", {})
@@ -171,20 +177,22 @@ async def get_student_insights(
 
 @router.get("/api/student-goals/{person_id}")
 async def get_student_goals(
-    person_id: str, ctx: CurrentUser, directory: Directory
+    person_id: str, ctx: CurrentUser, directory: Directory, access_log: AccessLogDep
 ) -> dict[str, Any]:
-    """Get student learning goals."""
+    """Goals are learner-profile data, so a non-self read is logged as a profile read."""
     from engine.agents.runner import _call_mcp_json
 
     await require_student_view(ctx, person_id, purpose="goals",
-                               directory=directory, capability="learner_profile_of_others")
+                               directory=directory, capability="learner_profile_of_others",
+                               read=SensitiveRead(access_log, "profile"))
 
     return await _call_mcp_json("roster.get_goals", {"person_id": person_id})
 
 
 @router.get("/api/transcript/{session_id}")
 async def get_transcript(
-    session_id: str, request: Request, ctx: CurrentUser, directory: Directory
+    session_id: str, request: Request, ctx: CurrentUser, directory: Directory,
+    access_log: AccessLogDep,
 ) -> dict[str, Any]:
     """Get the full conversation transcript for a session."""
     from engine.agents.runner import _call_mcp_json
@@ -195,7 +203,8 @@ async def get_transcript(
         raise forbidden()
     student_id, course_id = owner
     await require_student_view(ctx, student_id, course_id, purpose="transcript",
-                               directory=directory, capability="transcripts_of_others")
+                               directory=directory, capability="transcripts_of_others",
+                               read=SensitiveRead(access_log, "transcript", session_id))
 
     return await _call_mcp_json("roster.get_session_transcript", {
         "session_id": session_id,

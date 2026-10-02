@@ -41,6 +41,11 @@ class AgentResult(TypedDict, total=False):
     cost_usd: float
     tokens: int
     success: bool
+    # `{type, data}` dicts from engine.agents.artifacts; absent when the runner does not
+    # build them, and synthesize then reads the output's structured keys.
+    artifacts: list[dict[str, Any]]
+    # ai_actions rows the step's tool calls wrote; absent when there were none.
+    ai_action_ids: list[str]
 
 
 class ApprovalRequest(TypedDict, total=False):

@@ -13,6 +13,13 @@ from typing import Any
 from engine.background import spawn
 from engine.guardrails.injection import guard_prompt_data
 from engine.http import make_anthropic_client
+from engine.provenance import (
+    AiActionRow,
+    ProvenanceRecorder,
+    canonical_json,
+    prompt_sha256,
+    stable_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +30,12 @@ async def run_session_analysis(
     course_id: str,
     deep: bool = False,
     background_tasks: set[asyncio.Task[Any]] | None = None,
+    provenance: ProvenanceRecorder | None = None,
 ) -> None:
     """Run post-session learning analysis. Called as a background task.
 
     A deep review it triggers is held in `background_tasks`; without that set it runs inline.
+    Profile and insight updates are recorded as `profile_update` ai_actions via `provenance`.
     """
     from engine.agents.runner import _call_mcp_json
 
@@ -112,17 +121,32 @@ Return ONLY valid JSON matching this schema:
 
         # Load system prompt
         prompt_path = Path(__file__).resolve().parent.parent / "agents" / "learning_analyst" / "system_prompt.md"
-        system = prompt_path.read_text() if prompt_path.exists() else "You are a learning analyst. Analyze the session and return JSON."
+        system = prompt_path.read_text() if prompt_path.exists() else "You are the learning analyst, a software tool. Analyze the session and return JSON."
 
         # Call Claude — Haiku for shallow, Sonnet for deep
         model = "claude-sonnet-4-6" if deep else "claude-haiku-4-5-20251001"
         client = make_anthropic_client()
+        messages = [{"role": "user", "content": prompt}]
         response = await client.messages.create(
             model=model,
             max_tokens=2000,
             system=system,
-            messages=[{"role": "user", "content": prompt}],
+            messages=messages,
         )
+        prompt_hash = prompt_sha256(system, messages)
+
+        async def _record_profile_update(tool: str, field: str, value: Any, result: Any
+                                         ) -> None:
+            if provenance is None or not isinstance(result, dict) or "error" in result:
+                return
+            await provenance.record_safely(AiActionRow(
+                id=stable_id("analyst", session_id, tool, canonical_json(value)),
+                agent="learning_analyst", action_type="profile_update",
+                output={"tool": tool, field: value, "deep": deep},
+                session_id=session_id, subject_person=person_id, course_node=course_id,
+                target_type="persons", target_id=person_id,
+                model=model, prompt_sha256=prompt_hash,
+            ))
 
         result_text = response.content[0].text.strip()
 
@@ -149,17 +173,21 @@ Return ONLY valid JSON matching this schema:
         if result.get("profile_additions"):
             additions = result["profile_additions"]
             new_profile = f"{current_profile}\n\n{additions}" if current_profile else additions
-            await _call_mcp_json("roster.update_learner_profile", {
+            updated = await _call_mcp_json("roster.update_learner_profile", {
                 "person_id": person_id,
                 "profile_md": new_profile,
             })
+            await _record_profile_update("roster.update_learner_profile", "profile_md",
+                                         new_profile, updated)
 
         # 3. Student insights
         if result.get("student_insights"):
-            await _call_mcp_json("roster.update_student_insights", {
+            updated = await _call_mcp_json("roster.update_student_insights", {
                 "person_id": person_id,
                 "insights": result["student_insights"],
             })
+            await _record_profile_update("roster.update_student_insights", "insights",
+                                         result["student_insights"], updated)
 
         # 4. Concept reviews
         for cr in result.get("concepts_reviewed", []):
@@ -186,6 +214,7 @@ Return ONLY valid JSON matching this schema:
                     person_id=person_id,
                     course_id=course_id,
                     deep=True,
+                    provenance=provenance,
                 )
                 if background_tasks is None:
                     await deep_run

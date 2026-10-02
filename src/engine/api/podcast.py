@@ -14,7 +14,14 @@ from pydantic import BaseModel
 
 from engine.auth.capabilities import has_capability
 from engine.auth.deps import CurrentUser
-from engine.auth.scope import Directory, can_view_student, forbidden, require_student_view
+from engine.auth.scope import (
+    AccessLogDep,
+    Directory,
+    SensitiveRead,
+    can_view_student,
+    forbidden,
+    require_student_view,
+)
 from engine.guardrails.injection import guard_prompt_data
 
 logger = logging.getLogger(__name__)
@@ -146,16 +153,19 @@ def _fallback_concept_selection(mastery_data: dict) -> list[str]:
 
 @router.post("/api/generate-podcast")
 async def generate_podcast_endpoint(
-    body: PodcastRequest, request: Request, ctx: CurrentUser, directory: Directory
+    body: PodcastRequest, request: Request, ctx: CurrentUser, directory: Directory,
+    access_log: AccessLogDep,
 ) -> dict[str, Any]:
-    """Generate a personalized podcast for a student."""
+    """Generate a personalized podcast for a student; the podcast prompt carries their
+    learner profile."""
     from engine.agents.runner import _call_mcp_json
     from engine.podcast import generate_podcast
 
     if not has_capability(ctx.active_role, "content_generation"):
         raise forbidden()
     await require_student_view(ctx, body.person_id, body.course_id, purpose="podcast",
-                               directory=directory)
+                               directory=directory,
+                               read=SensitiveRead(access_log, "profile"))
     if body.session_id:
         session = await request.app.state.session_store.get(body.session_id)
         if session is None or session.person_id != ctx.person_id:
@@ -213,6 +223,10 @@ async def generate_podcast_endpoint(
         course_title=course_title,
         mastery_summary=mastery_summary,
         learner_profile=learner_profile,
+        provenance=request.app.state.provenance,
+        person_id=body.person_id,
+        course_id=body.course_id,
+        session_id=body.session_id or "",
     )
     if result.get("podcast_id"):
         record_owner(result["podcast_id"], body.person_id)
@@ -221,8 +235,10 @@ async def generate_podcast_endpoint(
 
 
 @router.get("/audio/{filename}")
-async def serve_audio(filename: str, ctx: CurrentUser, directory: Directory):
-    """A podcast's audio or script, for whoever may view the learner it was made for."""
+async def serve_audio(filename: str, ctx: CurrentUser, directory: Directory,
+                      access_log: AccessLogDep):
+    """A podcast's audio or script, for whoever may view the learner it was made for. Both
+    are generated from the learner profile, so a non-self read is logged as a profile read."""
     match = _AUDIO_NAME.match(filename)
     if match is None:
         return NOT_FOUND
@@ -232,7 +248,8 @@ async def serve_audio(filename: str, ctx: CurrentUser, directory: Directory):
     if owner is None or not filepath.is_file():
         return NOT_FOUND
     if owner != ctx.person_id and not await can_view_student(
-        ctx, owner, purpose="podcast_audio", directory=directory
+        ctx, owner, purpose="podcast_audio", directory=directory,
+        read=SensitiveRead(access_log, "profile"),
     ):
         raise forbidden()
     return FileResponse(filepath, media_type=_MEDIA_TYPES[ext])

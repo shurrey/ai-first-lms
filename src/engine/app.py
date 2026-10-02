@@ -16,10 +16,13 @@ from engine.api.approval import router as approval_router
 from engine.api.auth import router as auth_router
 from engine.api.converse import router as converse_router
 from engine.api.credentials import router as credentials_router
+from engine.api.decisions import router as decisions_router
+from engine.api.measurement import router as measurement_router
 from engine.api.podcast import router as podcast_router
 from engine.api.roster import router as roster_router
 from engine.api.session import router as session_router
 from engine.api.stream import router as stream_router
+from engine.auth.access_log import AccessLog, PgAccessLog
 from engine.auth.config import CSRF_HEADER, AuthSettings
 from engine.auth.deps import csrf_protect
 from engine.auth.directory import PgScopeDirectory, ScopeDirectory
@@ -32,7 +35,10 @@ from engine.guardrails.approval import ApprovalGate
 from engine.guardrails.gateway import ToolGateway
 from engine.guardrails.object_directory import ObjectDirectory, PgObjectDirectory
 from engine.http import log_tls_mode
+from engine.jobs.scheduler import JobScheduler, SchedulerSettings, build_jobs
+from engine.llm_fixture import check_fixture_mode
 from engine.logging_config import setup_logging
+from engine.provenance import PgProvenanceStore, ProvenanceRecorder, ProvenanceStore
 from engine.telemetry import setup_telemetry
 from engine.turn_repository import Persistence, PgTurnRepository
 
@@ -64,9 +70,11 @@ def _tool_gateway(app: FastAPI, turns: Persistence | None) -> ToolGateway:
         _execute_mcp,
         directory=app.state.scope_directory,
         objects=app.state.object_directory,
+        access_log=app.state.access_log,
         turns=turns,
         approvals=app.state.approval_gate,
         turn_status=app.state.turn_store,
+        provenance=app.state.provenance,
     )
 
 
@@ -81,13 +89,16 @@ def _use_persistence(app: FastAPI, repository: Persistence | None) -> None:
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Opens the DATABASE_URL pool for auth and scope checks unless both were injected.
 
-    That pool also backs the gateway's object lookups and session/turn persistence unless
-    those were injected.
+    That pool also backs the gateway's object lookups, the data access log and session/turn
+    persistence unless those were injected, and the scheduled jobs unless SCHEDULER_ENABLED
+    is false.
     """
     pool = None
     needs_auth = app.state.auth_service is None
     needs_directory = app.state.scope_directory is None
     needs_objects = app.state.object_directory is None
+    needs_access_log = app.state.access_log is None
+    needs_provenance = app.state.provenance is None
     if needs_auth or needs_directory:
         dsn = os.environ.get("DATABASE_URL")
         if dsn:
@@ -101,15 +112,27 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 app.state.scope_directory = PgScopeDirectory(pool)
             if needs_objects:
                 app.state.object_directory = PgObjectDirectory(pool)
+            if needs_access_log:
+                app.state.access_log = PgAccessLog(pool)
+            if needs_provenance:
+                app.state.provenance = ProvenanceRecorder(PgProvenanceStore(pool))
             if not app.state.persistence_injected:
                 _use_persistence(app, PgTurnRepository(pool))
             else:
                 app.state.tool_gateway = _tool_gateway(app, app.state.persistence)
         else:
             logger.warning("DATABASE_URL is not set; authenticated endpoints will return 503")
+    if pool is not None:
+        scheduler_settings = SchedulerSettings.from_env()
+        if scheduler_settings.enabled:
+            app.state.scheduler = JobScheduler(build_jobs(pool, scheduler_settings))
+            app.state.scheduler.start()
     try:
         yield
     finally:
+        if app.state.scheduler is not None:
+            app.state.scheduler.shutdown()
+            app.state.scheduler = None
         if pool is not None:
             if needs_auth:
                 app.state.auth_service = None
@@ -117,6 +140,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
                 app.state.scope_directory = None
             if needs_objects:
                 app.state.object_directory = None
+            if needs_access_log:
+                app.state.access_log = None
+            if needs_provenance:
+                app.state.provenance = None
             app.state.db_pool = None
             if not app.state.persistence_injected:
                 _use_persistence(app, None)
@@ -130,14 +157,18 @@ def create_app(
     scope_directory: ScopeDirectory | None = None,
     persistence: Persistence | None = None,
     object_directory: ObjectDirectory | None = None,
+    access_log: AccessLog | None = None,
+    provenance: ProvenanceStore | None = None,
 ) -> FastAPI:
     """Application factory for the AI-First LMS orchestrator.
 
-    Pass `auth_service` / `scope_directory` / `persistence` / `object_directory` to use
-    specific stores (tests); otherwise the lifespan builds them from DATABASE_URL.
+    Pass `auth_service` / `scope_directory` / `persistence` / `object_directory` /
+    `access_log` / `provenance` to use specific stores (tests); otherwise the lifespan builds
+    them from DATABASE_URL.
     """
     setup_logging()
     log_tls_mode()
+    check_fixture_mode()
 
     settings = auth_service.settings if auth_service is not None else AuthSettings.from_env()
 
@@ -167,8 +198,11 @@ def create_app(
     app.state.auth_service = auth_service
     app.state.scope_directory = scope_directory
     app.state.object_directory = object_directory
+    app.state.access_log = access_log
+    app.state.provenance = ProvenanceRecorder(provenance) if provenance is not None else None
     app.state.db_pool = None
     app.state.background_tasks = set()
+    app.state.scheduler = None
 
     app.state.session_store = SessionStore()
     app.state.turn_store = TurnStore()
@@ -188,6 +222,8 @@ def create_app(
     app.include_router(podcast_router)
     app.include_router(roster_router)
     app.include_router(credentials_router)
+    app.include_router(decisions_router)
+    app.include_router(measurement_router)
 
     setup_telemetry(app)
     return app

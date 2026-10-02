@@ -12,6 +12,12 @@ from engine.tests.auth_fakes import DEMO_PASSWORD, AuthWorld, build_auth_world
 AuthedClientFactory = Callable[..., Awaitable[AsyncClient]]
 
 
+@pytest.fixture(autouse=True)
+def _scheduler_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tests that need the scheduler set SCHEDULER_ENABLED themselves."""
+    monkeypatch.setenv("SCHEDULER_ENABLED", "false")
+
+
 @pytest.fixture
 def auth_world() -> AuthWorld:
     return build_auth_world()

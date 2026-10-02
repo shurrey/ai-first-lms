@@ -248,6 +248,7 @@ async def _execute_step(
         if event_sink is not None:
             await event_sink(event)
 
+    ai_action_ids: list[str] = []
     start_time = time.monotonic()
     span = span_agent(agent, step_id, persona=persona, session_id=session_id)
     with trace.use_span(span, end_on_exit=True):
@@ -264,6 +265,7 @@ async def _execute_step(
                 budget=budget, course_id=course_id,
                 # approval_request must reach the client live; with no sink, gated tools deny
                 emit=on_agent_event if event_sink is not None else None,
+                ai_action_ids=ai_action_ids,
             ),
         }
         if gateway is not None:
@@ -326,10 +328,15 @@ async def _execute_step(
         "success": result.get("success", True),
     }
 
+    # The artifacts reach the client in `final` only; agent_result keeps its contract fields.
     step_events.append({
         "event": "agent_result",
-        "payload": agent_result,
+        "payload": dict(agent_result),
     })
+    if "artifacts" in result:
+        agent_result["artifacts"] = list(result["artifacts"])
+    if ai_action_ids:
+        agent_result["ai_action_ids"] = list(ai_action_ids)
 
     error = None
     if result.get("budget_exceeded"):

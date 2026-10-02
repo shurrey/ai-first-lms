@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -99,3 +100,22 @@ async def test_admin_brief_uses_scope_advisor_count(generator: BriefGenerator) -
     data = await AdminBriefGatherer().gather("ad1", COURSE_ID, BriefScope(advisor_count=3))
 
     assert data["total_advisors"] == 3
+
+
+async def test_roster_page_leaves_profile_attributes_out(
+    generator: BriefGenerator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    attributes = {"major": "CS", "learner_profile": "# Ada", "student_insights": ["x"],
+                  "goals": [{"text": "pass"}]}
+
+    async def call_mcp(server: str, tool: str, args: dict[str, Any]) -> dict[str, Any]:
+        if tool == "roster.get_student":
+            return {"email": "s@example.edu", "attributes": json.dumps(attributes)}
+        return await _fake_call_mcp(server, tool, args)
+
+    monkeypatch.setattr(brief, "_call_mcp", call_mcp)
+
+    data = await generator._page_roster("faculty", "f1", COURSE_ID)
+
+    students = [p for p in data["persons"] if p["role"] == "student"]
+    assert [p["attributes"] for p in students] == [{"major": "CS"}, {"major": "CS"}]

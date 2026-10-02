@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
 from engine.auth.deps import CurrentUser
@@ -21,6 +21,8 @@ from engine.auth.scope import (
 )
 
 logger = logging.getLogger(__name__)
+
+APPROVE_KEY = "rest:approve-credential:"  # one approval per pending row, so one decision
 
 router = APIRouter()
 
@@ -39,6 +41,16 @@ async def _pending_in_scope(
 def _require_self_reviewer(ctx: AuthContext, reviewer_id: str) -> None:
     if reviewer_id != ctx.person_id:
         raise forbidden("reviewer_id must be the signed-in person.")
+
+
+async def _record_approval(request: Request, ctx: AuthContext, pending_id: str,
+                           result: Any) -> None:
+    """The human decision on the badge recommendation; skipped when the tool failed."""
+    recorder = getattr(request.app.state, "provenance", None)
+    if recorder is None or not isinstance(result, dict) or "error" in result:
+        return
+    await recorder.credential_decided_safely(pending_id, ctx.person_id, "accepted",
+                                             APPROVE_KEY + pending_id)
 
 
 @router.get("/api/pending-credentials/{course_id}")
@@ -74,7 +86,8 @@ class ApproveRequest(BaseModel):
 
 @router.post("/api/approve-credential/{pending_id}")
 async def approve_credential(
-    pending_id: str, body: ApproveRequest, ctx: CurrentUser, directory: Directory
+    pending_id: str, body: ApproveRequest, request: Request, ctx: CurrentUser,
+    directory: Directory,
 ) -> dict[str, Any]:
     """Approve a pending credential."""
     from engine.agents.runner import _call_mcp_json
@@ -82,10 +95,12 @@ async def approve_credential(
     _require_self_reviewer(ctx, body.reviewer_id)
     if not await _pending_in_scope(ctx, directory, pending_id):
         raise forbidden()
-    return await _call_mcp_json("assessments.approve_credential", {
+    result = await _call_mcp_json("assessments.approve_credential", {
         "pending_id": pending_id,
         "reviewer_id": ctx.person_id,
     })
+    await _record_approval(request, ctx, pending_id, result)
+    return result
 
 
 class BulkApproveRequest(BaseModel):
@@ -95,7 +110,7 @@ class BulkApproveRequest(BaseModel):
 
 @router.post("/api/approve-credentials/bulk")
 async def bulk_approve_credentials(
-    body: BulkApproveRequest, ctx: CurrentUser, directory: Directory
+    body: BulkApproveRequest, request: Request, ctx: CurrentUser, directory: Directory
 ) -> dict[str, Any]:
     """Bulk approve multiple pending credentials; out-of-scope ids are per-item errors."""
     from engine.agents.runner import _call_mcp_json
@@ -110,6 +125,7 @@ async def bulk_approve_credentials(
             "pending_id": pid,
             "reviewer_id": ctx.person_id,
         })
+        await _record_approval(request, ctx, pid, result)
         results.append({"pending_id": pid, **result})
 
     return {"results": results}

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from typing import Any
 
+from engine.agents.artifacts import output_artifacts
 from engine.graph.state import AgentResult, OrchestratorState
 
 logger = logging.getLogger(__name__)
@@ -47,6 +47,8 @@ async def synthesize(state: OrchestratorState) -> OrchestratorState:
         "payload": {
             "answer_markdown": answer,
             "artifacts": artifacts,
+            "ai_action_ids": list(dict.fromkeys(
+                i for r in results for i in r.get("ai_action_ids", []))),
             "follow_ups": follow_ups,
             "cost_usd": total_cost,
             "tokens": total_tokens,
@@ -105,33 +107,17 @@ def _synthesize_multi(results: list[AgentResult]) -> tuple[str, list[dict[str, A
 
 
 def _extract_artifacts(result: AgentResult) -> list[dict[str, Any]]:
-    """Extract structured artifacts from agent output."""
-    output = result.get("output", {})
-    artifacts: list[dict[str, Any]] = []
+    """The result's artifacts in FinalPayload form, with ids unique within the turn."""
     agent = result.get("agent", "unknown")
-
-    # Map agent outputs to artifact types
-    artifact_mapping = {
-        "drafts": "rubric_grades",
-        "questions": "quiz",
-        "charts": "chart",
-        "at_risk": "risk_list",
-        "audit": "degree_audit",
-        "report": "wcag_report",
-        "send_ready_payload": "message",
-        "content_md": "content_draft",
-        "path_visualization": "learning_path",
-    }
-
-    for key, artifact_type in artifact_mapping.items():
-        if key in output and output[key]:
-            artifacts.append({
-                "artifact_id": f"{agent}-{key}",
-                "type": artifact_type,
-                "data": output[key] if isinstance(output[key], dict) else {"items": output[key]},
-            })
-
-    return artifacts
+    if "artifacts" in result:
+        artifacts = result["artifacts"]
+    else:
+        artifacts = output_artifacts(agent, result.get("output", {}))
+    prefix = result.get("step_id") or agent
+    return [
+        {"artifact_id": f"{prefix}-{a['type']}-{i}", "type": a["type"], "data": a["data"]}
+        for i, a in enumerate(artifacts, start=1)
+    ]
 
 
 def _format_output(output: dict[str, Any]) -> str:

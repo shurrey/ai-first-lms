@@ -214,3 +214,24 @@ async def test_dispatch_refuses_a_background_agent_even_when_the_persona_has_it(
 
     assert runner.calls == []
     assert result["turn_error"]["code"] == "permission_denied"
+
+
+async def test_dispatch_carries_the_ai_action_ids_the_step_wrote():
+    class WritingRunner:
+        async def run(self, agent_name, inputs):
+            inputs["_tool_context"].ai_action_ids.extend(["act-1", "act-2"])
+            return {"output": {}, "cost_usd": 0, "tokens": 0, "success": True, "tool_calls": []}
+
+    set_agent_runner(WritingRunner())
+    state = {
+        "session_id": "s1", "turn_id": "t1", "current_message": "Test",
+        "plan": {"strategy": "react", "steps": [
+            {"step_id": "s1", "agent": "tutor", "input_summary": "test", "depends_on": []}]},
+        "agent_results": [], "events_emitted": [],
+    }
+
+    result = await dispatch(state)
+
+    assert result["agent_results"][0]["ai_action_ids"] == ["act-1", "act-2"]
+    [agent_result] = [e for e in result["events_emitted"] if e["event"] == "agent_result"]
+    assert "ai_action_ids" not in agent_result["payload"]
