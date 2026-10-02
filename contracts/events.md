@@ -142,7 +142,7 @@ interface ApprovalRequestPayload {
   action: string;             // human-readable ("Commit grades for 23 students")
   preview: object;            // the drafted artifact (rubric, message, etc.)
   artifact_type: "rubric_grades" | "message" | "quiz" | "content_draft" | "other"
-      // Round 2 — Status: planned (T-E-107, spec.md §5.3)
+      // Round 2 (spec.md §5.3): live from T-E-107 for served tools; see the table below
       | "grade_commit" | "credential" | "attestation_override"
       | "policy_change" | "content_publish" | "feedback_release";
 }
@@ -152,8 +152,8 @@ interface ApprovalRequestPayload {
 
 | Tool | `artifact_type` | Status |
 |---|---|---|
-| `assessments.commit_grade` | `grade_commit` | planned (T-E-107, T-E-114) |
-| `assessments.approve_credential` | `credential` | planned (T-E-107) |
+| `assessments.commit_grade` | `grade_commit` | live (T-E-107) |
+| `assessments.approve_credential` | `credential` | live (T-E-107) |
 | `assessments.create_question` (publishing to a live bank) | `quiz` | existing value |
 | `attestations.override` | `attestation_override` | planned (T-E-107, T-D-112) |
 | `communications.send_message` | `message` | existing value |
@@ -206,7 +206,7 @@ Delivery: like every event, these travel on a turn's SSE stream and carry that t
 
 ### `guardrail`
 
-**Status: planned** — `denied_permission`, `denied_scope`: T-E-106 (spec.md §5.2 steps 1–3). `denied_policy`: T-E-116 (§5.2 step 4, §8.4). `offload_check`: T-E-118 (§13.2).
+**Status:** `denied_permission`, `denied_scope`: live (T-E-106, spec.md §5.2 steps 1–3). `denied_policy`: planned, T-E-116 (§5.2 step 4, §8.4). `offload_check`: planned, T-E-118 (§13.2).
 
 Emitted when the tool gateway refuses a tool call, or when the tutor offload post-check replaces a reply. It does **not** end the turn: a denied tool call returns a "not permitted" tool error to the model and the agent continues. A turn-ending authorization failure is `error{code:"permission_denied"}` instead.
 

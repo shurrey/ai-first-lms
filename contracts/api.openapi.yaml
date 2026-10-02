@@ -46,13 +46,10 @@ servers:
     description: Local dev
 
 x-auth-rollout: |
-  The security requirements, 401/403 responses, x-required-capability and
-  x-scope-check annotations describe the design adopted in T-C-102. The live
-  engine does not enforce them yet: every existing endpoint is open until
-  T-E-101 (session + CSRF middleware), T-E-102 (/api/auth/*), T-E-103
-  (current_user() + scope checks on existing endpoints) and T-E-104
-  (/api/session derives persona and person) land. Until then clients may
-  omit the cookie and CSRF header against existing endpoints.
+  Enforced by the live engine (T-E-101..T-E-104): every endpoint except
+  /healthz and /api/auth/login requires a session cookie, non-GET /api/*
+  requests require X-CSRF-Token, and the x-scope-check annotations are
+  applied server-side.
 
 security:
   - sessionCookie: []
@@ -107,7 +104,7 @@ paths:
                   status: {type: string, const: ok}
 
   # ---------------------------------------------------------------------------
-  # Auth (planned)
+  # Auth
   # ---------------------------------------------------------------------------
 
   /api/auth/login:
@@ -115,7 +112,6 @@ paths:
       tags: [auth]
       summary: Sign in with username and password
       operationId: login
-      x-implementation-status: planned
       x-task: T-E-102
       security: []
       x-required-capability: public
@@ -161,7 +157,6 @@ paths:
       tags: [auth]
       summary: Revoke the current session and clear both cookies
       operationId: logout
-      x-implementation-status: planned
       x-task: T-E-102
       security:
         - sessionCookie: []
@@ -182,7 +177,6 @@ paths:
       tags: [auth]
       summary: The signed-in person, roles, enrollments, capabilities and UI policy
       operationId: getMe
-      x-implementation-status: planned
       x-task: T-E-102
       security:
         - sessionCookie: []
@@ -200,7 +194,6 @@ paths:
       tags: [auth]
       summary: Switch the session's active role to another role the person holds
       operationId: switchRole
-      x-implementation-status: planned
       x-task: T-E-102
       security:
         - sessionCookie: []
@@ -234,7 +227,6 @@ paths:
       tags: [auth]
       summary: Change own password
       operationId: changePassword
-      x-implementation-status: planned
       x-task: T-E-102
       security:
         - sessionCookie: []
@@ -285,10 +277,8 @@ paths:
           csrfHeader: []
       description: |
         Request body change (T-C-102): `persona` and `person_id` are removed.
-        The live engine keeps accepting them (persona required) until T-E-104
-        lands; from then the persona is the session's `active_role` and the
-        person is the authenticated person, and both fields are rejected as
-        unknown or ignored.
+        The persona is the session's `active_role` and the person is the
+        authenticated person; either field, if sent, is ignored.
 
         `course_id` accepts a course UUID or a course node slug (`cs101`,
         `math201`, `eng102`, `bio150`, ...), or `all`. Slugs are resolved by a
@@ -299,10 +289,6 @@ paths:
 
         A brief is generated in the background on turn `brief_turn_id`; open
         `stream_url` to receive it.
-
-        Before T-E-104: when `person_id` is omitted a seeded demo person is
-        assigned from persona + course; if none resolves, no brief is generated
-        and `stream_url` points at a turn that never completes.
       requestBody:
         required: true
         content:
@@ -331,7 +317,7 @@ paths:
                   session_id: {type: string}
                   person_id:
                     type: [string, "null"]
-                    description: The authenticated person after T-E-104; may be null before.
+                    description: The authenticated person.
                   course_uuid:
                     type: [string, "null"]
                     description: Resolved course UUID, or `all`.
@@ -353,7 +339,7 @@ paths:
             application/json:
               schema: {$ref: "#/components/schemas/ErrorDetail"}
         "422":
-          description: Malformed body (before T-E-104 also an invalid persona)
+          description: Malformed body
           content:
             application/json:
               schema: {$ref: "#/components/schemas/ErrorDetail"}
@@ -1891,8 +1877,7 @@ paths:
       description: |
         Proxies MCP tool `assessments.approve_credential`. Does not go through
         the approval_request / POST /api/approval gate; the click is the approval.
-        Once T-E-103 lands, `reviewer_id` must equal the authenticated person
-        (403 otherwise).
+        `reviewer_id` must equal the authenticated person (403 otherwise).
       x-required-capability: badge_approve
       x-scope-check: caller is faculty of the pending credential's course, or admin
       security:
@@ -1931,8 +1916,7 @@ paths:
         Calls `assessments.approve_credential` once per id, sequentially. Each
         result is reported independently; one failure does not stop the rest.
         A pending id outside the caller's courses is reported as a per-item
-        error. Once T-E-103 lands, `reviewer_id` must equal the authenticated
-        person (403 otherwise).
+        error. `reviewer_id` must equal the authenticated person (403 otherwise).
       x-required-capability: badge_approve
       x-scope-check: per pending id, caller is faculty of its course, or admin
       security:
@@ -2681,8 +2665,8 @@ paths:
         the session's conversation, else the student's emerging/proficient
         concepts. At most 5 concepts are used. Synchronous: the request returns
         once audio (or a text-only fallback) has been rendered.
-        Once T-E-103 lands: for the student role `person_id` must be the
-        caller; faculty may name a student enrolled in their course. 403 otherwise.
+        For the student role `person_id` must be the caller; faculty may name
+        a student enrolled in their course. 403 otherwise.
       x-required-capability: content_generation
       x-scope-check: student = self; faculty = student enrolled in own course_id
       security:
@@ -4253,7 +4237,7 @@ components:
         reviewer_id:
           type: string
           format: uuid
-          description: persons.id of the approving instructor; must equal the caller once T-E-103 lands.
+          description: persons.id of the approving instructor; must equal the caller.
 
     ApproveResult:
       type: object

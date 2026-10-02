@@ -11,6 +11,8 @@ agent:
   - student
   - advisor
   - faculty
+  - admin
+  - program_lead
   model: claude-sonnet-4-6
   requires_pii:
   - email

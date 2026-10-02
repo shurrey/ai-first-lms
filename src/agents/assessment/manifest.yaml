@@ -9,6 +9,9 @@ agent:
   persona_scope:
   - faculty
   - instructional_designer
+  - admin
+  - advisor
+  - program_lead
   model: claude-sonnet-4-6
   requires_pii: []
   inputs:
