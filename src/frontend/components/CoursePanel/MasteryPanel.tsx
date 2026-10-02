@@ -1,7 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useSession } from "@/lib/session-context";
+import { useAuth } from "@/lib/auth-context";
+import { useApiGet } from "@/lib/use-api";
 import { generatePodcast, API_BASE, type PodcastResult } from "@/lib/api";
 import { AudioPlayer } from "@/components/ChatPane/AudioPlayer";
 import { sendPrompt, SectionLabel, Pill } from "./shared";
@@ -33,43 +35,33 @@ interface MasteryData {
 }
 
 export function MasteryPanel({ data }: { data: MasteryData | null }) {
-  const { personId, courseUuid, sessionId } = useSession();
+  const { courseUuid, sessionId } = useSession();
+  const { me } = useAuth();
+  const personId = me.person.id;
+  const canGenerate = me.capabilities.content_generation !== undefined;
   const [podcast, setPodcast] = useState<PodcastResult | null>(null);
   const [podcastLoading, setPodcastLoading] = useState(false);
-  const [earnedBadges, setEarnedBadges] = useState<IssuedCredential[]>([]);
-  const [insights, setInsights] = useState<string[]>([]);
-  const [goals, setGoals] = useState<Array<{ description: string; target_date: string | null; status: string }>>([]);
-
-  useEffect(() => {
-    if (!personId) return;
-    fetch(`${API_BASE}/api/credentials/${personId}`)
-      .then((r) => r.json())
-      .then((d) => setEarnedBadges(d.credentials || []))
-      .catch(() => {});
-  }, [personId]);
-
-  useEffect(() => {
-    if (!personId) return;
-    fetch(`${API_BASE}/api/student-insights/${personId}`)
-      .then((r) => r.json())
-      .then((d) => setInsights(d.insights || []))
-      .catch(() => {});
-    fetch(`${API_BASE}/api/student-goals/${personId}`)
-      .then((r) => r.json())
-      .then((d) => setGoals(d.goals || []))
-      .catch(() => {});
-  }, [personId]);
+  const [podcastError, setPodcastError] = useState<string | null>(null);
+  const pid = encodeURIComponent(personId);
+  const earnedBadges =
+    useApiGet<{ credentials?: IssuedCredential[] }>(`/api/credentials/${pid}`).data?.credentials ?? [];
+  const insights =
+    useApiGet<{ insights?: string[] }>(`/api/student-insights/${pid}`).data?.insights ?? [];
+  const goals =
+    useApiGet<{ goals?: Array<{ description: string; target_date: string | null; status: string }> }>(
+      `/api/student-goals/${pid}`
+    ).data?.goals ?? [];
 
   const handleGeneratePodcast = async () => {
-    if (!personId || !courseUuid) return;
+    if (!courseUuid) return;
     setPodcastLoading(true);
+    setPodcastError(null);
     try {
       const result = await generatePodcast(personId, courseUuid, sessionId ?? undefined);
-      if (!result.error) {
-        setPodcast(result);
-      }
+      if (result.error) setPodcastError("Couldn't generate a podcast. Please try again.");
+      else setPodcast(result);
     } catch {
-      // Silently fail — user can retry
+      setPodcastError("Couldn't generate a podcast. Please try again.");
     } finally {
       setPodcastLoading(false);
     }
@@ -207,10 +199,17 @@ export function MasteryPanel({ data }: { data: MasteryData | null }) {
           <Pill onClick={() => sendPrompt("Show me my full mastery map")}>📊 Mastery map</Pill>
           <Pill onClick={() => sendPrompt("Quiz me on a concept I'm working on")}>📝 Quiz me</Pill>
           <Pill onClick={() => sendPrompt("What microcredentials have I earned?")}>🏅 My credentials</Pill>
-          <Pill onClick={handleGeneratePodcast} disabled={podcastLoading}>
-            {podcastLoading ? "⏳ Generating..." : "🎧 Generate podcast"}
-          </Pill>
+          {canGenerate && (
+            <Pill onClick={handleGeneratePodcast} disabled={podcastLoading}>
+              {podcastLoading ? "⏳ Generating..." : "🎧 Generate podcast"}
+            </Pill>
+          )}
         </div>
+        {podcastError && (
+          <p role="alert" className="mt-1 text-xs text-destructive">
+            {podcastError}
+          </p>
+        )}
       </section>
     </div>
   );

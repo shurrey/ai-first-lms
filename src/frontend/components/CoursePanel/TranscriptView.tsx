@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { API_BASE } from "@/lib/api";
+import { useState } from "react";
+import { useApiGet } from "@/lib/use-api";
+import { AccessDenied } from "@/components/common/AccessDenied";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -26,25 +27,29 @@ export function TranscriptView({
   sessionId: string;
   onBack: () => void;
 }) {
-  const [data, setData] = useState<TranscriptData | null>(null);
-  const [loading, setLoading] = useState(true);
+  const transcript = useApiGet<TranscriptData>(`/api/transcript/${encodeURIComponent(sessionId)}`);
+  const data = transcript.data ?? null;
   const [modalOpen, setModalOpen] = useState(false);
 
-  useEffect(() => {
-    fetch(`${API_BASE}/api/transcript/${sessionId}`)
-      .then((r) => r.json())
-      .then((d) => {
-        setData(d);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, [sessionId]);
+  if (transcript.forbidden) {
+    return (
+      <div className="space-y-3">
+        <button
+          onClick={onBack}
+          className="text-[10px] text-muted-foreground hover:text-foreground transition-colors"
+        >
+          &larr; Back to sessions
+        </button>
+        <AccessDenied />
+      </div>
+    );
+  }
 
-  if (loading) {
+  if (transcript.loading) {
     return <p className="text-xs text-muted-foreground animate-pulse">Loading transcript...</p>;
   }
 
-  if (!data || data.turns.length === 0) {
+  if (!data || !data.turns || data.turns.length === 0) {
     return (
       <div className="space-y-3">
         <button

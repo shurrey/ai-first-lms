@@ -1,8 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useSession } from "@/lib/session-context";
-import { API_BASE } from "@/lib/api";
+import { useAuth } from "@/lib/auth-context";
+import { useApiGet } from "@/lib/use-api";
+import { AccessDenied } from "@/components/common/AccessDenied";
 import { TranscriptView } from "./TranscriptView";
 
 interface StudentInfo {
@@ -37,10 +39,11 @@ export function StudentDetail({
   student: StudentInfo;
   onBack: () => void;
 }) {
-  const { persona, courseUuid } = useSession();
+  const { courseUuid } = useSession();
+  const { me } = useAuth();
 
   // Advisor sees cross-course view; faculty sees session list for current course
-  if (persona === "advisor" || courseUuid === "all") {
+  if (me.active_role === "advisor" || courseUuid === "all") {
     return <AdvisorStudentView student={student} onBack={onBack} />;
   }
 
@@ -57,19 +60,13 @@ function FacultyStudentView({
   courseId: string;
   onBack: () => void;
 }) {
-  const [sessions, setSessions] = useState<SessionEntry[]>([]);
-  const [loading, setLoading] = useState(true);
+  const sessionsQ = useApiGet<{ sessions: SessionEntry[] }>(
+    `/api/student/${encodeURIComponent(student.id)}/sessions?course_id=${encodeURIComponent(courseId)}`
+  );
+  const sessions = sessionsQ.data?.sessions ?? [];
+  const { loading, forbidden } = sessionsQ;
   const [selectedSession, setSelectedSession] = useState<string | null>(null);
 
-  useEffect(() => {
-    fetch(`${API_BASE}/api/student/${student.id}/sessions?course_id=${courseId}`)
-      .then((r) => r.json())
-      .then((data) => {
-        setSessions(data.sessions || []);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, [student.id, courseId]);
 
   if (selectedSession) {
     return (
@@ -96,7 +93,9 @@ function FacultyStudentView({
         </div>
       </div>
 
-      {loading ? (
+      {forbidden ? (
+        <AccessDenied />
+      ) : loading ? (
         <p className="text-xs text-muted-foreground animate-pulse">Loading sessions...</p>
       ) : sessions.length === 0 ? (
         <p className="text-xs text-muted-foreground">No tutoring sessions yet.</p>
@@ -140,20 +139,14 @@ function AdvisorStudentView({
   student: StudentInfo;
   onBack: () => void;
 }) {
-  const [courses, setCourses] = useState<CourseEntry[]>([]);
-  const [loading, setLoading] = useState(true);
+  const coursesQ = useApiGet<{ courses: CourseEntry[] }>(
+    `/api/student/${encodeURIComponent(student.id)}/courses`
+  );
+  const courses = coursesQ.data?.courses ?? [];
+  const { loading, forbidden } = coursesQ;
   const [selectedCourse, setSelectedCourse] = useState<string | null>(null);
   const [selectedSession, setSelectedSession] = useState<string | null>(null);
 
-  useEffect(() => {
-    fetch(`${API_BASE}/api/student/${student.id}/courses`)
-      .then((r) => r.json())
-      .then((data) => {
-        setCourses(data.courses || []);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, [student.id]);
 
   // Transcript view
   if (selectedSession) {
@@ -193,7 +186,9 @@ function AdvisorStudentView({
         </div>
       </div>
 
-      {loading ? (
+      {forbidden ? (
+        <AccessDenied />
+      ) : loading ? (
         <p className="text-xs text-muted-foreground animate-pulse">Loading courses...</p>
       ) : (
         <div className="space-y-2">
@@ -242,18 +237,12 @@ function CourseSessionList({
   onBack: () => void;
   onSelectSession: (sessionId: string) => void;
 }) {
-  const [sessions, setSessions] = useState<SessionEntry[]>([]);
-  const [loading, setLoading] = useState(true);
+  const sessionsQ = useApiGet<{ sessions: SessionEntry[] }>(
+    `/api/student/${encodeURIComponent(student.id)}/sessions?course_id=${encodeURIComponent(courseId)}`
+  );
+  const sessions = sessionsQ.data?.sessions ?? [];
+  const { loading, forbidden } = sessionsQ;
 
-  useEffect(() => {
-    fetch(`${API_BASE}/api/student/${student.id}/sessions?course_id=${courseId}`)
-      .then((r) => r.json())
-      .then((data) => {
-        setSessions(data.sessions || []);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, [student.id, courseId]);
 
   return (
     <div className="space-y-3">
@@ -268,7 +257,9 @@ function CourseSessionList({
         {student.name} &mdash; Sessions
       </h3>
 
-      {loading ? (
+      {forbidden ? (
+        <AccessDenied />
+      ) : loading ? (
         <p className="text-xs text-muted-foreground animate-pulse">Loading sessions...</p>
       ) : sessions.length === 0 ? (
         <p className="text-xs text-muted-foreground">No sessions in this course.</p>

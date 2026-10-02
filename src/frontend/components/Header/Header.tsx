@@ -1,87 +1,116 @@
 "use client";
 
-import { useSession, type Persona } from "@/lib/session-context";
-import { useMutation } from "@tanstack/react-query";
-import { createSession } from "@/lib/api";
+import { useState } from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useSession } from "@/lib/session-context";
+import { useAuth } from "@/lib/auth-context";
+import { ApiError, createSession } from "@/lib/api";
+import { ROLE_LABELS, switchRole, type Me, type PersonRole } from "@/lib/auth";
+import { AccountMenu } from "./AccountMenu";
 
-const PERSONAS: { value: Persona; label: string }[] = [
-  { value: "student", label: "Student" },
-  { value: "faculty", label: "Faculty" },
-  { value: "advisor", label: "Advisor" },
-  { value: "admin", label: "Admin" },
-];
+/** Advisor and admin have no enrollments; they act across their whole scope instead. */
+const SCOPE_ENTRY: Partial<Record<PersonRole, string>> = {
+  advisor: "All my students",
+  admin: "Institution",
+};
 
-const COURSES = [
-  { id: "cs101", name: "CS 101 — Intro to Computer Science" },
-  { id: "math201", name: "MATH 201 — Linear Algebra" },
-  { id: "eng102", name: "ENG 102 — Academic Writing" },
-  { id: "bio150", name: "BIO 150 — General Biology" },
-];
+const ALL_COURSES = "all";
+
+function defaultCourseFor(me: Me, previousCourseId: string | null): string | null {
+  if (SCOPE_ENTRY[me.active_role]) return ALL_COURSES;
+  if (previousCourseId && me.enrollments.some((e) => e.course_id === previousCourseId)) {
+    return previousCourseId;
+  }
+  return me.enrollments.length === 1 ? me.enrollments[0].course_id : null;
+}
 
 export function Header() {
-  const {
-    persona, courseId, sessionId,
-    setPersona, setCourseId, setSessionId, setPersonId, setCourseUuid, setBriefTurnId, resetSession,
-  } = useSession();
+  const { me, setMe, refresh } = useAuth();
+  const { courseId, setCourseId, setSessionId, setCourseUuid, setBriefTurnId, resetSession } =
+    useSession();
+  const [announcement, setAnnouncement] = useState("");
+
+  const scopeLabel = SCOPE_ENTRY[me.active_role];
+  const canListCourses = me.capabilities.course_list !== undefined;
 
   const createSessionMutation = useMutation({
-    mutationFn: ({ p, c }: { p: Persona; c: string }) => createSession(p, c),
+    mutationFn: (c: string) => createSession(c),
     onSuccess: (data) => {
       setSessionId(data.session_id);
-      setPersonId(data.person_id ?? null);
       setCourseUuid(data.course_uuid ?? null);
       setBriefTurnId(data.brief_turn_id ?? null);
     },
   });
 
-  const handleCourseChange = (newCourseId: string) => {
-    setCourseId(newCourseId || null);
-    if (newCourseId) {
-      createSessionMutation.mutate({ p: persona, c: newCourseId });
-    }
+  const startSession = (newCourseId: string | null) => {
+    resetSession();
+    setCourseId(newCourseId);
+    if (newCourseId) createSessionMutation.mutate(newCourseId);
   };
 
-  const handlePersonaChange = (newPersona: Persona) => {
-    setPersona(newPersona);
-    resetSession();
-    // For advisor/admin, default to "all" courses
-    const effectiveCourse = courseId ?? ((newPersona === "advisor" || newPersona === "admin") ? "all" : null);
-    if (effectiveCourse) {
-      if (!courseId) setCourseId(effectiveCourse);
-      createSessionMutation.mutate({ p: newPersona, c: effectiveCourse });
-    }
-  };
+  const queryClient = useQueryClient();
+  const switchRoleMutation = useMutation({
+    mutationFn: switchRole,
+    onSuccess: async (newMe) => {
+      // Cached responses were fetched under the previous role's access.
+      queryClient.removeQueries({ queryKey: ["api"] });
+      setMe(newMe);
+      setAnnouncement(`Switched to ${ROLE_LABELS[newMe.active_role]}.`);
+      startSession(defaultCourseFor(newMe, courseId));
+      await refresh();
+    },
+    onError: () => setAnnouncement("Couldn't switch role. Please try again."),
+  });
+
+  const sessionError = createSessionMutation.error;
 
   return (
     <header className="flex h-12 shrink-0 items-center gap-3 border-b border-border bg-background px-4">
       <h1 className="text-sm font-semibold tracking-tight">AI-First LMS</h1>
-      <span className="text-border">·</span>
 
-      <select
-        value={courseId ?? ""}
-        onChange={(e) => handleCourseChange(e.target.value)}
-        className="rounded-md border border-input bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-ring"
-      >
-        <option value="">Select a course...</option>
-        {(persona === "advisor" || persona === "admin") && (
-          <option value="all">All Courses</option>
-        )}
-        {COURSES.map((c) => (
-          <option key={c.id} value={c.id}>{c.name}</option>
-        ))}
-      </select>
+      {canListCourses && (
+        <>
+          <span className="text-border" aria-hidden="true">·</span>
+          <label htmlFor="course-select" className="sr-only">
+            Course
+          </label>
+          <select
+            id="course-select"
+            value={courseId ?? ""}
+            onChange={(e) => startSession(e.target.value || null)}
+            className="rounded-md border border-input bg-background px-2 py-1 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <option value="">Select a course...</option>
+            {scopeLabel && <option value={ALL_COURSES}>{scopeLabel}</option>}
+            {me.enrollments.map((e) => (
+              <option key={e.course_id} value={e.course_id}>
+                {e.title}
+              </option>
+            ))}
+          </select>
+          {createSessionMutation.isPending && (
+            <span role="status" className="text-xs text-muted-foreground">
+              Starting session…
+            </span>
+          )}
+          {sessionError && (
+            <span role="alert" className="text-xs text-destructive">
+              {sessionError instanceof ApiError && sessionError.isForbidden
+                ? "You don't have access to this course."
+                : "Couldn't start a session. Please try again."}
+            </span>
+          )}
+        </>
+      )}
 
       <div className="ml-auto flex items-center gap-2">
-        <select
-          value={persona}
-          onChange={(e) => handlePersonaChange(e.target.value as Persona)}
-          className="rounded-md border border-input bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-ring"
-        >
-          {PERSONAS.map((p) => (
-            <option key={p.value} value={p.value}>{p.label}</option>
-          ))}
-        </select>
-
+        <span role="status" className="sr-only">
+          {announcement}
+        </span>
+        <AccountMenu
+          onSwitchRole={(role) => switchRoleMutation.mutate(role)}
+          switching={switchRoleMutation.isPending}
+        />
       </div>
     </header>
   );

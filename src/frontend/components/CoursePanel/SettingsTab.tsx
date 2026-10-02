@@ -1,7 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { API_BASE } from "@/lib/api";
+import { useState } from "react";
+import { apiJson } from "@/lib/api";
+import { useApiGet } from "@/lib/use-api";
+import { AccessDenied } from "@/components/common/AccessDenied";
 
 interface BadgeSettings {
   provider: string;
@@ -20,42 +22,34 @@ const DEFAULT_SETTINGS: BadgeSettings = {
 };
 
 export function SettingsTab() {
-  const [settings, setSettings] = useState<BadgeSettings>(DEFAULT_SETTINGS);
-  const [loading, setLoading] = useState(true);
+  const stored = useApiGet<{ value?: Partial<BadgeSettings> }>("/api/settings?key=badge_provider");
+  // null until the admin edits a field; until then the stored value is shown.
+  const [draft, setSettings] = useState<BadgeSettings | null>(null);
+  const settings: BadgeSettings = draft ?? { ...DEFAULT_SETTINGS, ...stored.data?.value };
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
-
-  useEffect(() => {
-    fetch(`${API_BASE}/api/settings?key=badge_provider`)
-      .then((r) => r.json())
-      .then((data) => {
-        if (data.value) {
-          setSettings({ ...DEFAULT_SETTINGS, ...data.value });
-        }
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, []);
+  const [saveError, setSaveError] = useState(false);
 
   const handleSave = async () => {
     setSaving(true);
     setSaved(false);
     try {
-      await fetch(`${API_BASE}/api/settings`, {
+      await apiJson("/api/settings", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key: "badge_provider", value: settings }),
+        json: { key: "badge_provider", value: settings },
       });
+      setSaveError(false);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch {
-      // ignore
+      setSaveError(true);
     } finally {
       setSaving(false);
     }
   };
 
-  if (loading) {
+  if (stored.forbidden) return <AccessDenied />;
+  if (stored.loading) {
     return <p className="text-xs text-muted-foreground animate-pulse">Loading settings...</p>;
   }
 
@@ -135,7 +129,14 @@ export function SettingsTab() {
         >
           {saving ? "Saving..." : "Save Settings"}
         </button>
-        {saved && <span className="text-[10px] text-green-600">Saved!</span>}
+        <span role="status" className="text-[10px] text-green-700">
+          {saved ? "Saved!" : ""}
+        </span>
+        {saveError && (
+          <span role="alert" className="text-[10px] text-destructive">
+            Couldn&apos;t save settings. Please try again.
+          </span>
+        )}
       </div>
 
       <section>

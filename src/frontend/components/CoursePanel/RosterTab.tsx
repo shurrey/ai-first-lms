@@ -1,8 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useSession } from "@/lib/session-context";
-import { API_BASE } from "@/lib/api";
+import { ApiError } from "@/lib/api";
+import { useApiGet } from "@/lib/use-api";
+import { AccessDenied } from "@/components/common/AccessDenied";
 import { StudentDetail } from "./StudentDetail";
 
 interface RosterStudent {
@@ -13,45 +15,47 @@ interface RosterStudent {
   total_turns: number;
 }
 
-export function RosterTab() {
-  const { persona, courseUuid } = useSession();
-  const [students, setStudents] = useState<RosterStudent[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [selectedStudent, setSelectedStudent] = useState<RosterStudent | null>(null);
+/** The subset of AdvisorHome (GET /api/home) this tab reads. */
+interface AdvisorHomeCaseload {
+  role: "advisor";
+  caseload: Array<{
+    student_id: string;
+    display_name: string;
+    courses: Array<{ course: { course_id: string; title: string }; last_active?: string | null }>;
+  }>;
+}
 
-  useEffect(() => {
-    if (!courseUuid || courseUuid === "all") {
-      setLoading(false);
-      return;
-    }
-    setLoading(true);
-    setSelectedStudent(null);
-    fetch(`${API_BASE}/api/roster/${courseUuid}`)
-      .then((r) => r.json())
-      .then((data) => {
-        setStudents(data.students || []);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, [courseUuid]);
+interface StudentRef {
+  id: string;
+  name: string;
+}
 
-  // Drill-down into a student
+/** `advisees`: list the advisor's assigned students instead of a course roster. */
+export function RosterTab({ advisees }: { advisees: boolean }) {
+  const [selectedStudent, setSelectedStudent] = useState<StudentRef | null>(null);
+
   if (selectedStudent) {
-    return (
-      <StudentDetail
-        student={selectedStudent}
-        onBack={() => setSelectedStudent(null)}
-      />
-    );
+    return <StudentDetail student={selectedStudent} onBack={() => setSelectedStudent(null)} />;
   }
+  return advisees ? (
+    <AdviseeRoster onSelectStudent={setSelectedStudent} />
+  ) : (
+    <CourseRoster onSelectStudent={setSelectedStudent} />
+  );
+}
 
-  if (loading) {
+function CourseRoster({ onSelectStudent }: { onSelectStudent: (s: StudentRef) => void }) {
+  const { courseUuid } = useSession();
+  const roster = useApiGet<{ students: RosterStudent[] }>(
+    courseUuid && courseUuid !== "all" ? `/api/roster/${encodeURIComponent(courseUuid)}` : null
+  );
+  const students = roster.data?.students ?? [];
+
+  if (roster.forbidden) return <AccessDenied what="This course's roster isn't available to you." />;
+  if (roster.loading) {
     return <p className="text-xs text-muted-foreground animate-pulse">Loading roster...</p>;
   }
-
-  if (courseUuid === "all") {
-    return <AdviseeRoster onSelectStudent={setSelectedStudent} />;
-  }
+  if (roster.error) return <LoadError what="the roster" />;
 
   return (
     <div className="space-y-2">
@@ -64,7 +68,8 @@ export function RosterTab() {
         {students.map((s) => (
           <button
             key={s.id}
-            onClick={() => setSelectedStudent(s)}
+            type="button"
+            onClick={() => onSelectStudent(s)}
             className="flex w-full items-center justify-between rounded-lg border border-border bg-card p-2.5 text-left hover:bg-muted/50 transition-colors"
           >
             <div className="min-w-0 flex-1">
@@ -75,9 +80,7 @@ export function RosterTab() {
                   : "No sessions yet"}
               </div>
             </div>
-            {s.session_count > 0 && (
-              <ActivityDot lastActive={s.last_active} />
-            )}
+            {s.session_count > 0 && <ActivityDot lastActive={s.last_active} />}
           </button>
         ))}
       </div>
@@ -85,67 +88,55 @@ export function RosterTab() {
   );
 }
 
-/** Advisor view: flat list of all advisees across courses */
-function AdviseeRoster({ onSelectStudent }: { onSelectStudent: (s: RosterStudent) => void }) {
-  const [students, setStudents] = useState<RosterStudent[]>([]);
-  const [loading, setLoading] = useState(true);
+/** Advisor caseload from the server; never a client-side list of courses or students. */
+function AdviseeRoster({ onSelectStudent }: { onSelectStudent: (s: StudentRef) => void }) {
+  const home = useApiGet<AdvisorHomeCaseload>("/api/home");
+  const caseload = [...(home.data?.caseload ?? [])].sort((a, b) =>
+    a.display_name.localeCompare(b.display_name)
+  );
 
-  useEffect(() => {
-    // Fetch roster from all courses and deduplicate
-    const courseIds = [
-      "bdd640fb-0667-4ad1-9c80-317fa3b1799d",
-      "23b8c1e9-3924-46de-beb1-3b9046685257",
-      "bd9c66b3-ad3c-4d6d-9a3d-1fa7bc8960a9",
-      "972a8469-1641-4f82-8b9d-2434e465e150",
-    ];
-
-    Promise.all(
-      courseIds.map((cid) =>
-        fetch(`${API_BASE}/api/roster/${cid}`)
-          .then((r) => r.json())
-          .then((d) => d.students || [])
-      )
-    ).then((results) => {
-      const seen = new Set<string>();
-      const deduped: RosterStudent[] = [];
-      for (const roster of results) {
-        for (const s of roster) {
-          if (!seen.has(s.id)) {
-            seen.add(s.id);
-            deduped.push(s);
-          }
-        }
-      }
-      deduped.sort((a, b) => a.name.localeCompare(b.name));
-      setStudents(deduped);
-      setLoading(false);
-    });
-  }, []);
-
-  if (loading) {
+  if (home.forbidden) return <AccessDenied />;
+  if (home.loading) {
     return <p className="text-xs text-muted-foreground animate-pulse">Loading advisees...</p>;
+  }
+  if (home.error) {
+    const notYet = home.error instanceof ApiError && home.error.status === 404;
+    return notYet ? (
+      <p className="text-xs text-muted-foreground">Your advisee list isn&apos;t available yet.</p>
+    ) : (
+      <LoadError what="your advisees" />
+    );
   }
 
   return (
     <div className="space-y-2">
       <h3 className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-        Advisees ({students.length})
+        Advisees ({caseload.length})
       </h3>
       <div className="space-y-1">
-        {students.map((s) => (
+        {caseload.map((s) => (
           <button
-            key={s.id}
-            onClick={() => onSelectStudent(s)}
+            key={s.student_id}
+            type="button"
+            onClick={() => onSelectStudent({ id: s.student_id, name: s.display_name })}
             className="flex w-full items-center justify-between rounded-lg border border-border bg-card p-2.5 text-left hover:bg-muted/50 transition-colors"
           >
-            <div className="text-xs font-medium truncate">{s.name}</div>
+            <div className="text-xs font-medium truncate">{s.display_name}</div>
             <span className="text-[10px] text-muted-foreground shrink-0 ml-2">
-              {s.session_count > 0 ? `${s.session_count} sessions` : ""}
+              {s.courses.length} course{s.courses.length !== 1 ? "s" : ""}
             </span>
           </button>
         ))}
       </div>
     </div>
+  );
+}
+
+function LoadError({ what }: { what: string }) {
+  return (
+    <p role="alert" className="text-xs text-destructive">
+      Couldn&apos;t load {what}. Please try again.
+    </p>
   );
 }
 

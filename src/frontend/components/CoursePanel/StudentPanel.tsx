@@ -2,14 +2,16 @@
 
 import { useEffect, useState, useRef } from "react";
 import { useSession } from "@/lib/session-context";
+import { useAuth } from "@/lib/auth-context";
 import { useTurn } from "@/lib/turn-context";
-import { API_BASE } from "@/lib/api";
+import { apiJson } from "@/lib/api";
 import type { BriefCardPayload } from "@/lib/events";
 import { MasteryPanel } from "./MasteryPanel";
 import { sendPrompt, SectionLabel, Pill, StatRow } from "./shared";
 
 export function StudentPanel({ data }: { data: BriefCardPayload | null }) {
-  const { personId, courseUuid } = useSession();
+  const { courseUuid } = useSession();
+  const personId = useAuth().me.person.id;
   const { status } = useTurn();
   const [liveMastery, setLiveMastery] = useState<any>(null);
   const prevStatusRef = useRef(status);
@@ -20,12 +22,14 @@ export function StudentPanel({ data }: { data: BriefCardPayload | null }) {
   // Refetch mastery data when a turn completes
   useEffect(() => {
     if (prevStatusRef.current === "streaming" && status === "done" && personId && courseUuid && courseUuid !== "all") {
-      fetch(`${API_BASE}/api/mastery/${personId}/${courseUuid}`)
-        .then((r) => r.json())
+      // On failure the brief's mastery snapshot stays on screen.
+      apiJson<{ summary?: unknown }>(
+        `/api/mastery/${encodeURIComponent(personId)}/${encodeURIComponent(courseUuid)}`
+      )
         .then((d) => {
           if (d.summary) setLiveMastery(d);
         })
-        .catch(() => {});
+        .catch((err: unknown) => console.warn("Mastery refresh failed", err));
     }
     prevStatusRef.current = status;
   }, [status, personId, courseUuid]);
