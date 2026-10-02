@@ -1,8 +1,9 @@
 "use client";
 
 import { use, useEffect, useState } from "react";
-import { usePersona } from "@/lib/persona-context";
-import { API_BASE } from "@/lib/api";
+import { useAuth } from "@/lib/auth-context";
+import { apiFetch } from "@/lib/api";
+import { NoAccess } from "@/components/NoAccess";
 import { Search, ChevronRight, MessageSquare, User } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -38,38 +39,36 @@ interface TranscriptData {
 
 export default function RosterPage({ params }: { params: Promise<{ courseId: string }> }) {
   const { courseId } = use(params);
-  const { persona, personId, userName, ensureSession } = usePersona();
+  const { activeRole, capabilities, personId, displayName } = useAuth();
 
   // Students see only their own sessions — no roster browsing
-  if (persona === "student") {
-    return <StudentOwnSessions courseId={courseId} personId={personId} userName={userName} ensureSession={ensureSession} />;
+  if (activeRole === "student") {
+    return <StudentOwnSessions courseId={courseId} personId={personId} displayName={displayName} />;
   }
 
-  return <FacultyRoster courseId={courseId} ensureSession={ensureSession} />;
+  if (!capabilities.roster) return <NoAccess />;
+  return <FacultyRoster courseId={courseId} />;
 }
 
-function StudentOwnSessions({ courseId, personId, userName, ensureSession }: { courseId: string; personId: string | null; userName: string; ensureSession: (c: string) => Promise<any> }) {
+function StudentOwnSessions({ courseId, personId, displayName }: { courseId: string; personId: string | null; displayName: string }) {
   const [sessions, setSessions] = useState<SessionEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [transcript, setTranscript] = useState<TranscriptData | null>(null);
 
   useEffect(() => {
-    ensureSession(courseId).then((result) => {
-      const pid = result?.personId || personId;
-      if (!pid) return;
-      fetch(`${API_BASE}/api/student/${pid}/sessions?course_id=${courseId}`)
-        .then((r) => r.json())
-        .then((d) => {
-          // Filter out empty sessions (0 messages)
-          setSessions((d.sessions || []).filter((s: SessionEntry) => s.turn_count > 0));
-          setLoading(false);
-        })
-        .catch(() => setLoading(false));
-    });
+    if (!personId) return;
+    apiFetch(`/api/student/${personId}/sessions?course_id=${courseId}`)
+      .then((r) => r.json())
+      .then((d) => {
+        // Filter out empty sessions (0 messages)
+        setSessions((d.sessions || []).filter((s: SessionEntry) => s.turn_count > 0));
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
   }, [courseId, personId]);
 
   const handleViewTranscript = (sessionId: string) => {
-    fetch(`${API_BASE}/api/transcript/${sessionId}`)
+    apiFetch(`/api/transcript/${sessionId}`)
       .then((r) => r.json())
       .then((d) => setTranscript(d))
       .catch(() => {});
@@ -82,7 +81,7 @@ function StudentOwnSessions({ courseId, personId, userName, ensureSession }: { c
       <div className="p-6 max-w-2xl">
         <button onClick={() => setTranscript(null)} className="text-xs text-indigo-500 hover:text-indigo-700 mb-4">&larr; Back to sessions</button>
         <div className="mb-4">
-          <h3 className="text-sm font-semibold">{userName}</h3>
+          <h3 className="text-sm font-semibold">{displayName}</h3>
           <p className="text-xs text-gray-500">{formatDate(transcript.created_at)} · {transcript.turns.length} messages</p>
         </div>
         <div className="space-y-3">
@@ -134,7 +133,7 @@ function StudentOwnSessions({ courseId, personId, userName, ensureSession }: { c
   );
 }
 
-function FacultyRoster({ courseId, ensureSession }: { courseId: string; ensureSession: (c: string) => Promise<any> }) {
+function FacultyRoster({ courseId }: { courseId: string }) {
   const [students, setStudents] = useState<RosterStudent[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -145,19 +144,17 @@ function FacultyRoster({ courseId, ensureSession }: { courseId: string; ensureSe
   const [transcriptLoading, setTranscriptLoading] = useState(false);
 
   useEffect(() => {
-    ensureSession(courseId).then(() => {
-      fetch(`${API_BASE}/api/roster/${courseId}`)
-        .then((r) => r.json())
-        .then((d) => { setStudents(d.students || []); setLoading(false); })
-        .catch(() => setLoading(false));
-    });
+    apiFetch(`/api/roster/${courseId}`)
+      .then((r) => r.json())
+      .then((d) => { setStudents(d.students || []); setLoading(false); })
+      .catch(() => setLoading(false));
   }, [courseId]);
 
   const handleSelectStudent = (student: RosterStudent) => {
     setSelectedStudent(student);
     setTranscript(null);
     setSessionsLoading(true);
-    fetch(`${API_BASE}/api/student/${student.id}/sessions?course_id=${courseId}`)
+    apiFetch(`/api/student/${student.id}/sessions?course_id=${courseId}`)
       .then((r) => r.json())
       .then((d) => { setSessions(d.sessions || []); setSessionsLoading(false); })
       .catch(() => setSessionsLoading(false));
@@ -165,7 +162,7 @@ function FacultyRoster({ courseId, ensureSession }: { courseId: string; ensureSe
 
   const handleViewTranscript = (sessionId: string) => {
     setTranscriptLoading(true);
-    fetch(`${API_BASE}/api/transcript/${sessionId}`)
+    apiFetch(`/api/transcript/${sessionId}`)
       .then((r) => r.json())
       .then((d) => { setTranscript(d); setTranscriptLoading(false); })
       .catch(() => setTranscriptLoading(false));

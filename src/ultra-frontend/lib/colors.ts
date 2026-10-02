@@ -5,16 +5,8 @@ export const COURSE_COLORS: Record<string, { from: string; to: string }> = {
   bio150: { from: "#10b981", to: "#047857" },
 };
 
-// Course UUID → slug mapping
-export const COURSE_SLUGS: Record<string, string> = {
-  "bdd640fb-0667-4ad1-9c80-317fa3b1799d": "cs101",
-  "23b8c1e9-3924-46de-beb1-3b9046685257": "math201",
-  "bd9c66b3-ad3c-4d6d-9a3d-1fa7bc8960a9": "eng102",
-  "972a8469-1641-4f82-8b9d-2434e465e150": "bio150",
-};
-
-export function getCourseColor(courseIdOrSlug: string) {
-  const slug = COURSE_SLUGS[courseIdOrSlug] ?? courseIdOrSlug;
+/** Banner colours by course slug; any other value (a UUID, an unknown slug) gets the default. */
+export function getCourseColor(slug: string) {
   return COURSE_COLORS[slug] ?? { from: "#7c3aed", to: "#4c1d95" };
 }
 

@@ -1,20 +1,20 @@
 "use client";
 
+import { use } from "react";
+import { usePathname } from "next/navigation";
 import { CourseNav } from "@/components/CourseNav";
 import { CourseTabs } from "@/components/CourseTabs";
 import { CourseBanner } from "@/components/CourseBanner";
 import { AiFab } from "@/components/AiFab";
 import { AiPanel } from "@/components/AiPanel";
+import { NoAccess } from "@/components/NoAccess";
+import { ScopeOverview } from "@/components/ScopeOverview";
 import { AiPanelProvider, useAiPanel } from "@/lib/ai-panel-context";
-import { usePersona } from "@/lib/persona-context";
-import { use } from "react";
+import { SCOPE_COURSE_ID, scopeLabel, useAuth } from "@/lib/auth-context";
+import type { Role } from "@/lib/types";
 
-const COURSE_TITLES: Record<string, string> = {
-  "bdd640fb-0667-4ad1-9c80-317fa3b1799d": "CS 101 — Introduction to Computer Science",
-  "23b8c1e9-3924-46de-beb1-3b9046685257": "MATH 201 — Linear Algebra",
-  "bd9c66b3-ad3c-4d6d-9a3d-1fa7bc8960a9": "ENG 102 — Academic Writing",
-  "972a8469-1641-4f82-8b9d-2434e465e150": "BIO 150 — General Biology",
-};
+/** Roles whose course access is exactly their enrollments; the others are scoped server-side. */
+const ENROLLMENT_SCOPED_ROLES: Role[] = ["student", "faculty"];
 
 export default function CourseLayout({
   children,
@@ -24,27 +24,62 @@ export default function CourseLayout({
   params: Promise<{ courseId: string }>;
 }) {
   const { courseId } = use(params);
-  const title = COURSE_TITLES[courseId] ?? "Course";
+  const { activeRole, findEnrollment } = useAuth();
+
+  if (courseId === SCOPE_COURSE_ID) {
+    const label = scopeLabel(activeRole);
+    if (!label) return <NoAccess />;
+    return (
+      <AiPanelProvider>
+        <CourseLayoutInner courseId={courseId} title={label} isScope>
+          {children}
+        </CourseLayoutInner>
+      </AiPanelProvider>
+    );
+  }
+
+  const enrollment = findEnrollment(courseId);
+  if (!enrollment && ENROLLMENT_SCOPED_ROLES.includes(activeRole)) {
+    return <NoAccess message="You aren't enrolled in this course." />;
+  }
 
   return (
     <AiPanelProvider>
-      <CourseLayoutInner courseId={courseId} title={title}>
+      <CourseLayoutInner courseId={courseId} title={enrollment?.title ?? "Course"} slug={enrollment?.slug}>
         {children}
       </CourseLayoutInner>
     </AiPanelProvider>
   );
 }
 
-function CourseLayoutInner({ courseId, title, children }: { courseId: string; title: string; children: React.ReactNode }) {
+function CourseLayoutInner({
+  courseId,
+  title,
+  slug,
+  isScope = false,
+  children,
+}: {
+  courseId: string;
+  title: string;
+  slug?: string;
+  isScope?: boolean;
+  children: React.ReactNode;
+}) {
   const { isOpen, open, close } = useAiPanel();
-  const { persona } = usePersona();
+  const { capabilities } = useAuth();
+  const pathname = usePathname();
+
+  // Only the badge-settings tab works without a concrete course; everything else is the overview.
+  const scopeShowsChild = isScope && pathname === `/course/${courseId}/credentials` && !!capabilities.system_settings;
 
   return (
     <div className="flex h-full flex-col">
       <CourseNav courseTitle={title} />
-      <CourseTabs courseId={courseId} persona={persona} />
-      <CourseBanner courseId={courseId} title={title} />
-      <div className="flex-1 overflow-auto">{children}</div>
+      <CourseTabs courseId={courseId} isScope={isScope} />
+      <CourseBanner courseId={slug ?? courseId} title={title} />
+      <div className="flex-1 overflow-auto">
+        {isScope && !scopeShowsChild ? <ScopeOverview title={title} onAsk={open} /> : children}
+      </div>
       <AiFab onClick={() => open()} />
       {isOpen && <AiPanel onClose={close} courseId={courseId} courseTitle={title} />}
     </div>

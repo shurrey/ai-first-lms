@@ -1,8 +1,8 @@
 "use client";
 
 import { use, useEffect, useState } from "react";
-import { usePersona } from "@/lib/persona-context";
-import { API_BASE } from "@/lib/api";
+import { useAuth } from "@/lib/auth-context";
+import { apiFetch } from "@/lib/api";
 import { useAiPanel } from "@/lib/ai-panel-context";
 import { ChevronDown, ChevronRight, Award, BookOpen, Sparkles } from "lucide-react";
 
@@ -50,7 +50,7 @@ const LEVEL_STYLES: Record<string, { bg: string; text: string; dot: string; labe
 
 export default function ContentPage({ params }: { params: Promise<{ courseId: string }> }) {
   const { courseId } = use(params);
-  const { persona, personId, ensureSession } = usePersona();
+  const { activeRole, personId } = useAuth();
   const [data, setData] = useState<MasteryData | null>(null);
   const [loading, setLoading] = useState(true);
   const [insights, setInsights] = useState<string[]>([]);
@@ -60,12 +60,10 @@ export default function ContentPage({ params }: { params: Promise<{ courseId: st
     setLoading(true);
 
     async function load() {
-      const session = await ensureSession(courseId);
-      const pid = session?.personId;
-      if (!pid) return;
+      const pid = personId;
 
-      if (persona === "student") {
-        fetch(`${API_BASE}/api/mastery/${pid}/${courseId}`)
+      if (activeRole === "student") {
+        apiFetch(`/api/mastery/${pid}/${courseId}`)
           .then((r) => r.json())
           .then((d) => { if (d.summary) setData(d); setLoading(false); })
           .catch(() => setLoading(false));
@@ -74,19 +72,19 @@ export default function ContentPage({ params }: { params: Promise<{ courseId: st
 
       // Faculty view: get concept structure from first student, then aggregate
       try {
-        const rosterRes = await fetch(`${API_BASE}/api/roster/${courseId}`);
+        const rosterRes = await apiFetch(`/api/roster/${courseId}`);
         const roster = await rosterRes.json();
         const students = roster.students || [];
         if (students.length === 0) { setLoading(false); return; }
 
-        const structRes = await fetch(`${API_BASE}/api/mastery/${students[0].id}/${courseId}`);
+        const structRes = await apiFetch(`/api/mastery/${students[0].id}/${courseId}`);
         const structData = await structRes.json();
         if (!structData.summary) { setLoading(false); return; }
 
         const sample = students.slice(0, 30);
         const allMaps = await Promise.all(
           sample.map((s: any) =>
-            fetch(`${API_BASE}/api/mastery/${s.id}/${courseId}`).then((r) => r.json()).catch(() => null)
+            apiFetch(`/api/mastery/${s.id}/${courseId}`).then((r) => r.json()).catch(() => null)
           )
         );
         const validMaps = allMaps.filter((m: any) => m?.summary);
@@ -130,19 +128,19 @@ export default function ContentPage({ params }: { params: Promise<{ courseId: st
     }
 
     load();
-  }, [courseId, persona]);
+  }, [courseId, activeRole, personId]);
 
   useEffect(() => {
-    if (!personId || persona !== "student") return;
-    fetch(`${API_BASE}/api/student-insights/${personId}`)
+    if (!personId || activeRole !== "student") return;
+    apiFetch(`/api/student-insights/${personId}`)
       .then((r) => r.json())
       .then((d) => setInsights(d.insights || []))
       .catch(() => {});
-    fetch(`${API_BASE}/api/student-goals/${personId}`)
+    apiFetch(`/api/student-goals/${personId}`)
       .then((r) => r.json())
       .then((d) => setGoals(d.goals || []))
       .catch(() => {});
-  }, [personId, persona]);
+  }, [personId, activeRole]);
 
   if (loading || !data) {
     return (
@@ -165,14 +163,14 @@ export default function ContentPage({ params }: { params: Promise<{ courseId: st
         {/* Summary header */}
         <div className="mb-6">
           <h2 className="text-lg font-semibold mb-3">
-            {persona === "student" ? "Your Mastery Progress" : "Class Mastery Overview"}
+            {activeRole === "student" ? "Your Mastery Progress" : "Class Mastery Overview"}
           </h2>
           <div className="rounded-xl border border-gray-200 bg-white p-4">
             <div className="flex items-center gap-6 mb-3">
               <div className="text-center">
                 <div className="text-3xl font-bold">{summary.mastery + summary.proficient}</div>
                 <div className="text-xs text-gray-500">
-                  {persona === "student"
+                  {activeRole === "student"
                     ? `of ${summary.total_concepts} concepts`
                     : `avg concepts per student`
                   }
@@ -202,7 +200,7 @@ export default function ContentPage({ params }: { params: Promise<{ courseId: st
         {/* Microcredentials as expandable modules */}
         <div className="space-y-4">
           {microcredentials.map((mc, mcIdx) => (
-            <MicrocredentialBlock key={mcIdx} mc={mc} defaultExpanded={mcIdx === 0} persona={persona} courseTitle={data.course_title} />
+            <MicrocredentialBlock key={mcIdx} mc={mc} defaultExpanded={mcIdx === 0} activeRole={activeRole} courseTitle={data.course_title} />
           ))}
         </div>
       </div>
@@ -230,7 +228,7 @@ export default function ContentPage({ params }: { params: Promise<{ courseId: st
           </div>
         </div>
         {/* Goals (student only) */}
-        {persona === "student" && goals.filter(g => g.status === "active").length > 0 && (
+        {activeRole === "student" && goals.filter(g => g.status === "active").length > 0 && (
           <div className="border-t border-gray-200 pt-4">
             <h3 className="text-xs font-semibold text-gray-500 uppercase mb-2">Your Goals</h3>
             <div className="space-y-1.5">
@@ -247,9 +245,9 @@ export default function ContentPage({ params }: { params: Promise<{ courseId: st
         {/* Insights */}
         <div className="border-t border-gray-200 pt-4">
           <h3 className="text-xs font-semibold text-gray-500 uppercase mb-2">
-            {persona === "student" ? "Your Learning Insights" : "AI Insights"}
+            {activeRole === "student" ? "Your Learning Insights" : "AI Insights"}
           </h3>
-          {persona === "student" && insights.length > 0 ? (
+          {activeRole === "student" && insights.length > 0 ? (
             <div className="space-y-1.5">
               {insights.map((insight, i) => (
                 <p key={i} className="text-xs text-gray-600 flex items-start gap-1.5">
@@ -274,14 +272,14 @@ export default function ContentPage({ params }: { params: Promise<{ courseId: st
   );
 }
 
-function MicrocredentialBlock({ mc, defaultExpanded, persona, courseTitle }: { mc: Microcredential; defaultExpanded: boolean; persona: string; courseTitle: string }) {
+function MicrocredentialBlock({ mc, defaultExpanded, activeRole, courseTitle }: { mc: Microcredential; defaultExpanded: boolean; activeRole: string; courseTitle: string }) {
   const [expanded, setExpanded] = useState(defaultExpanded);
   const { open } = useAiPanel();
   const totalProgress = mc.progress.mastery + mc.progress.proficient;
   const pct = mc.total_concepts > 0 ? Math.round((totalProgress / mc.total_concepts) * 100) : 0;
 
   const handleConceptClick = (concept: Concept) => {
-    if (persona !== "student") return;
+    if (activeRole !== "student") return;
     // Build a contextual prompt that tells the tutor exactly what the student clicked
     const prompt = `I want to work on "${concept.title}" from the ${mc.title} microcredential. My current level is ${concept.level}. Start a focused tutoring session on this concept.`;
     open(prompt);
@@ -297,7 +295,7 @@ function MicrocredentialBlock({ mc, defaultExpanded, persona, courseTitle }: { m
         <div className="flex-1">
           <div className="flex items-center gap-2">
             <span className="text-sm font-semibold">{mc.title}</span>
-            {mc.earned && persona === "student" && <span className="text-xs bg-green-100 text-green-700 rounded-full px-2 py-0.5">Earned</span>}
+            {mc.earned && activeRole === "student" && <span className="text-xs bg-green-100 text-green-700 rounded-full px-2 py-0.5">Earned</span>}
           </div>
           <div className="flex items-center gap-2 mt-0.5">
             <div className="h-1.5 w-32 rounded-full bg-gray-100">
@@ -318,7 +316,7 @@ function MicrocredentialBlock({ mc, defaultExpanded, persona, courseTitle }: { m
           <div className="divide-y divide-gray-50">
             {mod.concepts.map((concept) => {
               const style = LEVEL_STYLES[concept.level] || LEVEL_STYLES.not_started;
-              const clickable = persona === "student";
+              const clickable = activeRole === "student";
               const agg = (concept as any)._agg as Record<string, number> | undefined;
               const studentCount = (concept as any)._studentCount as number | undefined;
               // For faculty, pick dot color based on how many students have progressed

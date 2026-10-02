@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start -p 3100",
     "lint": "eslint",
-    "test:smoke": "playwright test \\.smoke\\.spec\\.ts"
+    "test:smoke": "playwright test \\.smoke\\.spec\\.ts",
+    "test:real": "playwright test -c playwright.real.config.ts"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.99.2",
@@ -24,6 +25,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
     "@playwright/test": "1.59.1",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",

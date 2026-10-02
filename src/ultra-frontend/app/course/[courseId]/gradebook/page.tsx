@@ -1,7 +1,8 @@
 "use client";
 import { use, useEffect, useState } from "react";
-import { usePersona } from "@/lib/persona-context";
-import { API_BASE } from "@/lib/api";
+import { useAuth } from "@/lib/auth-context";
+import { apiFetch } from "@/lib/api";
+import { NoAccess } from "@/components/NoAccess";
 
 interface StudentAttestation {
   id: string;
@@ -32,20 +33,20 @@ const LEVEL_SHORT: Record<string, string> = {
 
 export default function GradebookPage({ params }: { params: Promise<{ courseId: string }> }) {
   const { courseId } = use(params);
-  const { persona, personId, ensureSession } = usePersona();
+  const { activeRole, capabilities, personId } = useAuth();
+  const allowed = !!capabilities.mastery_matrix;
   const [students, setStudents] = useState<StudentAttestation[]>([]);
   const [concepts, setConcepts] = useState<ConceptInfo[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    if (!allowed) return;
     setLoading(true);
     setStudents([]);
     setConcepts([]);
 
     async function load() {
-      // Ensure session and get personId for current persona
-      const session = await ensureSession(courseId);
-      const pid = session?.personId || personId;
+      const pid = personId;
 
       // Helper: extract concepts and build student attestation from mastery data
       function parseMastery(mapData: any, studentId: string, studentName: string) {
@@ -64,9 +65,9 @@ export default function GradebookPage({ params }: { params: Promise<{ courseId: 
         return { conceptList, student: { id: studentId, name: studentName, concepts: conceptMap, summary } };
       }
 
-      if (persona === "student" && pid) {
+      if (activeRole === "student" && pid) {
         // Student view: just their own data
-        const res = await fetch(`${API_BASE}/api/mastery/${pid}/${courseId}`);
+        const res = await apiFetch(`/api/mastery/${pid}/${courseId}`);
         const data = await res.json();
         if (!data.summary) { setLoading(false); return; }
         const { conceptList, student } = parseMastery(data, pid!, "You");
@@ -77,13 +78,13 @@ export default function GradebookPage({ params }: { params: Promise<{ courseId: 
       }
 
       // Faculty/advisor/admin: fetch ALL students
-      const rosterRes = await fetch(`${API_BASE}/api/roster/${courseId}`);
+      const rosterRes = await apiFetch(`/api/roster/${courseId}`);
       const roster = await rosterRes.json();
       const allStudents = roster.students || [];
       if (allStudents.length === 0) { setLoading(false); return; }
 
       // Get concept structure from first student
-      const structRes = await fetch(`${API_BASE}/api/mastery/${allStudents[0].id}/${courseId}`);
+      const structRes = await apiFetch(`/api/mastery/${allStudents[0].id}/${courseId}`);
       const structData = await structRes.json();
       if (!structData.summary) { setLoading(false); return; }
       const { conceptList } = parseMastery(structData, "", "");
@@ -95,7 +96,7 @@ export default function GradebookPage({ params }: { params: Promise<{ courseId: 
         const batch = allStudents.slice(i, i + 10);
         await Promise.all(batch.map(async (s: any) => {
           try {
-            const res = await fetch(`${API_BASE}/api/mastery/${s.id}/${courseId}`);
+            const res = await apiFetch(`/api/mastery/${s.id}/${courseId}`);
             const data = await res.json();
             const { student } = parseMastery(data, s.id, s.name);
             studentData.push(student);
@@ -108,8 +109,13 @@ export default function GradebookPage({ params }: { params: Promise<{ courseId: 
       setLoading(false);
     }
 
-    load();
-  }, [courseId, persona]);
+    load().catch((err: unknown) => {
+      console.error("Failed to load attestations", err);
+      setLoading(false);
+    });
+  }, [courseId, activeRole, allowed, personId]);
+
+  if (!allowed) return <NoAccess />;
 
   if (loading) {
     return (
@@ -126,7 +132,7 @@ export default function GradebookPage({ params }: { params: Promise<{ courseId: 
     <div className="p-6">
       <div className="mb-4 flex items-center justify-between">
         <h2 className="text-lg font-semibold">
-          {persona === "student" ? "Your Mastery Attestations" : `Mastery Attestations (${students.length} students)`}
+          {activeRole === "student" ? "Your Mastery Attestations" : `Mastery Attestations (${students.length} students)`}
         </h2>
         <div className="flex items-center gap-4 text-xs text-gray-500">
           <span className="flex items-center gap-1"><span className="h-2.5 w-2.5 rounded bg-green-500" /> Mastery</span>

@@ -3,14 +3,14 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { X, Sparkles, Send } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { usePersona } from "@/lib/persona-context";
+import { ROLE_LABELS, useAuth } from "@/lib/auth-context";
 import { useAiPanel } from "@/lib/ai-panel-context";
-import { API_BASE } from "@/lib/api";
+import { apiFetch } from "@/lib/api";
 
 interface Message { role: "user" | "assistant"; content: string; }
 
 export function AiPanel({ onClose, courseId, courseTitle }: { onClose: () => void; courseId: string; courseTitle: string }) {
-  const { persona, ensureSession } = usePersona();
+  const { activeRole, ensureSession } = useAuth();
   const { initialPrompt, clearPrompt } = useAiPanel();
   const [messages, setMessages] = useState<Message[]>([
     { role: "assistant", content: `Hi! I'm your AI assistant for **${courseTitle}**. How can I help?` },
@@ -46,7 +46,7 @@ export function AiPanel({ onClose, courseId, courseTitle }: { onClose: () => voi
       const sid = session.sessionId;
 
       // Send message
-      const converseRes = await fetch(`${API_BASE}/api/converse`, {
+      const converseRes = await apiFetch(`/api/converse`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ session_id: sid, message: msg }),
@@ -60,7 +60,7 @@ export function AiPanel({ onClose, courseId, courseTitle }: { onClose: () => voi
       const start = Date.now();
 
       while (Date.now() - start < maxWait) {
-        const res = await fetch(`${API_BASE}${stream_url}`);
+        const res = await apiFetch(stream_url);
         const text = await res.text();
         const lines = text.split("\n");
 
@@ -114,10 +114,10 @@ export function AiPanel({ onClose, courseId, courseTitle }: { onClose: () => voi
           <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-[#6366f1] text-white"><Sparkles className="h-4 w-4" /></div>
           <div>
             <span className="text-sm font-semibold">AI Assistant</span>
-            <span className="ml-2 text-[10px] text-gray-400">{persona}</span>
+            <span className="ml-2 text-[10px] text-gray-600">{ROLE_LABELS[activeRole]}</span>
           </div>
         </div>
-        <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X className="h-5 w-5" /></button>
+        <button type="button" onClick={onClose} aria-label="Close AI assistant" className="text-gray-500 hover:text-gray-700"><X aria-hidden="true" className="h-5 w-5" /></button>
       </div>
 
       {/* Messages */}
@@ -172,11 +172,12 @@ export function AiPanel({ onClose, courseId, courseTitle }: { onClose: () => voi
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
+            aria-label="Message the AI assistant"
             placeholder="Ask about this course..."
             rows={1}
             className="flex-1 resize-none rounded-lg border border-gray-300 px-3 py-2 text-sm outline-none focus:border-indigo-400 leading-normal"
           />
-          <button onClick={handleSend} disabled={loading || !input.trim()} className="rounded-lg bg-[#6366f1] px-3 py-2 text-white hover:bg-[#4f46e5] disabled:opacity-50">
+          <button type="button" aria-label="Send message" onClick={handleSend} disabled={loading || !input.trim()} className="rounded-lg bg-[#6366f1] px-3 py-2 text-white hover:bg-[#4f46e5] disabled:opacity-50">
             <Send className="h-4 w-4" />
           </button>
         </div>

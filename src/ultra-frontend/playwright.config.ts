@@ -6,6 +6,7 @@ const PORT = Number(process.env.SMOKE_PORT ?? 3110);
 
 export default defineConfig({
   testDir: "./tests/e2e",
+  globalSetup: "./tests/e2e/warm-routes.ts",
   timeout: 60_000,
   retries: 0,
   forbidOnly: !!process.env.CI,
