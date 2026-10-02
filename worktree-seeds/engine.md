@@ -67,7 +67,7 @@ Your first claim is `T-E-001 — FastAPI skeleton with health endpoint`. Before 
 
 ## Interactions with other workstreams
 
-- **Agents (WS2):** you invoke them. Their interface is defined by each agent's manifest. You call them by loading `src/agents/<name>/agent.py` — but you do not modify those files.
+- **Agents (WS2):** you invoke them. Their interface is defined by each agent's manifest. The runner loads `src/agents/<name>/system_prompt.md` and the manifest's `mcp_tools` — but you do not modify those files.
 - **Data & MCP (WS3):** you do not talk to the database directly. All data access is via sub-agents → MCP. You only touch the DB through `sessions`, `turns`, `events_log` which are your own tables.
 - **Frontend (WS4):** contract is `contracts/api.openapi.yaml` and `contracts/events.md`. Nothing else.
 - **Platform (WS5):** they run you in a container. They own `docker-compose.yaml`. If you need a new env var or port, open a task against Platform.

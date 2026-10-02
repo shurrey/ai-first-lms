@@ -14,18 +14,14 @@ Implement the ten sub-agents defined in `contracts/agent-manifests.yaml` and SPE
 src/agents/<name>/
 ├── system_prompt.md      # the system prompt (checked in, prose)
 ├── manifest.yaml         # local copy, CI verifies it matches contracts/agent-manifests.yaml
-├── agent.py              # the callable agent
 └── tests/
-    ├── test_agent.py     # unit tests on the agent's logic
     └── eval_cases.yaml   # ≥5 canned inputs with expected output shape & rubrics
 ```
 
-Each `agent.py` exposes a function:
-```python
-async def run(inputs: dict, persona: PersonaContext, tools: ToolBag) -> dict: ...
-```
-
-Where `tools` is a `ToolBag` that routes MCP tool calls. You do NOT talk to MCP servers directly — you go through the Agent SDK's tool-use loop, which the bag wires up.
+There is no per-agent Python class. The engine's runner (`src/engine/agents/runner.py`)
+loads `system_prompt.md`, offers the model exactly the manifest's `mcp_tools`, and sends
+every tool call through `engine/guardrails/gateway.py` (spec.md §5.2, §5.4). See
+`src/agents/RECONCILIATION.md` for what replaced the old `agent.py` classes.
 
 ## Your rules
 
@@ -95,6 +91,6 @@ Eval cases are a quality regression net. They're not a perfect test, but they ca
 
 ## Interactions with other workstreams
 
-- **Engine (WS1):** loads your `agent.py` and calls `run()`. Also consumes your `manifest.yaml`. If your agent needs a capability the manifest doesn't describe, update the CONTRACT (T-C task) — don't just add it unilaterally.
+- **Engine (WS1):** runs your `system_prompt.md` with the tools in your `manifest.yaml`. If your agent needs a capability the manifest doesn't describe, update the CONTRACT (T-C task) — don't just add it unilaterally.
 - **Data & MCP (WS3):** provides the MCP tools your agent uses. If you need a new tool, open a task against Data & MCP.
 - **Frontend, Platform:** you don't interact directly.
