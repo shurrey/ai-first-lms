@@ -7,15 +7,31 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
+from engine.auth.deps import CurrentUser
+from engine.auth.models import AuthContext
+from engine.auth.scope import (
+    Directory,
+    forbidden,
+    learner_view_course_ids,
+    record_access,
+    require_course_staff,
+    require_student_view,
+)
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
 @router.get("/api/mastery/{person_id}/{course_id}")
-async def get_mastery(person_id: str, course_id: str) -> dict[str, Any]:
+async def get_mastery(
+    person_id: str, course_id: str, ctx: CurrentUser, directory: Directory
+) -> dict[str, Any]:
     """Get live mastery map data for a student."""
     from engine.agents.runner import _call_mcp_json
+
+    await require_student_view(ctx, person_id, course_id, purpose="mastery",
+                               directory=directory, capability="mastery_matrix")
 
     return await _call_mcp_json("graph.mastery_map", {
         "person_id": person_id,
@@ -24,9 +40,11 @@ async def get_mastery(person_id: str, course_id: str) -> dict[str, Any]:
 
 
 @router.get("/api/roster/{course_id}")
-async def get_roster(course_id: str) -> dict[str, Any]:
+async def get_roster(course_id: str, ctx: CurrentUser) -> dict[str, Any]:
     """Get student roster for a course with activity summary."""
     from engine.agents.runner import _call_mcp_json
+
+    require_course_staff(ctx, course_id)
 
     roster_data = await _call_mcp_json("roster.list_by_course", {
         "course_id": course_id,
@@ -58,9 +76,14 @@ async def get_roster(course_id: str) -> dict[str, Any]:
 
 
 @router.get("/api/student/{person_id}/sessions")
-async def get_student_sessions(person_id: str, course_id: str | None = None) -> dict[str, Any]:
+async def get_student_sessions(
+    person_id: str, ctx: CurrentUser, directory: Directory, course_id: str | None = None
+) -> dict[str, Any]:
     """Get session list for a student, optionally filtered by course."""
     from engine.agents.runner import _call_mcp_json
+
+    await require_student_view(ctx, person_id, course_id, purpose="sessions",
+                               directory=directory, capability="transcripts_of_others")
 
     args: dict[str, Any] = {"person_id": person_id}
     if course_id:
@@ -69,16 +92,22 @@ async def get_student_sessions(person_id: str, course_id: str | None = None) -> 
     sessions_data = await _call_mcp_json("roster.list_student_sessions", args)
     student_data = await _call_mcp_json("roster.get", {"person_id": person_id})
 
+    sessions = _limit_to_taught(ctx, person_id, sessions_data.get("sessions", []))
     return {
         "student_name": student_data.get("display_name", "Unknown"),
-        "sessions": sessions_data.get("sessions", []),
+        "sessions": sessions,
     }
 
 
 @router.get("/api/student/{person_id}/courses")
-async def get_student_courses(person_id: str) -> dict[str, Any]:
+async def get_student_courses(
+    person_id: str, ctx: CurrentUser, directory: Directory
+) -> dict[str, Any]:
     """Get all courses for a student with mastery summary — for advisor cross-course view."""
     from engine.agents.runner import _call_mcp_json
+
+    await require_student_view(ctx, person_id, purpose="courses",
+                               directory=directory, capability="mastery_matrix")
 
     student_data = await _call_mcp_json("roster.get_student", {"person_id": person_id})
     catalog_data = await _call_mcp_json("sis.catalog_search", {"query": ""})
@@ -118,14 +147,19 @@ async def get_student_courses(person_id: str) -> dict[str, Any]:
 
     return {
         "student_name": student_data.get("display_name", "Unknown"),
-        "courses": courses,
+        "courses": _limit_to_taught(ctx, person_id, courses),
     }
 
 
 @router.get("/api/student-insights/{person_id}")
-async def get_student_insights(person_id: str) -> dict[str, Any]:
+async def get_student_insights(
+    person_id: str, ctx: CurrentUser, directory: Directory
+) -> dict[str, Any]:
     """Get student-facing learning insights."""
     from engine.agents.runner import _call_mcp_json
+
+    await require_student_view(ctx, person_id, purpose="insights",
+                               directory=directory, capability="learner_profile_of_others")
 
     data = await _call_mcp_json("roster.get", {"person_id": person_id})
     attrs = data.get("attributes", {})
@@ -136,18 +170,57 @@ async def get_student_insights(person_id: str) -> dict[str, Any]:
 
 
 @router.get("/api/student-goals/{person_id}")
-async def get_student_goals(person_id: str) -> dict[str, Any]:
+async def get_student_goals(
+    person_id: str, ctx: CurrentUser, directory: Directory
+) -> dict[str, Any]:
     """Get student learning goals."""
     from engine.agents.runner import _call_mcp_json
+
+    await require_student_view(ctx, person_id, purpose="goals",
+                               directory=directory, capability="learner_profile_of_others")
 
     return await _call_mcp_json("roster.get_goals", {"person_id": person_id})
 
 
 @router.get("/api/transcript/{session_id}")
-async def get_transcript(session_id: str) -> dict[str, Any]:
+async def get_transcript(
+    session_id: str, request: Request, ctx: CurrentUser, directory: Directory
+) -> dict[str, Any]:
     """Get the full conversation transcript for a session."""
     from engine.agents.runner import _call_mcp_json
+
+    owner = await _session_owner(request, directory, session_id)
+    if owner is None:
+        record_access(ctx, "", None, "transcript", False)
+        raise forbidden()
+    student_id, course_id = owner
+    await require_student_view(ctx, student_id, course_id, purpose="transcript",
+                               directory=directory, capability="transcripts_of_others")
 
     return await _call_mcp_json("roster.get_session_transcript", {
         "session_id": session_id,
     })
+
+
+async def _session_owner(
+    request: Request, directory: Directory, session_id: str
+) -> tuple[str, str | None] | None:
+    """(person_id, course_id) of a live in-memory session, else of the persisted one."""
+    live = await request.app.state.session_store.get(session_id)
+    if live is not None and live.person_id:
+        course = live.course_id if live.course_id != "all" else None
+        return live.person_id, course
+    persisted = await directory.session_owner(session_id)
+    if persisted is None:
+        return None
+    return persisted.person_id, persisted.course_id
+
+
+def _limit_to_taught(
+    ctx: AuthContext, person_id: str, items: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Faculty see a learner only through the courses they teach (§17 course-filtered)."""
+    if person_id == ctx.person_id or ctx.active_role not in ("faculty", "program_lead"):
+        return items
+    taught = learner_view_course_ids(ctx)
+    return [item for item in items if item.get("course_id") in taught]

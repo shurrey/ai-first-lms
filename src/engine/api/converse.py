@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -10,6 +9,10 @@ from fastapi import APIRouter, HTTPException, Request
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 
+from engine.auth.deps import CurrentUser
+from engine.auth.models import AuthContext
+from engine.auth.scope import require_own_session
+from engine.background import spawn
 from engine.guardrails.budget import BudgetConfig, BudgetTracker
 from engine.models.turn import ConverseRequest, ConverseResponse, Turn
 from engine.telemetry import span_turn
@@ -22,15 +25,15 @@ router = APIRouter()
 
 
 @router.post("/api/converse", status_code=202, response_model=ConverseResponse)
-async def converse(body: ConverseRequest, request: Request) -> ConverseResponse:
+async def converse(body: ConverseRequest, request: Request, ctx: CurrentUser) -> ConverseResponse:
     """Accept a user message, start the orchestrator graph, return turn_id."""
     session_store = request.app.state.session_store
     turn_store = request.app.state.turn_store
 
-    # Validate session exists
     session = await session_store.get(body.session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
+    require_own_session(ctx, session, acting=True)
 
     # Create a new turn
     turn = Turn(session_id=body.session_id, message=body.message)
@@ -39,33 +42,28 @@ async def converse(body: ConverseRequest, request: Request) -> ConverseResponse:
     # Build stream URL
     stream_url = f"/api/stream?session_id={body.session_id}&turn_id={turn.id}"
 
-    # Kick off graph execution asynchronously
-    asyncio.create_task(
-        _run_graph(request.app, session, turn)
-    )
+    spawn(request.app.state.background_tasks, _run_graph(request.app, session, turn, ctx),
+          name=f"turn-{turn.id}")
 
     return ConverseResponse(turn_id=turn.id, stream_url=stream_url)
 
 
-async def _run_graph(app, session, turn: Turn) -> None:  # type: ignore[no-untyped-def]
+async def _run_graph(app, session, turn: Turn, ctx: AuthContext) -> None:  # type: ignore[no-untyped-def]
     """Run the orchestrator graph for a turn. Runs as a background task.
 
     Always leaves the turn in status `completed` or `error`; on `error` the last event
     is an `error` event so the SSE stream reports why before it closes.
     """
-    from engine.graph.dispatch import set_live_event_sink
-
     turn_store = app.state.turn_store
     span = span_turn(session.id, turn.id)
     span.set_attribute("persona", session.persona)
     with trace.use_span(span, end_on_exit=True):
         try:
-            completed = await _execute_turn(app, session, turn)
+            completed = await _execute_turn(app, session, turn, ctx)
         except Exception as exc:
             logger.exception("Graph run failed for turn %s", turn.id)
             span.record_exception(exc)
             span.set_status(Status(StatusCode.ERROR))
-            set_live_event_sink(None)
             await turn_store.add_events(turn.id, [{
                 "event": "error",
                 "payload": {"code": "internal", "message": INTERNAL_ERROR_MESSAGE,
@@ -75,13 +73,12 @@ async def _run_graph(app, session, turn: Turn) -> None:  # type: ignore[no-untyp
             return
 
     if completed:
-        await _after_completed_turn(session, turn, turn_store)
+        await _after_completed_turn(app, session, turn, turn_store)
 
 
-async def _execute_turn(app, session, turn: Turn) -> bool:  # type: ignore[no-untyped-def]
+async def _execute_turn(app, session, turn: Turn, ctx: AuthContext) -> bool:  # type: ignore[no-untyped-def]
     """Run the graph and set the turn status. Returns False if a guardrail halted the turn."""
     from engine.graph.builder import build_graph
-    from engine.graph.dispatch import set_live_event_sink
 
     turn_store = app.state.turn_store
     compiled = build_graph().compile()
@@ -143,11 +140,19 @@ async def _execute_turn(app, session, turn: Turn) -> bool:  # type: ignore[no-un
     if lifecycle_context:
         effective_message = f"[SYSTEM CONTEXT — not visible to student]\n{lifecycle_context}[END SYSTEM CONTEXT]\n\n{turn.message}"
 
+    # Sub-agent events (and approval_request) go straight to the stream; per turn, because
+    # a turn suspended on an approval overlaps other turns.
+    async def live_sink(event: dict[str, Any]) -> None:
+        await turn_store.add_events(turn.id, [event])
+
     initial_state = {
         "session_id": session.id,
         "turn_id": turn.id,
         "persona": session.persona,
         "person_id": session.person_id or "",
+        "requester": {"display_name": session.requester_name, "active_role": session.persona},
+        "auth": ctx,
+        "tool_gateway": app.state.tool_gateway,
         "course_id": session.course_id,
         "conversation": conversation,
         "current_message": effective_message,
@@ -165,13 +170,9 @@ async def _execute_turn(app, session, turn: Turn) -> bool:  # type: ignore[no-un
         "turn_error": None,
         "events_emitted": [],
         "needs_clarification": False,
+        "event_sink": live_sink,
     }
 
-    # Set up real-time event streaming from sub-agents
-    async def live_sink(event: dict[str, Any]) -> None:
-        await turn_store.add_events(turn.id, [event])
-
-    set_live_event_sink(live_sink)
     last_event_count = 0
     final_state: dict[str, Any] = initial_state
 
@@ -185,7 +186,8 @@ async def _execute_turn(app, session, turn: Turn) -> bool:  # type: ignore[no-un
                 await turn_store.add_events(turn.id, new_events)
                 last_event_count = len(events)
 
-    set_live_event_sink(None)  # Clean up
+    await turn_store.record_usage(
+        turn.id, float(final_state.get("cost_usd") or 0.0), int(final_state.get("tokens") or 0))
 
     # Events are stored before the status flips so the stream drains them before closing.
     turn_error = final_state.get("turn_error")
@@ -199,7 +201,7 @@ async def _execute_turn(app, session, turn: Turn) -> bool:  # type: ignore[no-un
     return True
 
 
-async def _after_completed_turn(session, turn: Turn, turn_store) -> None:  # type: ignore[no-untyped-def]
+async def _after_completed_turn(app, session, turn: Turn, turn_store) -> None:  # type: ignore[no-untyped-def]
     """Persist the exchange and trigger post-session analysis; failures are logged, not raised."""
     # Persist conversation turns to database for cross-session continuity
     if session.person_id and session.course_id and turn.message != "__brief__":
@@ -236,11 +238,12 @@ async def _after_completed_turn(session, turn: Turn, turn_store) -> None:  # typ
         if any(phrase in turn.message.lower() for phrase in end_phrases):
             try:
                 from engine.analyst import run_session_analysis
-                asyncio.create_task(run_session_analysis(
+                spawn(app.state.background_tasks, run_session_analysis(
                     session_id=session.id,
                     person_id=session.person_id,
                     course_id=session.course_id,
-                ))
+                    background_tasks=app.state.background_tasks,
+                ), name=f"analysis-{session.id}")
                 logger.info("Learning analyst triggered for session %s", session.id)
             except Exception:
                 logger.warning("Failed to trigger learning analyst", exc_info=True)

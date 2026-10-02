@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any, Protocol
 
+from engine.guardrails.injection import INJECTION_GUARDRAIL_INSTRUCTION, guard_prompt_data
 from engine.http import make_anthropic_client
 
 logger = logging.getLogger(__name__)
@@ -17,6 +19,45 @@ _MCP_SERVERS = {
     "content": "http://mcp-content:7001",
     "sis": "http://mcp-sis:7005",
 }
+
+
+@dataclass(frozen=True)
+class BriefScope:
+    """What the requester may see, resolved by the caller from their AuthContext.
+
+    `course_ids` None means every course. `advisee_ids` None means no student filter.
+    """
+
+    course_ids: frozenset[str] | None = None
+    advisee_ids: frozenset[str] | None = None
+    advisor_count: int = 0
+
+
+_UNSCOPED = BriefScope()
+
+ALL_PAGES = frozenset(
+    {"content", "gradebook", "roster", "calendar", "analytics", "courses", "mastery"}
+)
+# Pages listing other learners individually are kept from students (gradebook shows only
+# their own row) and from program leads, who see aggregates only (spec.md §17).
+_PAGES_BY_ROLE: dict[str, frozenset[str]] = {
+    "student": frozenset({"content", "calendar", "mastery", "courses", "gradebook"}),
+    "program_lead": frozenset({"content", "calendar", "mastery", "courses"}),
+    "faculty": ALL_PAGES,
+    "advisor": ALL_PAGES,
+    "admin": ALL_PAGES,
+}
+
+
+def page_allowed(role: str, page: str) -> bool:
+    """False for a known page the role may not see; unknown pages carry no data."""
+    return page not in ALL_PAGES or page in _PAGES_BY_ROLE.get(role, frozenset())
+
+
+def _only_advisees(students: list[dict[str, Any]], scope: BriefScope) -> list[dict[str, Any]]:
+    if scope.advisee_ids is None:
+        return students
+    return [s for s in students if s.get("id") in scope.advisee_ids]
 
 
 async def _discover_courses() -> list[dict[str, str]]:
@@ -57,7 +98,9 @@ Do NOT use emojis excessively — one or two is fine.
 class BriefGatherer(Protocol):
     """Protocol for persona-specific data gathering."""
 
-    async def gather(self, person_id: str, course_id: str) -> dict[str, Any]: ...
+    async def gather(
+        self, person_id: str, course_id: str, scope: BriefScope = _UNSCOPED
+    ) -> dict[str, Any]: ...
 
     def build_card(self, raw_data: dict[str, Any]) -> dict[str, Any]: ...
 
@@ -87,7 +130,9 @@ async def _call_mcp(server: str, tool: str, args: dict[str, Any]) -> dict[str, A
 class StudentBriefGatherer:
     """Gathers brief data for a student persona."""
 
-    async def gather(self, person_id: str, course_id: str) -> dict[str, Any]:
+    async def gather(
+        self, person_id: str, course_id: str, scope: BriefScope = _UNSCOPED
+    ) -> dict[str, Any]:
         student_ctx = await _call_mcp(
             "roster", "roster.get_student_context",
             {"person_id": person_id, "course_id": course_id},
@@ -191,7 +236,9 @@ class StudentBriefGatherer:
 class FacultyBriefGatherer:
     """Gathers brief data for a faculty persona."""
 
-    async def gather(self, person_id: str, course_id: str) -> dict[str, Any]:
+    async def gather(
+        self, person_id: str, course_id: str, scope: BriefScope = _UNSCOPED
+    ) -> dict[str, Any]:
         roster = await _call_mcp(
             "roster", "roster.list_by_course",
             {"course_id": course_id},
@@ -300,11 +347,18 @@ class FacultyBriefGatherer:
 
 
 class AdvisorBriefGatherer:
-    """Gathers brief data for an advisor — focuses on student risk and performance."""
+    """Gathers brief data for an advisor — focuses on student risk and performance.
 
-    async def gather(self, person_id: str, course_id: str) -> dict[str, Any]:
+    Only assigned students count, and "all" means courses containing one of them.
+    """
+
+    async def gather(
+        self, person_id: str, course_id: str, scope: BriefScope = _UNSCOPED
+    ) -> dict[str, Any]:
         if course_id == "all":
             courses = await _discover_courses()
+            if scope.course_ids is not None:
+                courses = [c for c in courses if c["id"] in scope.course_ids]
             course_ids = [c["id"] for c in courses]
             course_name_map = {c["id"]: c["title"] for c in courses}
         else:
@@ -319,7 +373,9 @@ class AdvisorBriefGatherer:
         for cid in course_ids:
             roster = await _call_mcp("roster", "roster.list_by_course", {"course_id": cid})
             persons = roster.get("persons", [])
-            students = [p for p in persons if p.get("role") == "student"]
+            students = _only_advisees(
+                [p for p in persons if p.get("role") == "student"], scope
+            )
             faculty = [p for p in persons if p.get("role") == "faculty"]
             total_faculty.update(f.get("display_name", "") for f in faculty)
 
@@ -419,7 +475,9 @@ class AdvisorBriefGatherer:
 class AdminBriefGatherer:
     """Gathers brief data for an admin — platform/course health overview."""
 
-    async def gather(self, person_id: str, course_id: str) -> dict[str, Any]:
+    async def gather(
+        self, person_id: str, course_id: str, scope: BriefScope = _UNSCOPED
+    ) -> dict[str, Any]:
         if course_id == "all":
             courses = await _discover_courses()
             course_ids = [c["id"] for c in courses]
@@ -431,7 +489,7 @@ class AdminBriefGatherer:
         course_details: list[dict[str, Any]] = []
         all_faculty: dict[str, dict[str, Any]] = {}
         total_students = 0
-        total_advisors = 0
+        total_advisors = scope.advisor_count
         total_evidence = 0
         all_scores: list[float] = []
 
@@ -442,11 +500,9 @@ class AdminBriefGatherer:
             persons = roster.get("persons", [])
             students = [p for p in persons if p.get("role") == "student"]
             faculty = [p for p in persons if p.get("role") == "faculty"]
-            advisors = [p for p in persons if p.get("role") == "advisor"]
             module_list = modules.get("modules", [])
 
             total_students += len(students)
-            total_advisors = max(total_advisors, len(advisors))
 
             for f in faculty:
                 fid = f.get("id", "")
@@ -582,10 +638,13 @@ class BriefGenerator:
         turn_id: str,
         turn_store: Any,
         page: str | None = None,
+        scope: BriefScope = _UNSCOPED,
     ) -> None:
         # If a page-specific brief is requested, route to page gatherer
         if page:
-            await self._generate_page_brief(page, persona, person_id, course_id, turn_id, turn_store)
+            await self._generate_page_brief(
+                page, persona, person_id, course_id, turn_id, turn_store, scope
+            )
             return
 
         gatherer = self._gatherers.get(persona)
@@ -605,7 +664,7 @@ class BriefGenerator:
             return
 
         try:
-            raw_data = await gatherer.gather(person_id, course_id)
+            raw_data = await gatherer.gather(person_id, course_id, scope)
             card = gatherer.build_card(raw_data)
 
             chat_msg = await self._coaching_message(persona, raw_data)
@@ -642,21 +701,24 @@ class BriefGenerator:
 
     async def _generate_page_brief(
         self, page: str, persona: str, person_id: str, course_id: str, turn_id: str, turn_store: Any,
+        scope: BriefScope = _UNSCOPED,
     ) -> None:
         """Generate structured data for a specific Ultra UI page."""
         try:
-            if page == "content":
+            if not page_allowed(persona, page):
+                data = {"error": f"The {page} page is not available to this role."}
+            elif page == "content":
                 data = await self._page_content(course_id)
             elif page == "gradebook":
-                data = await self._page_gradebook(persona, person_id, course_id)
+                data = await self._page_gradebook(persona, person_id, course_id, scope)
             elif page == "roster":
-                data = await self._page_roster(persona, person_id, course_id)
+                data = await self._page_roster(persona, person_id, course_id, scope)
             elif page == "calendar":
                 data = await self._page_calendar(course_id)
             elif page == "analytics":
-                data = await self._page_analytics(person_id, course_id)
+                data = await self._page_analytics(person_id, course_id, scope)
             elif page == "courses":
-                data = await self._page_courses()
+                data = await self._page_courses(scope)
             elif page == "mastery":
                 data = await self._page_mastery(person_id, course_id)
             else:
@@ -683,9 +745,11 @@ class BriefGenerator:
             ])
             await turn_store.update_status(turn_id, "completed")
 
-    async def _page_courses(self) -> dict[str, Any]:
-        """Course list page data."""
+    async def _page_courses(self, scope: BriefScope = _UNSCOPED) -> dict[str, Any]:
+        """Course list page data, limited to the requester's courses."""
         courses = await _discover_courses()
+        if scope.course_ids is not None:
+            courses = [c for c in courses if c["id"] in scope.course_ids]
         result = []
         for c in courses:
             roster = await _call_mcp("roster", "roster.list_by_course", {"course_id": c["id"]})
@@ -732,7 +796,9 @@ class BriefGenerator:
             "faculty": [{"name": f.get("display_name", ""), "id": f.get("id", "")} for f in faculty],
         }
 
-    async def _page_gradebook(self, persona: str, person_id: str, course_id: str) -> dict[str, Any]:
+    async def _page_gradebook(
+        self, persona: str, person_id: str, course_id: str, scope: BriefScope = _UNSCOPED
+    ) -> dict[str, Any]:
         """Gradebook page: assignments + student grades. Students see only their own data."""
         if persona == "student":
             # Student view — only their own grades
@@ -743,10 +809,12 @@ class BriefGenerator:
                 students_to_query[0]["display_name"] = student_info.get("display_name", "")
                 students_to_query[0]["email"] = student_info.get("email", "")
         else:
-            # Faculty/advisor/admin — all students
+            # Faculty/admin: all students; advisor: assigned students only
             roster = await _call_mcp("roster", "roster.list_by_course", {"course_id": course_id})
             persons = roster.get("persons", [])
-            students_to_query = [p for p in persons if p.get("role") == "student"]
+            students_to_query = _only_advisees(
+                [p for p in persons if p.get("role") == "student"], scope
+            )
 
         # Get evidence for each student
         student_grades = []
@@ -789,10 +857,17 @@ class BriefGenerator:
             "totalStudents": len(students_to_query),
         }
 
-    async def _page_roster(self, persona: str, person_id: str, course_id: str) -> dict[str, Any]:
+    async def _page_roster(
+        self, persona: str, person_id: str, course_id: str, scope: BriefScope = _UNSCOPED
+    ) -> dict[str, Any]:
         """Roster page: students with scores and attributes. Students see limited view."""
         roster = await _call_mcp("roster", "roster.list_by_course", {"course_id": course_id})
         persons = roster.get("persons", [])
+        if scope.advisee_ids is not None:
+            persons = [
+                p for p in persons
+                if p.get("role") != "student" or p.get("id") in scope.advisee_ids
+            ]
 
         # Students see everyone but without other students' grades (grades stripped below)
         hide_other_grades = persona == "student"
@@ -848,11 +923,13 @@ class BriefGenerator:
             "modules": modules.get("modules", []),
         }
 
-    async def _page_analytics(self, person_id: str, course_id: str) -> dict[str, Any]:
+    async def _page_analytics(
+        self, person_id: str, course_id: str, scope: BriefScope = _UNSCOPED
+    ) -> dict[str, Any]:
         """Analytics page: course activity data."""
         roster = await _call_mcp("roster", "roster.list_by_course", {"course_id": course_id})
         persons = roster.get("persons", [])
-        students = [p for p in persons if p.get("role") == "student"]
+        students = _only_advisees([p for p in persons if p.get("role") == "student"], scope)
 
         analytics = []
         for student in students:
@@ -886,13 +963,15 @@ class BriefGenerator:
 
     async def _coaching_message(self, persona: str, raw_data: dict[str, Any]) -> str:
         system = _COACHING_PROMPTS.get(persona, _COACHING_PROMPTS["student"])
+        system += INJECTION_GUARDRAIL_INSTRUCTION
         try:
             response = await self._client.messages.create(
                 model="claude-sonnet-4-6",
                 system=system,
                 messages=[{
                     "role": "user",
-                    "content": f"Data:\n{json.dumps(raw_data, indent=2, default=str)}",
+                    "content": "Data:\n" + guard_prompt_data(raw_data, "brief_data",
+                                                             keep_names=True),
                 }],
                 max_tokens=300,
             )
