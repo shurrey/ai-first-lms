@@ -21,6 +21,9 @@ class AgentManifest(BaseModel):
     inputs: dict[str, Any] = Field(default_factory=dict)
     outputs: dict[str, Any] = Field(default_factory=dict)
     mcp_tools: list[str] = Field(default_factory=list)
+    # Approved by a contract change but not yet served; never offered to the model.
+    planned_mcp_tools: list[str] = Field(default_factory=list)
+    status: str = "live"  # "planned" agents are not routable until implemented
     composable_with: list[str] = Field(default_factory=list)
     requires_human_approval: bool = False
     example_queries: list[str] = Field(default_factory=list)

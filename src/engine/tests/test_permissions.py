@@ -79,3 +79,16 @@ def test_allowed_tools_returns_set(matrix):
     tools = matrix.allowed_tools("faculty")
     assert isinstance(tools, set)
     assert "assessments.commit_grade" in tools
+
+
+def test_planned_agent_gets_no_permissions():
+    from engine.manifests import AgentManifest, ManifestRegistry
+
+    registry = ManifestRegistry([
+        AgentManifest(name="live", persona_scope=["faculty"]),
+        AgentManifest(name="soon", persona_scope=["faculty"], status="planned"),
+    ])
+    matrix = PermissionMatrix.from_registry(registry)
+
+    assert matrix.check_agent("faculty", "live").allowed
+    assert not matrix.check_agent("faculty", "soon").allowed
