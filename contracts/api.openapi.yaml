@@ -162,6 +162,12 @@ paths:
         - sessionCookie: []
           csrfHeader: []
       x-required-capability: authenticated
+      description: |
+        A missing, expired or revoked session also returns 204 with both
+        cookies cleared. A live session still needs a matching X-CSRF-Token
+        (403 otherwise).
+
+        Change: T-C-109 — documents the no-session 204; no behavior change.
       responses:
         "204":
           description: Session revoked; `lms_session` and `lms_csrf` cleared with Max-Age=0.
@@ -235,6 +241,14 @@ paths:
       description: |
         Clears `credentials.must_change`. Other sessions of the same person are
         revoked; the calling session stays valid.
+
+        Wrong current passwords count toward LOGIN_MAX_ATTEMPTS, shared with
+        /api/auth/login. The attempt that trips the lockout revokes the calling
+        session and returns 401 with both cookies cleared. While the account is
+        locked, further attempts return 400.
+
+        Change: T-C-109 — documents attempt counting and the 401 on the
+        lock-tripping attempt; no status code, schema or behavior change.
       requestBody:
         required: true
         content:
@@ -248,7 +262,7 @@ paths:
       responses:
         "204": {description: Password changed}
         "400":
-          description: current_password is wrong.
+          description: current_password is wrong, or the account is locked. Wrong current passwords count toward LOGIN_MAX_ATTEMPTS.
           content:
             application/json:
               schema: {$ref: "#/components/schemas/ErrorDetail"}
@@ -1214,7 +1228,6 @@ paths:
       tags: [provenance]
       summary: '"What the platform generated" log, newest first'
       operationId: listAiActions
-      x-implementation-status: planned
       x-task: T-E-112
       x-required-capability: ai_actions_log
       x-scope-check: |
@@ -1222,6 +1235,11 @@ paths:
         (subject_person_id forced to self); faculty = own courses;
         program_lead = program courses; advisor = about assigned students;
         admin = all.
+        Student and advisor views also leave out feedback that has not
+        reached the learner: a grade_draft appears only once its grade is
+        committed, criterion_feedback only once released, a rejected one never,
+        and decisions carry no diff or reason. GET /api/ai-actions/{id}
+        answers 404 for an item left out. Change: T-C-115.
       security:
         - sessionCookie: []
       parameters:
@@ -1272,7 +1290,6 @@ paths:
       tags: [provenance]
       summary: One generated artifact's provenance (target of the "AI-generated · sources" label)
       operationId: getAiAction
-      x-implementation-status: planned
       x-task: T-E-112
       x-required-capability: ai_actions_log
       x-scope-check: same scope rules as GET /api/ai-actions
@@ -1295,7 +1312,6 @@ paths:
       tags: [provenance]
       summary: Record a person's decision on a generated item (Start / Snooze / Not helpful / dismiss alert)
       operationId: recordHumanDecision
-      x-implementation-status: planned
       x-task: T-E-110
       x-required-capability: authenticated
       x-scope-check: |
@@ -1320,7 +1336,10 @@ paths:
                   type: string
                   enum: [accepted, dismissed, snoozed]
                   description: Start / acted on = accepted; Not helpful / dismiss = dismissed.
-                reason: {type: [string, "null"]}
+                reason:
+                  type: [string, "null"]
+                  maxLength: 2000
+                  description: "Longer reasons are refused with 422. Change: T-C-115."
                 snooze_until: {type: [string, "null"], format: date-time}
       responses:
         "201":
@@ -1342,7 +1361,6 @@ paths:
       tags: [measurement]
       summary: AI Review metrics for one course
       operationId: getCourseMeasurement
-      x-implementation-status: planned
       x-task: T-E-112
       x-required-capability: ai_review
       x-scope-check: faculty of the course, program_lead of a program containing it, or admin
@@ -1367,7 +1385,6 @@ paths:
       tags: [measurement]
       summary: Program- or institution-level rollup of AI Review metrics
       operationId: getMeasurementRollup
-      x-implementation-status: planned
       x-task: T-E-112
       x-required-capability: ai_review
       x-scope-check: program_lead of program_id, or admin (program_id omitted = institution, admin only)
@@ -1393,7 +1410,6 @@ paths:
       tags: [measurement]
       summary: Export ai_actions, human_decisions and outcome_links for a course and date range
       operationId: exportMeasurement
-      x-implementation-status: planned
       x-task: T-E-112
       x-required-capability: ai_review
       x-scope-check: same as GET /api/measurement/courses/{course_id}

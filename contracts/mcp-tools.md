@@ -6,7 +6,8 @@ Each tool has:
 - **Server / port**: the MCP server that serves it (SSE transport at `http://mcp-<server>:<port>/sse`).
 - **Mutates**: whether it changes state.
 - **Requires approval**: when true the orchestrator must emit `approval_request` and wait for `POST /api/approval` before committing. For served tools this is the server's `requires_approval` flag, except where a `Change:` line records a Round 2 value the gateway enforces before the server flag catches up.
-- **Allowed roles**: the union of (a) `persona_scope` of every agent whose `mcp_tools` in `agent-manifests.yaml` includes the tool and (b) the personas whose UI calls an engine endpoint that invokes the tool directly. For (b) the engine endpoint's own authorization applies (spec.md §4.4, since T-E-103). The tool gateway enforces this line for agent calls (spec.md §5.2 step 2, live since T-E-106). `Change:` lines and every planned tool use the spec.md §17 access matrix instead; a qualifier in parentheses describes the scope rule. The gateway enforces it only through the arguments it scope-checks (`person_id`, `student_id`, `course_id`, and the same keys inside `scope`; spec.md §4.5); a tool keyed only by another id (`submission_id`, `session_id`, ...) gets no object-level check yet.
+- **Allowed roles**: the union of (a) `persona_scope` of every agent whose `mcp_tools` in `agent-manifests.yaml` includes the tool and (b) the personas whose UI calls an engine endpoint that invokes the tool directly. For (b) the engine endpoint's own authorization applies (spec.md §4.4, since T-E-103). The tool gateway enforces this line for agent calls (spec.md §5.2 step 2, live since T-E-106). `Change:` lines and every planned tool use the spec.md §17 access matrix instead; a qualifier in parentheses describes the scope rule. The gateway enforces it only through the arguments it scope-checks (`person_id`, `student_id`, `course_id`, and the same keys inside `scope`; spec.md §4.5); The gateway also resolves these ids to an owner or course and scope-checks them: `submission_id` (`get_submission`, `draft_grade`), `grade_id` / `draft_id` (`commit_grade`, `send_message`, through the drafting turn), `pending_id` (`approve_credential`, `get_credential_evidence`), `session_id`, `concept_id` (`content.save_skill`), `node_id` (`content.save_draft`), `bank_id` (`create_question`), the `communications.draft_message` audience, and every `analytics.*` scope. These ids must be top-level arguments.
+- Change: T-C-109 — documents the gateway's object-level checks (Phase 0 security pass); no role or behavior change.
 - **Change** (Round 2 only): a metadata change approved by a `T-C-*` task, the task that enforces it, and whether the server already matches.
 - **Reached by**: the agents and engine call sites behind those roles. "Engine-internal" means the engine calls the tool itself with no user request in the loop.
 - **Input**: the server's JSON Schema, simplified (`?` marks optional properties).
@@ -59,7 +60,8 @@ Also hosts `graph.*`; the engine routes those prefixes here (see Routing).
 - Reached by: agents `course_architect`, `content_generator`
 - Input: `{ node_id?: string, kind: string, title: string, body_md: string, author_id: string }`
 - Output: `{ draft_id }`
-- Notes: Inserts a `content_items` row with `is_draft = true`. The gateway forces `author_id` to the requester. `node_id` and `kind` are free, and `content.get_skill` and `content.retrieve` do not filter out drafts, so a draft with `kind = 'skill'` on a concept can replace what every tutor session on it reads.
+- Notes: Inserts a `content_items` row with `is_draft = true`. The gateway forces `author_id` to the requester. `node_id` and `kind` are free, and `content.get_skill` and `content.retrieve` do not filter out drafts, so a draft with `kind = 'skill'` on a concept can replace what every tutor session on it reads. When `node_id` is set, the gateway requires a course the caller may act in: the node itself as a course, or its `part_of` chain (concept or skill, module, course).
+- Change: T-C-109 — notes the gateway's `node_id` scope check; no role or behavior change.
 - Change: T-C-107 — removes `advisor` and `student`: §17 gives neither write access to course content (a student's study aids go through `content.generate_flashcards`). Enforced by the gateway now (it reads this line). Approval unchanged (`false`, matches the server).
 
 ### `content.library_search`
@@ -272,7 +274,8 @@ Also hosts `graph.*`; the engine routes those prefixes here (see Routing).
 - Reached by: agents `learning_analyst`; engine-internal `engine/analyst.py` (background, student sessions)
 - Input: `{ person_id: string, concept_id: string, session_id?: string, outcome: "recalled" | "struggled" | "failed" }`
 - Output: `{ saved: true }`
-- Notes: `concept_id` may be a UUID or a concept title. Upserts on (person, concept, session).
+- Notes: `concept_id` may be a UUID or a concept title. Upserts on (person, concept, session). For a `student` caller the gateway overwrites `session_id` with the caller's current session, and refuses the call when there is none.
+- Change: T-C-109 — notes the gateway's session binding for students; no role or behavior change.
 
 ### `roster.get_review_candidates`
 - Server: `roster` (port 7002)
@@ -413,7 +416,8 @@ Also hosts `attestations.*`; the engine routes those prefixes here (see Routing)
 - Reached by: agents `tutor`
 - Input: `{ person_id: string, node_id: string, level: "emerging" | "proficient" | "mastery", issuer_id?: string, session_id?: string }`
 - Output: `{ attestation_id, level, created: true }` or `{ attestation_id, level, updated: true, previous_level }`, plus `downgraded`, `reason` and `credentials_pending: [{ microcredential_id, title }]` when they apply
-- Notes: `node_id` may be a UUID or a concept title. `mastery` without a prior attestation from a different session is stored as `proficient` (`downgraded: true`). Reaching `mastery` runs `assessments.check_pending_credentials` for the concept's course.
+- Notes: `node_id` may be a UUID or a concept title. `mastery` without a prior attestation from a different session is stored as `proficient` (`downgraded: true`). Reaching `mastery` runs `assessments.check_pending_credentials` for the concept's course. For a `student` caller the gateway overwrites `session_id` with the caller's current session, and refuses the call when there is none.
+- Change: T-C-109 — notes the gateway's session binding for students; no role or behavior change.
 
 ### `attestations.get_student_attestations`
 - Server: `assessments` (port 7003)
@@ -454,6 +458,8 @@ Also hosts `attestations.*`; the engine routes those prefixes here (see Routing)
 - Reached by: agents `assessment`; engine `GET /api/credential-evidence/{pending_id}` (faculty, advisor)
 - Input: `{ pending_id: string }`
 - Output: `{ pending_id, student_name, credential_title, created_at, session_count, concepts: [{ id, title, level, attested_at }] }`
+- Notes: The gateway resolves `pending_id` to its course and learner: the caller must be able to act in the course and view the learner (admins skip both checks). `instructional_designer` passes the role step but is refused at the scope step, since that role has no learner view.
+- Change: T-C-109 — documents the `pending_id` scope check, including that `instructional_designer` is refused there; the role stays listed (no role change). Whether designers get a course-staff learner rule is an open question.
 - Change: T-C-108 — added admin, program_lead (read-only) so personas reach the agents their job needs; object-level scope still applies.
 
 ### `assessments.approve_credential`
@@ -464,9 +470,10 @@ Also hosts `attestations.*`; the engine routes those prefixes here (see Routing)
 - Reached by: agents `assessment`; engine `POST /api/approve-credential/{pending_id}` (faculty, advisor); engine `POST /api/approve-credentials/bulk` (faculty, advisor)
 - Input: `{ pending_id: string, reviewer_id: string }`
 - Output: `{ approved: true, credential_id }`
-- Notes: Marks the pending row approved and stores an Open Badges 3.0 JSON-LD credential (unsigned) in `issued_credentials`.
+- Notes: Marks the pending row approved and stores an Open Badges 3.0 JSON-LD credential (unsigned) in `issued_credentials`. The gateway resolves `pending_id` to its course and refuses anyone but faculty of that course or an admin, as `POST /api/approve-credential` does.
 - Change: T-C-105 — `requires_approval` false → true (spec.md §5.3); enforced by the gateway from T-E-107, and the server flag matches. §17 limits badge approval to faculty of the course; narrowing the `advisor` and `instructional_designer` roles is an open question.
 - Change: T-C-108 — roles are course faculty and admin (an admin can approve when the instructor is unavailable, decided 2026-10-02); advisor and instructional_designer removed. Matches the REST endpoint and the gateway's object-level check.
+- Change: T-C-109 — notes the gateway's `pending_id` course check; no role or behavior change.
 
 ### `assessments.list_issued_credentials`
 - Server: `assessments` (port 7003)
@@ -511,7 +518,8 @@ Also hosts `attestations.*`; the engine routes those prefixes here (see Routing)
 - Reached by: agents `early_alert`, `engagement_analyst`
 - Input: `{ scope: object, metric: string, window: object, breakdown?: string, filters?: object }`
 - Output: `{ rows: [{ value, sample_size, dimension? }], metadata: { metric, scope, window } }`
-- Notes: `metric`: `evidence_count`, `avg_score`, `engagement_count` (evidence table) or `mastery_rate` (attestations). `scope`: `{ course_id?, person_id? }`; `window`: `{ start?, end? }` ISO-8601 (ignored by `mastery_rate`); `filters`: `{ kind?, node_id? }`. `breakdown` is whitelisted per metric: evidence metrics allow `kind`, `node_id`, `person_id`, `source`; `mastery_rate` allows `issuer_id`, `level`, `node_id`, `person_id`. Anything else returns `{ error, code: "validation_error", rows: [], metadata }` without querying. An unknown metric returns `{ rows: [], metadata: { error } }`.
+- Notes: `metric`: `evidence_count`, `avg_score`, `engagement_count` (evidence table) or `mastery_rate` (attestations). `scope`: `{ course_id?, person_id? }`; `window`: `{ start?, end? }` ISO-8601 (ignored by `mastery_rate`); `filters`: `{ kind?, node_id? }`. `breakdown` is whitelisted per metric: evidence metrics allow `kind`, `node_id`, `person_id`, `source`; `mastery_rate` allows `issuer_id`, `level`, `node_id`, `person_id`. Anything else returns `{ error, code: "validation_error", rows: [], metadata }` without querying. An unknown metric returns `{ rows: [], metadata: { error } }`. For non-admin callers the gateway refuses unbounded scopes. Every scope the server filters by (the top-level scope, or each cohort scope merged over it) must name a course the caller can act in for faculty and program leads, and an advisee `person_id` for advisors. A course alone is refused for advisors; a learner alone is refused for faculty and program leads.
+- Change: T-C-109 — documents the gateway's analytics scope check; no role or behavior change.
 - Change: T-C-108 — added program_lead (read-only) so personas reach the agents their job needs; object-level scope still applies.
 
 ### `analytics.describe_schema`
@@ -532,7 +540,8 @@ Also hosts `attestations.*`; the engine routes those prefixes here (see Routing)
 - Reached by: agents `early_alert`, `engagement_analyst`
 - Input: `{ scope: object, metric: string, window: object, interval: string }`
 - Output: `{ series: [{ x, y }] }`
-- Notes: `interval`: `hour`, `day`, `week` or `month` (anything else is treated as `day`). `mastery_rate` falls back to `evidence_count`.
+- Notes: `interval`: `hour`, `day`, `week` or `month` (anything else is treated as `day`). `mastery_rate` falls back to `evidence_count`. For non-admin callers the gateway refuses unbounded scopes. Every scope the server filters by (the top-level scope, or each cohort scope merged over it) must name a course the caller can act in for faculty and program leads, and an advisee `person_id` for advisors. A course alone is refused for advisors; a learner alone is refused for faculty and program leads.
+- Change: T-C-109 — documents the gateway's analytics scope check; no role or behavior change.
 - Change: T-C-108 — added program_lead (read-only) so personas reach the agents their job needs; object-level scope still applies.
 
 ### `analytics.cohort_compare`
@@ -543,7 +552,8 @@ Also hosts `attestations.*`; the engine routes those prefixes here (see Routing)
 - Reached by: agents `early_alert`, `engagement_analyst`
 - Input: `{ scope: object, cohorts: object[], metric: string, window: object }`
 - Output: `{ cohort_results: [{ cohort, value, sample_size }] }`
-- Notes: Each cohort is `{ label, scope }`, merged over the top-level `scope`. `mastery_rate` falls back to `evidence_count`.
+- Notes: Each cohort is `{ label, scope }`, merged over the top-level `scope`. `mastery_rate` falls back to `evidence_count`. For non-admin callers the gateway refuses unbounded scopes. Every scope the server filters by (the top-level scope, or each cohort scope merged over it) must name a course the caller can act in for faculty and program leads, and an advisee `person_id` for advisors. A course alone is refused for advisors; a learner alone is refused for faculty and program leads.
+- Change: T-C-109 — documents the gateway's analytics scope check; no role or behavior change.
 - Change: T-C-108 — added program_lead (read-only) so personas reach the agents their job needs; object-level scope still applies.
 
 ### `analytics.render_chart`
