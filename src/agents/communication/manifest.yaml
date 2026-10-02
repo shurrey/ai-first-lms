@@ -55,5 +55,8 @@ agent:
   mcp_tools:
   - roster.list_by_course
   - roster.get_student_context
+  planned_mcp_tools:
+  - communications.draft_message
+  - communications.send_message
   composable_with: []
   requires_human_approval: true

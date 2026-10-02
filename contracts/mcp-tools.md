@@ -1,12 +1,13 @@
 # MCP Tools Contract
 
-Every tool the seven MCP servers expose today, read from each server's `get_tools()` in `src/data_mcp/mcp_servers/<server>/tools.py`. DO NOT EDIT without a `T-C-*` contract-change task. `src/platform/ci/scripts/check_contracts.py` fails if a server tool is missing here or a tool in the main sections is not served.
+Every tool the seven MCP servers expose today, read from each server's `get_tools()` in `src/data_mcp/mcp_servers/<server>/tools.py`, followed by tools approved for Round 2 but not yet built. DO NOT EDIT without a `T-C-*` contract-change task. `src/platform/ci/scripts/check_contracts.py` fails if a server tool is missing here or a tool in the server sections is not served. Tools in the Planned section near the end are not served; each moves into its server section in the task that implements it.
 
 Each tool has:
 - **Server / port**: the MCP server that serves it (SSE transport at `http://mcp-<server>:<port>/sse`).
 - **Mutates**: whether it changes state.
-- **Requires approval**: the server's `requires_approval` flag; when true the orchestrator must emit `approval_request` and wait for `POST /api/approval` before committing.
-- **Allowed roles**: the union of (a) `persona_scope` of every agent whose tool list (`_AGENT_TOOLS` in `src/engine/agents/runner.py`, mirrored in `agent-manifests.yaml`) includes the tool and (b) the personas whose UI calls an engine endpoint that invokes the tool directly. Nothing enforces (b) today: the engine endpoints are unauthenticated, so those roles describe which UI calls them, not a check.
+- **Requires approval**: when true the orchestrator must emit `approval_request` and wait for `POST /api/approval` before committing. For served tools this is the server's `requires_approval` flag, except where a `Change:` line records a Round 2 value the gateway enforces before the server flag catches up.
+- **Allowed roles**: the union of (a) `persona_scope` of every agent whose tool list (`_AGENT_TOOLS` in `src/engine/agents/runner.py`, mirrored in `agent-manifests.yaml`) includes the tool and (b) the personas whose UI calls an engine endpoint that invokes the tool directly. Nothing enforces (b) today: the engine endpoints are unauthenticated, so those roles describe which UI calls them, not a check. From T-E-106 the tool gateway enforces this line (spec.md §5.2 step 2). `Change:` lines and every planned tool use the spec.md §17 access matrix instead; a qualifier in parentheses is a scope rule the gateway applies after the role check (spec.md §4.5).
+- **Change** (Round 2 only): a metadata change approved by a `T-C-*` task, the task that enforces it, and whether the server already matches.
 - **Reached by**: the agents and engine call sites behind those roles. "Engine-internal" means the engine calls the tool itself with no user request in the loop.
 - **Input**: the server's JSON Schema, simplified (`?` marks optional properties).
 - **Output**: the JSON shape the handler returns on success. Every handler can instead return `{ error: string }`; argument validation failures add `code: "validation_error"`.
@@ -324,6 +325,7 @@ Also hosts `attestations.*`; the engine routes those prefixes here (see Routing)
 - Reached by: agents `assessment`
 - Input: `{ bank_id: string, type: string, stem: string, options?: object, answer_key: object, bloom_level?: string, difficulty?: string, aligned_nodes?: string[] }`
 - Output: `{ question_id }`
+- Change: T-C-105 — approval applies when `bank_id` is a live (student-facing) bank; practice items saved by `content.generate_practice` do not go through this tool and are not gated; enforced by the gateway from T-E-107. Server flag already `true` (unconditional), so it matches.
 
 ### `assessments.search_bank`
 - Server: `assessments` (port 7003)
@@ -339,19 +341,21 @@ Also hosts `attestations.*`; the engine routes those prefixes here (see Routing)
 - Server: `assessments` (port 7003)
 - Mutates: false
 - Requires approval: false
-- Allowed roles: `faculty`
+- Allowed roles: `faculty`, `student` (own submissions only)
 - Reached by: agents `grading_assistant`
 - Input: `{ submission_id: string }`
 - Output: `{ id, person_id, assignment_node, body_md, attachments, submitted_at }`
+- Change: T-C-105 — adds `student` (own submissions only) so the planned `feedback` agent can read the draft in a student session; enforced by the gateway from T-E-106. Approval unchanged (`false`, matches the server).
 
 ### `assessments.get_rubric`
 - Server: `assessments` (port 7003)
 - Mutates: false
 - Requires approval: false
-- Allowed roles: `faculty`, `instructional_designer`
+- Allowed roles: `faculty`, `instructional_designer`, `student` (rubrics of assignments in enrolled courses)
 - Reached by: agents `assessment`, `grading_assistant`
 - Input: `{ rubric_id: string }`
 - Output: `{ id, title, criteria }`
+- Change: T-C-105 — adds `student` (rubrics of assignments in enrolled courses) for the planned `feedback` agent; enforced by the gateway from T-E-106. Approval unchanged (`false`, matches the server).
 
 ### `assessments.draft_grade`
 - Server: `assessments` (port 7003)
@@ -371,7 +375,8 @@ Also hosts `attestations.*`; the engine routes those prefixes here (see Routing)
 - Reached by: agents `grading_assistant`
 - Input: `{ grade_id: string }`
 - Output: `{ committed: true, committed_at }`
-- Notes: Errors if the grade is already committed.
+- Notes: Errors if the grade is already committed. From T-E-114 it also errors unless every rubric criterion has an instructor `final_score` and `holistic_md` is non-empty (spec.md §7.4).
+- Change: T-C-105 — `requires_approval: true` is now enforced in the live path (spec.md §5.3); enforced by the gateway from T-E-107. Server flag already `true`, so it matches.
 
 ### `assessments.list_recent_evidence`
 - Server: `assessments` (port 7003)
@@ -434,12 +439,13 @@ Also hosts `attestations.*`; the engine routes those prefixes here (see Routing)
 ### `assessments.approve_credential`
 - Server: `assessments` (port 7003)
 - Mutates: true
-- Requires approval: false
+- Requires approval: true
 - Allowed roles: `faculty`, `instructional_designer`, `advisor`
 - Reached by: agents `assessment`; engine `POST /api/approve-credential/{pending_id}` (faculty, advisor); engine `POST /api/approve-credentials/bulk` (faculty, advisor)
 - Input: `{ pending_id: string, reviewer_id: string }`
 - Output: `{ approved: true, credential_id }`
 - Notes: Marks the pending row approved and stores an Open Badges 3.0 JSON-LD credential (unsigned) in `issued_credentials`.
+- Change: T-C-105 — `requires_approval` false → true (spec.md §5.3); enforced by the gateway from T-E-107. Server flag is still `false`: it does not match until the server is updated. §17 limits badge approval to faculty of the course; narrowing the `advisor` and `instructional_designer` roles is an open question.
 
 ### `assessments.list_issued_credentials`
 - Server: `assessments` (port 7003)
@@ -587,20 +593,23 @@ Also hosts `attestations.*`; the engine routes those prefixes here (see Routing)
 - Server: `communications` (port 7006)
 - Mutates: true
 - Requires approval: false
-- Allowed roles: none (no agent or engine caller today)
-- Reached by: nothing today
+- Allowed roles: `faculty`, `advisor`, `admin`
+- Reached by: nothing today; agent `communication` once its `planned_mcp_tools` go live
 - Input: `{ author_id: string, channel: string, audience: object | string, subject?: string, body_md: string, scheduled_for?: string }`
 - Output: `{ draft_id }`
 - Notes: Inserts a `messages` row with `is_draft = true`; `audience` may be an object or a JSON string.
+- Change: T-C-105 — Allowed roles none → `faculty`, `advisor`, `admin` (the `communication` agent's `persona_scope`); enforced by the gateway from T-E-106. Approval unchanged (`false`, matches the server).
 
 ### `communications.send_message`
 - Server: `communications` (port 7006)
 - Mutates: true
 - Requires approval: true
-- Allowed roles: none (no agent or engine caller today)
-- Reached by: nothing today
+- Allowed roles: `faculty`, `advisor`, `admin`
+- Reached by: nothing today; agent `communication` once its `planned_mcp_tools` go live
 - Input: `{ draft_id: string }`
 - Output: `{ sent_at, recipient_count }`
+- Notes: In-app only this round: from T-E-107 a draft whose `channel` is not `inbox` or `announcement` is refused (email delivery is deferred with other external calls, spec.md §0.4).
+- Change: T-C-105 — `requires_approval: true` is now enforced in the live path, and Allowed roles none → `faculty`, `advisor`, `admin` (spec.md §5.3); enforced by the gateway from T-E-107. Server flag already `true`, so it matches. Spec.md §5.3 calls this tool "new"; it is already served.
 
 ### `communications.list_templates`
 - Server: `communications` (port 7006)
@@ -658,6 +667,194 @@ Also hosts `attestations.*`; the engine routes those prefixes here (see Routing)
 
 ---
 
+## Planned (Round 2)
+
+Approved by T-C-105 (spec.md §18) and not served by any server yet. No manifest may list these in `mcp_tools`; agents that will use one list it in `planned_mcp_tools`. When a task implements a tool, it moves the entry into its server section and deletes the `Status` line.
+
+Rules that apply to every tool below:
+- **Identity arguments.** `person_id`, `student_id` and `requester_id` are overwritten or scope-checked by the gateway (spec.md §4.5). "(self)" in Allowed roles means the gateway forces the argument to the requester.
+- **No model calls in servers.** MCP servers do not call an LLM. Tools named `generate_*` or `propose_*` persist or assemble what the calling agent authored; they validate, align and store it.
+- **Approval.** `Requires approval: true` means a model-initiated call suspends for `approval_request` (spec.md §5.2 step 5). An engine endpoint that calls the tool on a person's explicit request records that person as `approved_by` (spec.md §5.3: "the agent never holds the final click").
+
+### `assessments.submit`
+- Server: `assessments` (port 7003)
+- Status: planned (T-D-104)
+- Mutates: true
+- Requires approval: false
+- Allowed roles: `student` (self)
+- Reached by: engine `/api/submissions/*` (T-C-102)
+- Input: `{ person_id: string, assignment_node: string, body_md: string, attachments?: object[], status: "draft" | "final", parent_id?: string }`
+- Output: `{ submission_id, version, status, parent_id, submitted_at }`
+- Notes: `version` is one more than the parent's. `parent_id` must be the same person's submission on the same assignment. A `draft` triggers the `feedback` agent (spec.md §7.3).
+
+### `assessments.list_submission_history`
+- Server: `assessments` (port 7003)
+- Status: planned (T-D-104)
+- Mutates: false
+- Requires approval: false
+- Allowed roles: `student` (self), `faculty` (own courses)
+- Reached by: planned agent `feedback`; engine `/api/submissions/*` (T-C-102)
+- Input: `{ person_id: string, assignment_node?: string, course_id?: string, limit?: integer }`
+- Output: `{ submissions: [{ id, assignment_node, version, status, parent_id, submitted_at, criteria: [{ criterion_id, key, ai_score, final_score, released_at }] }] }`
+- Notes: Newest first. Requires one of `assignment_node` / `course_id`. For `student`, `ai_score` is null on unreleased feedback.
+
+### `assessments.save_criterion_feedback`
+- Server: `assessments` (port 7003)
+- Status: planned (T-D-104)
+- Mutates: true
+- Requires approval: false
+- Allowed roles: `student` (own submissions, feedback agent only), `faculty` (own courses)
+- Reached by: planned agent `feedback`
+- Input: `{ submission_id: string, criteria: [{ criterion_id: string, ai_score: integer, ai_rationale: string, ai_evidence_spans: [{ quote: string, start?: integer, end?: integer }], next_step: string }] }`
+- Output: `{ saved: integer, criterion_score_ids: string[] }`
+- Notes: Writes only the `criterion_scores.ai_*` columns; never `final_score` or `released_at`, so saving is not releasing. Each `quote` must occur verbatim in the submission body or the call returns `{ error, code: "validation_error" }`. Upserts on `(submission_id, criterion_id)`.
+
+### `assessments.release_feedback`
+- Server: `assessments` (port 7003)
+- Status: planned (T-D-104)
+- Mutates: true
+- Requires approval: true
+- Allowed roles: `faculty` (own courses)
+- Reached by: engine `/api/feedback/*` (T-C-102, faculty Review Queue); engine-internal after `assessments.save_criterion_feedback` when `feedback.release_mode` resolves to `auto`
+- Input: `{ submission_id: string, decision?: "release" | "suppress", criterion_ids?: string[], edits?: [{ criterion_id: string, ai_score?: integer, ai_rationale?: string, next_step?: string }] }`
+- Output: `{ submission_id, decision, released: integer, released_at, edited: integer }`
+- Notes: `decision` defaults to `release`; `criterion_ids` defaults to every scored criterion. Sets `criterion_scores.released_at`. Edits are stored as diffs on the decision record (spec.md §7.9). The gate applies under `feedback.release_mode = instructor_release`; the gateway's policy step skips it under `auto` (spec.md §5.2 step 4). Spec.md §5.3 calls this `feedback.release`; that name is an alias for this tool and is not served.
+
+### `assessments.get_improvement`
+- Server: `assessments` (port 7003)
+- Status: planned (T-D-104)
+- Mutates: false
+- Requires approval: false
+- Allowed roles: `student` (self), `faculty` (own courses), `advisor` (assigned students, summary), `program_lead` (aggregate), `admin` (aggregate)
+- Reached by: engine `/api/improvement/*` (T-C-102)
+- Input: `{ course_id: string, student_id?: string }`
+- Output: `{ course_id, criteria: [{ criterion_id, key }], students: [{ student_id, trajectories: [{ criterion_id, points: [{ submission_id, version, status, score, at }], delta, flag: "plateaued" | "regressed" | "ready_for_summative" | null }] }] }`
+- Notes: `score` is `final_score` when committed, else the released `ai_score`. Practice evidence is never included (spec.md §12.5). For `program_lead` and `admin`, and for `advisor` in summary form, `students` is replaced by `distribution: [{ criterion_id, flag, count }]`.
+
+### `assessments.weaknesses`
+- Server: `assessments` (port 7003)
+- Status: planned (T-D-104)
+- Mutates: false
+- Requires approval: false
+- Allowed roles: `student` (self), `faculty` (own courses)
+- Reached by: engine-internal weakness detector (spec.md §7.3), which then invokes `content_generator`
+- Input: `{ student_id: string, course_id: string }`
+- Output: `{ weaknesses: [{ criterion_id, key, outcome_nodes: string[], below_target_count, window, last_scores: integer[] }] }`
+- Notes: Deterministic: a criterion below target on at least 2 of the last N submissions in the course, N from `feedback.weakness_window` (default 3). The engine passes the resolved N; the server does not read policy.
+
+### `assessments.propose_alignment`
+- Server: `assessments` (port 7003)
+- Status: planned (T-D-105)
+- Mutates: false
+- Requires approval: false
+- Allowed roles: `faculty` (own courses), `instructional_designer`
+- Reached by: agent `course_architect` (planned_mcp_tools)
+- Input: `{ assignment_node: string, max_outcomes?: integer }`
+- Output: `{ assignment_node, syllabus: { content_id, title, body_md } | null, candidate_outcomes: [{ node_id, title, score }], existing_criteria: [{ criterion_id, key, description, outcome_nodes }] }`
+- Notes: Returns the context for a proposal (syllabus content item, outcome nodes ranked by embedding similarity to the assignment); the agent drafts the 3–6 criteria. Accepting a proposal sets `rubric_criteria.outcome_nodes` through the engine endpoint that records the `human_decisions` row, not through this tool.
+
+### `attestations.override`
+- Server: `assessments` (port 7003)
+- Status: planned (T-D-112)
+- Mutates: true
+- Requires approval: true
+- Allowed roles: `faculty` (own courses)
+- Reached by: engine mastery-matrix "Adjust" endpoint (T-C-102)
+- Input: `{ attestation_id: string, new_level: "emerging" | "proficient" | "mastery", reason: string }`
+- Output: `{ attestation_id, overrides, level, previous_level }`
+- Notes: Never edits the original. Inserts a new attestation with `payload.overrides = <attestation_id>`; the engine writes the `human_decisions` row (`overridden`). `reason` must be non-empty.
+
+### `content.generate_practice`
+- Server: `content` (port 7001)
+- Status: planned (T-A-104)
+- Mutates: true
+- Requires approval: false
+- Allowed roles: `student` (self), `faculty` (own courses)
+- Reached by: agent `content_generator` (planned_mcp_tools), invoked after `assessments.weaknesses`
+- Input: `{ criterion_id: string, student_id: string, count: integer, items: [{ type: "mcq" | "short_answer" | "essay" | "code", stem: string, options?: object, answer_key: object, bloom_level: string, difficulty?: string }] }`
+- Output: `{ practice_set_id, question_ids: string[] }`
+- Notes: `count` is 3–5 and must equal `items.length`. Saves `questions` into the course's practice bank (not a live bank, so `assessments.create_question` approval does not apply). `aligned_nodes` is set server-side from the criterion's `outcome_nodes`, not taken from the caller. Attempts create `private` evidence (spec.md §12.5).
+
+### `content.generate_flashcards`
+- Server: `content` (port 7001)
+- Status: planned (T-A-107)
+- Mutates: true
+- Requires approval: false
+- Allowed roles: `student` (deck for self), `faculty` (own courses)
+- Reached by: agent `content_generator` (planned_mcp_tools); engine `/api/flashcards/*` (T-C-102)
+- Input: `{ content_item_id?: string, node_ids?: string[], count: integer, cards: [{ front: string, back: string, source_span: string, node_id: string }] }`
+- Output: `{ deck_id, card_count, source_title }`
+- Notes: Requires one of `content_item_id` / `node_ids`. Creates a `content_items` row of kind `flashcard_deck`. A student's deck is private to that student and not a draft; a faculty deck is a draft until `content.publish`. Sources outside the resolved `ai.content_sources` are rejected by the gateway's policy step.
+
+### `content.publish`
+- Server: `content` (port 7001)
+- Status: planned (no task in spec.md §19.3; enforcement under T-E-107)
+- Mutates: true
+- Requires approval: true
+- Allowed roles: `faculty` (own courses), `instructional_designer`
+- Reached by: agents `course_architect`, `content_generator` (planned_mcp_tools); engine content endpoints
+- Input: `{ content_id: string }`
+- Output: `{ content_id, published: true, published_at }`
+- Notes: Sets `content_items.is_draft = false` on a draft made by `content.save_draft` or `content.generate_flashcards`. Errors if the item is already published or is a student's private deck.
+
+### `graph.subgraph_for_outcomes`
+- Server: `content` (port 7001; `graph.*` routes here)
+- Status: planned (T-D-105)
+- Mutates: false
+- Requires approval: false
+- Allowed roles: `faculty`, `instructional_designer`
+- Reached by: agent `course_architect` (planned_mcp_tools)
+- Input: `{ outcome_ids: string[], depth?: integer }`
+- Output: `{ nodes: [{ id, title, kind }], edges: [{ src, dst, kind }] }`
+- Notes: Concepts, modules and assessments reachable from the outcomes over `aligned_with`, `part_of` and `contributes_to`. Spec.md §7.6 calls this "existing"; T-C-100 removed it because nothing implemented it.
+
+### `analytics.program_outcomes`
+- Server: `analytics` (port 7004)
+- Status: planned (T-D-111)
+- Mutates: false
+- Requires approval: false
+- Allowed roles: `program_lead`, `admin`, `faculty` (own course slice)
+- Reached by: engine `GET /api/programs/{id}/outcomes-report` (T-C-102)
+- Input: `{ program_id: string, cohort?: string }`
+- Output: `{ program_id, outcomes: [{ program_outcome_id, title, students: { mastery, proficient, emerging, no_evidence }, criterion_distributions: [{ criterion_id, key, counts: { <level>: integer } }], evidence_count }] }`
+- Notes: Uses only `course`/`program` visibility evidence and committed `final_score` data (spec.md §11.2, §12.5). Counts only; drill-down is anonymized unless the role has student scope.
+
+### `policy.resolve`
+- Server: engine-hosted (`src/engine/policy/`, no MCP server); the gateway dispatches the `policy.*` prefix in process
+- Status: planned (T-E-115)
+- Mutates: false
+- Requires approval: false
+- Allowed roles: `student`, `faculty`, `program_lead`, `advisor`, `admin` (each for contexts in their own scope)
+- Reached by: engine `/api/policy/effective` (T-C-102); engine-internal `<policy_context>` assembly and gateway policy step
+- Input: `{ key: string, course_id?: string, program_ids?: string[], learner_id?: string }`
+- Output: `{ key, value, source: { scope_type, scope_id, version, set_by, rationale }, chain: [{ scope_type, scope_id, value, locked }], conflict: boolean }`
+- Notes: Implements spec.md §8.5. The institution comes from the session, not the caller.
+
+### `policy.set`
+- Server: engine-hosted (`src/engine/policy/`, no MCP server); the gateway dispatches the `policy.*` prefix in process
+- Status: planned (T-E-115)
+- Mutates: true
+- Requires approval: true
+- Allowed roles: `student` (learner scope, stricter values only), `faculty` (course scope, own courses), `program_lead` (program scope), `admin` (institution scope and precedence)
+- Reached by: engine `/api/policy/set`, `/api/policy/precedence`, `/api/policy/presets` (T-C-102)
+- Input: `{ key: string, scope_type: "institution" | "program" | "course" | "learner", scope_id?: string, value: any, locked?: boolean, rationale?: string }`
+- Output: `{ key, scope_type, scope_id, version, effective_from, superseded_version }`
+- Notes: Append-only: supersedes the previous row. Rejects a key locked at a higher scope, a scope the registry does not allow for the key, and a learner value that is not stricter.
+
+### `standards.import_case`
+- Server: `standards` (port 7007)
+- Status: planned (T-D-116)
+- Mutates: true
+- Requires approval: false
+- Allowed roles: `admin`
+- Reached by: admin import endpoint or `scripts/` CLI (spec.md §15.1 #4)
+- Input: `{ framework: object, create_outcome_nodes?: boolean, course_id?: string }`
+- Output: `{ framework_id, items_imported, outcome_nodes_created }`
+- Notes: `framework` is a CASE 1.0 JSON `CFPackage` supplied inline; fetching from a CASE server is deferred (spec.md §0.4). Re-importing the same `CFDocument` identifier updates in place. Imported items are searchable through `standards.lookup`.
+
+
+---
+
 ## Not implemented (candidates)
 
 Nothing below is served by any MCP server. These names are not part of the contract and no manifest may reference them; the contract-invariants check ignores this section. Each one needs its own `T-C-*` task (and server code) before it moves back into a main section.
@@ -673,7 +870,7 @@ Nothing below is served by any MCP server. These names are not part of the contr
 | graph.evidence_summary | `evidence_summary.py` | Removed. Covered by `assessments.list_recent_evidence` and `attestations.get_student_attestations`. |
 | graph.aggregate | `aggregate.py` | Removed. Superseded by `analytics.query`, which serves the same metrics with a breakdown whitelist. |
 | graph.node_for_outcome | none | Removed. Candidate for syllabus-aware alignment (spec.md §7.6). |
-| graph.subgraph_for_outcomes | none | Removed. Candidate for course design work; no implementation exists. |
+| graph.subgraph_for_outcomes | none | Moved to Planned (Round 2) by T-C-105. |
 
 ### Former manifest vocabulary
 

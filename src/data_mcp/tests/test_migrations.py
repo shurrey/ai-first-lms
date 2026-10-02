@@ -49,7 +49,7 @@ def migrate_fresh() -> None:
 def test_alembic_current_shows_head() -> None:
     result = _run_alembic("current")
     assert result.returncode == 0, f"alembic current failed:\n{result.stderr}"
-    assert "002 (head)" in result.stdout, f"Expected 002 (head) in output:\n{result.stdout}"
+    assert "003 (head)" in result.stdout, f"Expected 003 (head) in output:\n{result.stdout}"
 
 
 def test_schema_tables_exist() -> None:
@@ -68,6 +68,11 @@ def test_schema_tables_exist() -> None:
                 "sessions", "turns", "events_log", "alembic_version",
                 "conversation_turns", "pending_credentials", "issued_credentials",
                 "system_settings", "concept_reviews",
+                "credentials", "auth_sessions", "advisor_assignments", "tool_calls",
+                "ai_actions", "human_decisions", "outcome_links", "rubric_criteria",
+                "criterion_scores", "policy_settings", "policy_precedence",
+                "notifications", "data_access_log", "deletion_requests",
+                "caliper_outbox", "api_tokens",
             }
             missing = expected - tables
             assert not missing, f"Missing tables: {missing}"
@@ -133,11 +138,15 @@ def _enum_labels(type_name: str) -> list[str]:
 def test_enum_values_match_contract() -> None:
     assert _enum_labels("node_kind") == [
         "concept", "skill", "artifact", "assessment_item", "resource", "outcome",
-        "course", "module", "microcredential",
+        "course", "module", "microcredential", "program", "program_outcome",
     ]
     assert _enum_labels("edge_kind") == [
         "prerequisite_of", "part_of", "evidence_of", "aligned_with", "variant_of",
-        "contributes_to",
+        "contributes_to", "supports",
+    ]
+    assert _enum_labels("evidence_kind") == [
+        "attempt", "completion", "mastery_check", "artifact_submission", "dialogue_turn",
+        "engagement_event", "reflection",
     ]
 
 
@@ -165,6 +174,45 @@ def test_indexes_added_by_002_exist() -> None:
         "idx_issued_credentials_person", "idx_concept_reviews_lookup",
     }
     assert expected <= indexes, f"Missing indexes: {expected - indexes}"
+
+
+def test_columns_added_by_003_exist() -> None:
+    expected = {
+        ("submissions", "version"), ("submissions", "parent_id"),
+        ("submissions", "status"), ("submissions", "course_node"),
+        ("concept_reviews", "ease"), ("concept_reviews", "interval_days"),
+        ("concept_reviews", "due_at"), ("concept_reviews", "reps"),
+        ("concept_reviews", "lapses"),
+        ("evidence", "criterion_score_id"), ("evidence", "visibility"),
+        ("issued_credentials", "revoked_at"), ("issued_credentials", "revocation_reason"),
+    }
+    rows = _fetch(
+        "SELECT table_name, column_name FROM information_schema.columns "
+        "WHERE table_schema = 'public'"
+    )
+    assert expected <= {(r["table_name"], r["column_name"]) for r in rows}
+
+
+def test_indexes_added_by_003_exist() -> None:
+    rows = _fetch("SELECT indexname FROM pg_indexes WHERE schemaname = 'public'")
+    indexes = {r["indexname"] for r in rows}
+    expected = {
+        "idx_auth_sessions_person", "idx_advisor_assignments_student",
+        "idx_tool_calls_turn", "idx_ai_actions_course", "idx_ai_actions_subject",
+        "idx_ai_actions_created", "idx_ai_actions_turn", "idx_human_decisions_action",
+        "idx_outcome_links_action", "idx_submissions_parent",
+        "idx_submissions_course_person", "idx_criterion_scores_criterion",
+        "idx_policy_settings_current", "idx_concept_reviews_due",
+        "idx_notifications_person_unread", "idx_evidence_criterion_score",
+        "idx_data_access_log_subject", "idx_deletion_requests_status",
+        "uq_deletion_requests_pending", "idx_caliper_outbox_unsent", "idx_api_tokens_person",
+    }
+    assert expected <= indexes, f"Missing indexes: {expected - indexes}"
+
+
+def test_citext_extension_installed() -> None:
+    rows = _fetch("SELECT extname FROM pg_extension WHERE extname = 'citext'")
+    assert len(rows) == 1
 
 
 def test_downgrade_to_001_and_back() -> None:

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: AI-First LMS Prototype — Orchestrator API
-  version: 0.2.0
+  version: 0.3.0
   description: |
     Contract between the frontends and the orchestrator. Source of truth.
     Do not edit without a T-C-* contract-change task.
@@ -15,20 +15,75 @@ info:
     failure (unknown id, missing argument, MCP server unreachable) is returned
     as HTTP 200 with body `{"error": "<message>"}`, not as a 4xx/5xx. Callers
     must check for the `error` key. Request-body validation failures are 422.
+    Endpoints marked `x-implementation-status: planned` use ordinary HTTP
+    status codes (4xx/5xx with an ErrorDetail body) instead.
 
-    There is no authentication in this version; every endpoint is open.
+    Authentication (spec.md §4.4). Sign in with POST /api/auth/login, which
+    sets two cookies:
+      - `lms_session`: opaque session token. HttpOnly; SameSite=Lax; Path=/;
+        Secure when COOKIE_SECURE=true; Max-Age = SESSION_TTL_HOURS * 3600
+        (default 12 h). Sliding expiry: each authenticated request may extend it.
+      - `lms_csrf`: the session's CSRF token. NOT HttpOnly (the UI reads it);
+        SameSite=Lax; Path=/; same Secure and Max-Age as `lms_session`.
+    Cookies are host-scoped, not port-scoped, so one login is shared by both
+    UIs on localhost. Clients send `credentials: "include"` on fetch and
+    `{withCredentials: true}` on EventSource.
+
+    CSRF (double-submit): every non-GET request under /api/* except
+    POST /api/auth/login must carry header `X-CSRF-Token` equal to the
+    `lms_csrf` cookie value. Missing or mismatched returns 403.
+
+    Authorization. `x-required-capability` names the /api/auth/me
+    `capabilities` key (§17) an operation needs; `public` means no session,
+    `authenticated` means any signed-in person. Operations about one learner
+    always admit that learner themself; `x-scope-check` names the
+    object-level check (`scope.can_view_student(..., purpose=...)`, whose
+    purpose is written to data_access_log). A missing or invalid session
+    returns 401; a valid session without the capability or scope returns 403.
 
 servers:
   - url: http://localhost:8000
     description: Local dev
 
+x-auth-rollout: |
+  The security requirements, 401/403 responses, x-required-capability and
+  x-scope-check annotations describe the design adopted in T-C-102. The live
+  engine does not enforce them yet: every existing endpoint is open until
+  T-E-101 (session + CSRF middleware), T-E-102 (/api/auth/*), T-E-103
+  (current_user() + scope checks on existing endpoints) and T-E-104
+  (/api/session derives persona and person) land. Until then clients may
+  omit the cookie and CSRF header against existing endpoints.
+
+security:
+  - sessionCookie: []
+
 tags:
   - name: core
     description: Session, conversation turn, streaming and approval flow
+  - name: auth
+    description: Sign-in, session cookie, role switching and the /me payload
+  - name: home
+    description: Role-specific home payloads
   - name: roster
     description: Faculty / advisor roster, mastery and transcript views
+  - name: assessment
+    description: Submissions, criterion feedback and improvement trajectories
+  - name: provenance
+    description: Record of what the software generated and what people did with it
+  - name: measurement
+    description: AI Review metrics and evaluator export
+  - name: policy
+    description: Governance policy resolution, editing, precedence and presets
   - name: credentials
-    description: Microcredential review, issuance and system settings
+    description: Microcredential review, issuance, verification and system settings
+  - name: record
+    description: Program outcome reports and the Comprehensive Learner Record
+  - name: privacy
+    description: The learner's own data, disputes, export and deletion
+  - name: notifications
+    description: In-app notifications
+  - name: study
+    description: Flashcards and other study aids
   - name: podcast
     description: Personalized audio lesson generation
 
@@ -38,6 +93,8 @@ paths:
       tags: [core]
       summary: Liveness probe
       operationId: healthz
+      security: []
+      x-required-capability: public
       responses:
         "200":
           description: ok
@@ -49,35 +106,214 @@ paths:
                 properties:
                   status: {type: string, const: ok}
 
-  /api/session:
-    post:
-      tags: [core]
-      summary: Create a session for a persona and course, and start its opening brief
-      operationId: createSession
-      description: |
-        `course_id` accepts a course UUID or one of the demo slugs
-        `cs101`, `math201`, `eng102`, `bio150`, or `all` (cross-course view for
-        advisor/admin). Slugs are resolved to UUIDs; the resolved value is
-        returned as `course_uuid`.
+  # ---------------------------------------------------------------------------
+  # Auth (planned)
+  # ---------------------------------------------------------------------------
 
-        When `person_id` is omitted, a seeded demo person is assigned from the
-        persona + course. If a person is resolved, a brief is generated in the
-        background on turn `brief_turn_id`; open `stream_url` to receive it.
-        If no person is resolved, no brief is generated and `stream_url` still
-        points at an empty turn that never completes.
+  /api/auth/login:
+    post:
+      tags: [auth]
+      summary: Sign in with username and password
+      operationId: login
+      x-implementation-status: planned
+      x-task: T-E-102
+      security: []
+      x-required-capability: public
+      description: |
+        Exempt from the session cookie and from X-CSRF-Token. On success,
+        creates an auth_sessions row with `active_role` = the person's first
+        role, sets `lms_session` and `lms_csrf` (attributes in info.description),
+        and returns the /me payload.
+
+        Every failure (unknown username, wrong password, locked account)
+        returns the same 401 body, `{"detail": "Invalid username or password."}`.
+        After LOGIN_MAX_ATTEMPTS (default 5) consecutive failures the account
+        is locked for LOGIN_LOCKOUT_MINUTES (default 5); the response never
+        reveals the lock or whether the username exists.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/LoginRequest"}
+      responses:
+        "200":
+          description: Signed in. Both cookies are set.
+          headers:
+            Set-Cookie:
+              description: |
+                Two Set-Cookie headers are sent, e.g.
+                `lms_session=<token>; HttpOnly; SameSite=Lax; Path=/; Max-Age=43200`
+                and `lms_csrf=<csrf>; SameSite=Lax; Path=/; Max-Age=43200`
+                (plus `Secure` when COOKIE_SECURE=true).
+              schema: {type: string}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Me"}
+        "401":
+          description: Generic failure. Body detail is always "Invalid username or password."
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorDetail"}
+        "422": {$ref: "#/components/responses/ValidationFailed"}
+
+  /api/auth/logout:
+    post:
+      tags: [auth]
+      summary: Revoke the current session and clear both cookies
+      operationId: logout
+      x-implementation-status: planned
+      x-task: T-E-102
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      x-required-capability: authenticated
+      responses:
+        "204":
+          description: Session revoked; `lms_session` and `lms_csrf` cleared with Max-Age=0.
+          headers:
+            Set-Cookie:
+              description: Two clearing Set-Cookie headers (`lms_session=; Max-Age=0`, `lms_csrf=; Max-Age=0`).
+              schema: {type: string}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+
+  /api/auth/me:
+    get:
+      tags: [auth]
+      summary: The signed-in person, roles, enrollments, capabilities and UI policy
+      operationId: getMe
+      x-implementation-status: planned
+      x-task: T-E-102
+      security:
+        - sessionCookie: []
+      x-required-capability: authenticated
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Me"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+
+  /api/auth/role:
+    post:
+      tags: [auth]
+      summary: Switch the session's active role to another role the person holds
+      operationId: switchRole
+      x-implementation-status: planned
+      x-task: T-E-102
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      x-required-capability: authenticated
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [persona, course_id]
+              required: [role]
               properties:
-                persona: {type: string, enum: [student, faculty, advisor, admin]}
-                person_id: {type: [string, "null"]}
+                role: {$ref: "#/components/schemas/PersonRole"}
+      responses:
+        "200":
+          description: Role switched; the /me payload for the new active role.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Me"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403":
+          description: The person does not hold this role, or CSRF failure.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorDetail"}
+        "422": {$ref: "#/components/responses/ValidationFailed"}
+
+  /api/auth/password:
+    post:
+      tags: [auth]
+      summary: Change own password
+      operationId: changePassword
+      x-implementation-status: planned
+      x-task: T-E-102
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      x-required-capability: authenticated
+      description: |
+        Clears `credentials.must_change`. Other sessions of the same person are
+        revoked; the calling session stays valid.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, new_password]
+              properties:
+                current_password: {type: string}
+                new_password: {type: string, minLength: 12}
+      responses:
+        "204": {description: Password changed}
+        "400":
+          description: current_password is wrong.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorDetail"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "422":
+          description: new_password shorter than 12 characters, or malformed body.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ValidationError"}
+
+  # ---------------------------------------------------------------------------
+  # Core
+  # ---------------------------------------------------------------------------
+
+  /api/session:
+    post:
+      tags: [core]
+      summary: Create a session for the signed-in person and a course, and start its opening brief
+      operationId: createSession
+      x-change: T-C-102
+      x-required-capability: authenticated
+      x-scope-check: course_id must be a course the caller may act in (see description)
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      description: |
+        Request body change (T-C-102): `persona` and `person_id` are removed.
+        The live engine keeps accepting them (persona required) until T-E-104
+        lands; from then the persona is the session's `active_role` and the
+        person is the authenticated person, and both fields are rejected as
+        unknown or ignored.
+
+        `course_id` accepts a course UUID or a course node slug (`cs101`,
+        `math201`, `eng102`, `bio150`, ...), or `all`. Slugs are resolved by a
+        DB lookup and returned as `course_uuid`. The course must be one the
+        caller may act in: enrolled for student/faculty, any course containing
+        an assigned advisee for advisor, any course for admin. `all`
+        (cross-course view) is allowed only for advisor and admin. Otherwise 403.
+
+        A brief is generated in the background on turn `brief_turn_id`; open
+        `stream_url` to receive it.
+
+        Before T-E-104: when `person_id` is omitted a seeded demo person is
+        assigned from persona + course; if none resolves, no brief is generated
+        and `stream_url` points at a turn that never completes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [course_id]
+              properties:
                 course_id:
                   type: string
-                  description: Course UUID, a demo slug, or `all`.
+                  description: Course UUID, a course slug, or `all`.
                 page:
                   type: [string, "null"]
                   description: |
@@ -93,7 +329,9 @@ paths:
                 required: [session_id]
                 properties:
                   session_id: {type: string}
-                  person_id: {type: [string, "null"]}
+                  person_id:
+                    type: [string, "null"]
+                    description: The authenticated person after T-E-104; may be null before.
                   course_uuid:
                     type: [string, "null"]
                     description: Resolved course UUID, or `all`.
@@ -103,8 +341,19 @@ paths:
                   stream_url:
                     type: [string, "null"]
                     description: Relative URL of the brief turn's SSE stream.
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403":
+          description: Course not in the caller's scope, `all` requested by a role other than advisor/admin, or CSRF failure.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorDetail"}
+        "404":
+          description: Unknown course slug or UUID.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorDetail"}
         "422":
-          description: Invalid persona or malformed body
+          description: Malformed body (before T-E-104 also an invalid persona)
           content:
             application/json:
               schema: {$ref: "#/components/schemas/ErrorDetail"}
@@ -114,6 +363,11 @@ paths:
       tags: [core]
       summary: Submit a user message and begin a turn
       operationId: converse
+      x-required-capability: authenticated
+      x-scope-check: session belongs to the caller
+      security:
+        - sessionCookie: []
+          csrfHeader: []
       requestBody:
         required: true
         content:
@@ -140,6 +394,8 @@ paths:
                 properties:
                   turn_id: {type: string}
                   stream_url: {type: string}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
         "404":
           description: Session not found (sessions are held in engine memory)
           content:
@@ -156,12 +412,18 @@ paths:
       tags: [core]
       summary: SSE stream of events for a turn
       operationId: stream
+      x-required-capability: authenticated
+      x-scope-check: session and turn belong to the caller
+      security:
+        - sessionCookie: []
       description: |
         Emits envelopes per contracts/events.md, then closes when the turn's
         status becomes `completed` or `error`. An unknown turn_id yields one
         `error` event (`code: internal`, "Turn not found") and closes.
         Each SSE message has `event:` set to the envelope's event type and
-        `id:` set to its sequence number.
+        `id:` set to its sequence number. Open with
+        `new EventSource(url, {withCredentials: true})`; a session or turn
+        that is not the caller's is rejected with 403 before streaming starts.
       parameters:
         - in: query
           name: session_id
@@ -184,6 +446,8 @@ paths:
           content:
             text/event-stream:
               schema: {type: string}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
         "422":
           description: Missing session_id or turn_id
           content:
@@ -195,6 +459,11 @@ paths:
       tags: [core]
       summary: Submit a human approval/edit/rejection for a pending step
       operationId: submitApproval
+      x-required-capability: authenticated
+      x-scope-check: session and turn belong to the caller
+      security:
+        - sessionCookie: []
+          csrfHeader: []
       requestBody:
         required: true
         content:
@@ -221,6 +490,8 @@ paths:
                   status: {type: string, const: accepted}
                   approval_id: {type: string}
                   decision: {type: string, enum: [approve, edit, reject]}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
         "404":
           description: No pending approval with this approval_id
           content:
@@ -238,6 +509,11 @@ paths:
       summary: Answer a clarification request; resume the turn
       operationId: clarify
       x-implementation-status: not_implemented
+      x-required-capability: authenticated
+      x-scope-check: session and turn belong to the caller
+      security:
+        - sessionCookie: []
+          csrfHeader: []
       description: |
         Not implemented in the engine. src/frontend/lib/api.ts calls it, and
         the request currently returns 404. Kept as designed.
@@ -254,6 +530,8 @@ paths:
                 answer: {type: string}
       responses:
         "202": {description: accepted}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
 
   /api/sessions/{session_id}/history:
     get:
@@ -261,6 +539,10 @@ paths:
       summary: Conversation history for a session
       operationId: getSessionHistory
       x-implementation-status: not_implemented
+      x-required-capability: authenticated
+      x-scope-check: session belongs to the caller
+      security:
+        - sessionCookie: []
       description: |
         Not implemented in the engine. src/frontend/lib/api.ts calls it, and
         the request currently returns 404. Kept as designed. The closest live
@@ -276,6 +558,108 @@ paths:
                 type: object
                 properties:
                   turns: {type: array, items: {type: object}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+
+  /api/sessions/{session_id}/end:
+    post:
+      tags: [core]
+      summary: End a tutoring session (explicit End session button)
+      operationId: endSession
+      x-implementation-status: planned
+      x-task: T-E-120
+      x-required-capability: authenticated
+      x-scope-check: session belongs to the caller
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      description: |
+        Closes the session and queues the learning-analyst run. Policy
+        `reflection.after_session` (resolved for the learner and course):
+        `off` ignores `reflection`; `optional` stores it if given; `required`
+        returns 409 until a non-empty reflection is sent. A stored reflection
+        becomes an evidence row of kind `reflection`. Idempotent: ending an
+        already-ended session returns 200 with the original `ended_at`.
+      parameters:
+        - $ref: "#/components/parameters/SessionIdPath"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reflection:
+                  type: [string, "null"]
+                  description: Learner's end-of-session reflection (markdown).
+      responses:
+        "200":
+          description: Session ended
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [session_id, status, ended_at]
+                properties:
+                  session_id: {type: string}
+                  status: {type: string, const: ended}
+                  ended_at: {type: string, format: date-time}
+                  reflection_evidence_id: {type: [string, "null"], format: uuid}
+                  analyst_run_queued: {type: boolean}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409":
+          description: Reflection required by policy and not supplied.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [detail, reflection_required]
+                properties:
+                  detail: {type: string}
+                  reflection_required: {type: boolean, const: true}
+                  reflection_prompt:
+                    type: string
+                    description: Prompt text the UI shows above the reflection box.
+        "422": {$ref: "#/components/responses/ValidationFailed"}
+
+  # ---------------------------------------------------------------------------
+  # Home (planned)
+  # ---------------------------------------------------------------------------
+
+  /api/home:
+    get:
+      tags: [home]
+      summary: Home payload for the caller's active role
+      operationId: getHome
+      x-implementation-status: planned
+      x-task: T-E-119
+      x-required-capability: authenticated
+      security:
+        - sessionCookie: []
+      description: |
+        Composed server-side from MCP calls under the caller's scope. The shape
+        is chosen by `active_role` and tagged by `role`. Student mastery is
+        returned as `narrative` instead of counts when
+        `gamification.show_mastery_bars=false`.
+      parameters:
+        - in: query
+          name: compact
+          required: false
+          description: Return at most three items per list (Chat UI context pane).
+          schema: {type: boolean, default: false}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/HomePayload"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+
+  # ---------------------------------------------------------------------------
+  # Roster, mastery, transcripts (existing)
+  # ---------------------------------------------------------------------------
 
   /api/mastery/{person_id}/{course_id}:
     get:
@@ -283,6 +667,10 @@ paths:
       summary: Live mastery map for a student in a course
       operationId: getMastery
       description: Proxies MCP tool `graph.mastery_map`.
+      x-required-capability: mastery_matrix
+      x-scope-check: scope.can_view_student(ctx, person_id, course_id, purpose="mastery")
+      security:
+        - sessionCookie: []
       parameters:
         - $ref: "#/components/parameters/PersonIdPath"
         - $ref: "#/components/parameters/CourseIdPath"
@@ -295,12 +683,19 @@ paths:
                 oneOf:
                   - $ref: "#/components/schemas/MasteryMap"
                   - $ref: "#/components/schemas/ToolError"
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
 
   /api/roster/{course_id}:
     get:
       tags: [roster]
       summary: Students in a course with session activity, most recently active first
       operationId: getRoster
+      description: "Authorization (§4.4): faculty of this course, or admin."
+      x-required-capability: roster
+      x-scope-check: caller is faculty of course_id, or admin
+      security:
+        - sessionCookie: []
       parameters:
         - $ref: "#/components/parameters/CourseIdPath"
       responses:
@@ -324,12 +719,18 @@ paths:
                         last_active: {type: [string, "null"], format: date-time}
                         total_turns: {type: integer}
                   total: {type: integer}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
 
   /api/student/{person_id}/sessions:
     get:
       tags: [roster]
       summary: A student's tutoring sessions, newest first
       operationId: getStudentSessions
+      x-required-capability: transcripts_of_others
+      x-scope-check: scope.can_view_student(ctx, person_id, course_id, purpose="sessions")
+      security:
+        - sessionCookie: []
       parameters:
         - $ref: "#/components/parameters/PersonIdPath"
         - in: query
@@ -352,12 +753,18 @@ paths:
                   sessions:
                     type: array
                     items: {$ref: "#/components/schemas/SessionSummary"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
 
   /api/student/{person_id}/courses:
     get:
       tags: [roster]
       summary: Courses a student is enrolled in, with mastery and session summary
       operationId: getStudentCourses
+      x-required-capability: mastery_matrix
+      x-scope-check: scope.can_view_student(ctx, person_id, purpose="courses")
+      security:
+        - sessionCookie: []
       parameters:
         - $ref: "#/components/parameters/PersonIdPath"
       responses:
@@ -388,12 +795,18 @@ paths:
                         microcredentials_total: {type: integer}
                         session_count: {type: integer}
                         last_active: {type: [string, "null"], format: date-time}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
 
   /api/student-insights/{person_id}:
     get:
       tags: [roster]
       summary: Student-facing learning insights written by the learning analyst
       operationId: getStudentInsights
+      x-required-capability: learner_profile_of_others
+      x-scope-check: scope.can_view_student(ctx, person_id, purpose="insights")
+      security:
+        - sessionCookie: []
       parameters:
         - $ref: "#/components/parameters/PersonIdPath"
       responses:
@@ -408,6 +821,8 @@ paths:
                 required: [insights]
                 properties:
                   insights: {type: array, items: {}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
 
   /api/student-goals/{person_id}:
     get:
@@ -415,6 +830,10 @@ paths:
       summary: A student's learning goals
       operationId: getStudentGoals
       description: Proxies MCP tool `roster.get_goals`.
+      x-required-capability: learner_profile_of_others
+      x-scope-check: scope.can_view_student(ctx, person_id, purpose="goals")
+      security:
+        - sessionCookie: []
       parameters:
         - $ref: "#/components/parameters/PersonIdPath"
       responses:
@@ -429,21 +848,24 @@ paths:
                     properties:
                       goals:
                         type: array
-                        items:
-                          type: object
-                          properties:
-                            description: {type: string}
-                            target_date: {type: [string, "null"]}
-                            created_at: {type: string, format: date-time}
-                            status: {type: string}
+                        items: {$ref: "#/components/schemas/Goal"}
                   - $ref: "#/components/schemas/ToolError"
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
 
   /api/transcript/{session_id}:
     get:
       tags: [roster]
       summary: Persisted conversation transcript for a session
       operationId: getTranscript
-      description: Proxies MCP tool `roster.get_session_transcript`.
+      description: |
+        Proxies MCP tool `roster.get_session_transcript`. For a non-self
+        caller, access also follows policy `data.instructor_transcript_access`
+        (§12.6) and is written to data_access_log.
+      x-required-capability: transcripts_of_others
+      x-scope-check: scope.can_view_student(ctx, <session's person>, purpose="transcript")
+      security:
+        - sessionCookie: []
       parameters:
         - $ref: "#/components/parameters/SessionIdPath"
       responses:
@@ -470,13 +892,918 @@ paths:
                             content: {type: string}
                             created_at: {type: string, format: date-time}
                   - $ref: "#/components/schemas/ToolError"
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+
+  # ---------------------------------------------------------------------------
+  # Assessment: submissions, feedback, improvement (planned)
+  # ---------------------------------------------------------------------------
+
+  /api/submissions:
+    post:
+      tags: [assessment]
+      summary: Submit a draft, revision or final version of an assignment
+      operationId: createSubmission
+      x-implementation-status: planned
+      x-task: T-D-104
+      x-required-capability: submit_work
+      x-scope-check: caller is an enrolled student in the assignment's course
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      description: |
+        Proxies `assessments.submit`. The submitter is always the caller.
+        A draft starts formative feedback asynchronously; poll
+        GET /api/feedback/{submission_id} or wait for a notification.
+        `parent_id` marks a revision and must be the latest version.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [assignment_id, status, body_md]
+              properties:
+                assignment_id:
+                  type: string
+                  format: uuid
+                  description: Assignment node id.
+                status: {$ref: "#/components/schemas/SubmissionStatus"}
+                body_md: {type: string}
+                attachments:
+                  type: array
+                  items: {type: object}
+                  default: []
+                parent_id:
+                  type: [string, "null"]
+                  format: uuid
+                  description: Previous version this one revises.
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Submission"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409":
+          description: A final version already exists, or parent_id is not the latest version.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorDetail"}
+        "422": {$ref: "#/components/responses/ValidationFailed"}
+    get:
+      tags: [assessment]
+      summary: List submissions (latest version per chain unless all_versions)
+      operationId: listSubmissions
+      x-implementation-status: planned
+      x-task: T-D-104
+      x-required-capability: authenticated
+      x-scope-check: students see only their own; faculty see their own courses
+      security:
+        - sessionCookie: []
+      parameters:
+        - in: query
+          name: assignment_id
+          schema: {type: string, format: uuid}
+        - in: query
+          name: course_id
+          schema: {type: string, format: uuid}
+        - in: query
+          name: person_id
+          description: Ignored (forced to self) for the student role.
+          schema: {type: string, format: uuid}
+        - in: query
+          name: all_versions
+          schema: {type: boolean, default: false}
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: "#/components/schemas/Submission"}
+                  next_cursor: {type: [string, "null"]}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+
+  /api/submissions/{submission_id}:
+    get:
+      tags: [assessment]
+      summary: One submission version
+      operationId: getSubmission
+      x-implementation-status: planned
+      x-task: T-D-104
+      x-required-capability: authenticated
+      x-scope-check: submitter, or faculty of the course; others via scope.can_view_student(purpose="submission")
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/SubmissionIdPath"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Submission"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+
+  /api/submissions/{submission_id}/history:
+    get:
+      tags: [assessment]
+      summary: The version chain containing this submission, oldest first, with per-criterion deltas
+      operationId: getSubmissionHistory
+      x-implementation-status: planned
+      x-task: T-D-104
+      x-required-capability: authenticated
+      x-scope-check: same as GET /api/submissions/{submission_id}
+      security:
+        - sessionCookie: []
+      description: Proxies `assessments.list_submission_history`.
+      parameters:
+        - $ref: "#/components/parameters/SubmissionIdPath"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [assignment_id, person_id, versions]
+                properties:
+                  assignment_id: {type: string, format: uuid}
+                  person_id: {type: string, format: uuid}
+                  versions:
+                    type: array
+                    items:
+                      type: object
+                      required: [submission, criteria]
+                      properties:
+                        submission: {$ref: "#/components/schemas/Submission"}
+                        criteria:
+                          type: array
+                          description: Only criteria whose feedback the caller may see.
+                          items:
+                            type: object
+                            required: [criterion_id, criterion_key, score, delta]
+                            properties:
+                              criterion_id: {type: string, format: uuid}
+                              criterion_key: {type: string}
+                              score: {type: [integer, "null"]}
+                              delta:
+                                type: [integer, "null"]
+                                description: Change from the previous version; null on the first.
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+
+  /api/feedback/queue:
+    get:
+      tags: [assessment]
+      summary: Feedback awaiting instructor release (Review Queue)
+      operationId: getFeedbackQueue
+      x-implementation-status: planned
+      x-task: T-D-104
+      x-required-capability: feedback_release
+      x-scope-check: faculty of the course(s); without course_id, all the caller's own courses
+      security:
+        - sessionCookie: []
+      parameters:
+        - in: query
+          name: course_id
+          schema: {type: string, format: uuid}
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: "#/components/schemas/SubmissionFeedback"}
+                  next_cursor: {type: [string, "null"]}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+
+  /api/feedback/{submission_id}:
+    get:
+      tags: [assessment]
+      summary: Criterion-level feedback for a submission
+      operationId: getFeedback
+      x-implementation-status: planned
+      x-task: T-D-104
+      x-required-capability: authenticated
+      x-scope-check: submitter (released criteria only), or faculty of the course
+      security:
+        - sessionCookie: []
+      description: |
+        For the submitter, criteria not yet released are omitted and `status`
+        is `pending` or `awaiting_release`. `ai_score` is null for the
+        submitter on drafts when `feedback.show_scores_on_drafts=false`.
+      parameters:
+        - $ref: "#/components/parameters/SubmissionIdPath"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SubmissionFeedback"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+
+  /api/feedback/{submission_id}/release:
+    post:
+      tags: [assessment]
+      summary: Release (optionally edited) or suppress feedback held under instructor_release
+      operationId: releaseFeedback
+      x-implementation-status: planned
+      x-task: T-D-104
+      x-required-capability: feedback_release
+      x-scope-check: faculty of the submission's course
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      description: |
+        Proxies `assessments.release_feedback`. The request is the human
+        approval; it does not go through approval_request. Writes one
+        human_decisions row per criterion: `accepted` (unchanged), `edited`
+        (diff recorded) or `rejected` (suppressed).
+      parameters:
+        - $ref: "#/components/parameters/SubmissionIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action: {type: string, enum: [release, suppress]}
+                edits:
+                  type: array
+                  description: Per-criterion edits applied before release.
+                  items:
+                    type: object
+                    required: [criterion_id]
+                    properties:
+                      criterion_id: {type: string, format: uuid}
+                      score: {type: [integer, "null"]}
+                      rationale: {type: [string, "null"]}
+                      next_step: {type: [string, "null"]}
+                      suppress: {type: boolean, default: false}
+                reason: {type: [string, "null"]}
+      responses:
+        "200":
+          description: Released or suppressed
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SubmissionFeedback"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409":
+          description: Already released or suppressed, or the course uses `auto` release.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorDetail"}
+        "422": {$ref: "#/components/responses/ValidationFailed"}
+
+  /api/improvement/{course_id}:
+    get:
+      tags: [assessment]
+      summary: Student × criterion improvement trajectories for a course
+      operationId: getImprovement
+      x-implementation-status: planned
+      x-task: T-D-104
+      x-required-capability: improvement_view
+      x-scope-check: |
+        student: own trajectory only (student_id forced to self); faculty: own
+        course; advisor: assigned students, summary; program_lead/admin:
+        aggregate only (students omitted)
+      security:
+        - sessionCookie: []
+      description: |
+        Proxies `assessments.get_improvement`. Uses only `course`-visibility
+        evidence (§12.5): private practice attempts never appear.
+      parameters:
+        - $ref: "#/components/parameters/CourseIdPath"
+        - in: query
+          name: student_id
+          schema: {type: string, format: uuid}
+        - in: query
+          name: criterion_id
+          schema: {type: string, format: uuid}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Improvement"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+
+  # ---------------------------------------------------------------------------
+  # Provenance (planned)
+  # ---------------------------------------------------------------------------
+
+  /api/ai-actions:
+    get:
+      tags: [provenance]
+      summary: '"What the platform generated" log, newest first'
+      operationId: listAiActions
+      x-implementation-status: planned
+      x-task: T-E-112
+      x-required-capability: ai_actions_log
+      x-scope-check: |
+        Filters are intersected with the caller's scope: student = about me
+        (subject_person_id forced to self); faculty = own courses;
+        program_lead = program courses; advisor = about assigned students;
+        admin = all.
+      security:
+        - sessionCookie: []
+      parameters:
+        - in: query
+          name: course_id
+          schema: {type: string, format: uuid}
+        - in: query
+          name: program_id
+          schema: {type: string, format: uuid}
+        - in: query
+          name: subject_person_id
+          schema: {type: string, format: uuid}
+        - in: query
+          name: agent
+          schema: {type: string}
+        - in: query
+          name: action_type
+          schema: {$ref: "#/components/schemas/AiActionType"}
+        - in: query
+          name: decision
+          description: Filter by latest human decision; `none` = no decision yet.
+          schema:
+            oneOf:
+              - $ref: "#/components/schemas/HumanDecisionValue"
+              - {type: string, const: none}
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: "#/components/schemas/AiAction"}
+                  next_cursor: {type: [string, "null"]}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+
+  /api/ai-actions/{ai_action_id}:
+    get:
+      tags: [provenance]
+      summary: One generated artifact's provenance (target of the "AI-generated · sources" label)
+      operationId: getAiAction
+      x-implementation-status: planned
+      x-task: T-E-112
+      x-required-capability: ai_actions_log
+      x-scope-check: same scope rules as GET /api/ai-actions
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/AiActionIdPath"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/AiAction"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+
+  /api/ai-actions/{ai_action_id}/decisions:
+    post:
+      tags: [provenance]
+      summary: Record a person's decision on a generated item (Start / Snooze / Not helpful / dismiss alert)
+      operationId: recordHumanDecision
+      x-implementation-status: planned
+      x-task: T-E-110
+      x-required-capability: authenticated
+      x-scope-check: |
+        The subject learner may decide on recommendations, practice items and
+        nudges about them; faculty of the course on alerts. Decisions on
+        grades, criterion feedback, attestations and credentials are made
+        through their own endpoints, not here (403).
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      parameters:
+        - $ref: "#/components/parameters/AiActionIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision]
+              properties:
+                decision:
+                  type: string
+                  enum: [accepted, dismissed, snoozed]
+                  description: Start / acted on = accepted; Not helpful / dismiss = dismissed.
+                reason: {type: [string, "null"]}
+                snooze_until: {type: [string, "null"], format: date-time}
+      responses:
+        "201":
+          description: Recorded
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/HumanDecision"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/ValidationFailed"}
+
+  # ---------------------------------------------------------------------------
+  # Measurement (planned)
+  # ---------------------------------------------------------------------------
+
+  /api/measurement/courses/{course_id}:
+    get:
+      tags: [measurement]
+      summary: AI Review metrics for one course
+      operationId: getCourseMeasurement
+      x-implementation-status: planned
+      x-task: T-E-112
+      x-required-capability: ai_review
+      x-scope-check: faculty of the course, program_lead of a program containing it, or admin
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/CourseIdPath"
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/MeasurementSummary"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+
+  /api/measurement/rollup:
+    get:
+      tags: [measurement]
+      summary: Program- or institution-level rollup of AI Review metrics
+      operationId: getMeasurementRollup
+      x-implementation-status: planned
+      x-task: T-E-112
+      x-required-capability: ai_review
+      x-scope-check: program_lead of program_id, or admin (program_id omitted = institution, admin only)
+      security:
+        - sessionCookie: []
+      parameters:
+        - in: query
+          name: program_id
+          schema: {type: string, format: uuid}
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/MeasurementRollup"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+
+  /api/measurement/export:
+    get:
+      tags: [measurement]
+      summary: Export ai_actions, human_decisions and outcome_links for a course and date range
+      operationId: exportMeasurement
+      x-implementation-status: planned
+      x-task: T-E-112
+      x-required-capability: ai_review
+      x-scope-check: same as GET /api/measurement/courses/{course_id}
+      security:
+        - sessionCookie: []
+      description: |
+        For external evaluators. `format=json` returns all three tables in one
+        document. `format=csv` returns one table, chosen by `table`; jsonb
+        columns are serialized as JSON strings. Sent with
+        `Content-Disposition: attachment`.
+      parameters:
+        - in: query
+          name: course_id
+          required: true
+          schema: {type: string, format: uuid}
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+        - in: query
+          name: format
+          schema: {type: string, enum: [json, csv], default: json}
+        - in: query
+          name: table
+          description: Used only when format=csv.
+          schema: {type: string, enum: [ai_actions, human_decisions, outcome_links], default: ai_actions}
+      responses:
+        "200":
+          description: Export file
+          headers:
+            Content-Disposition:
+              schema: {type: string}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/MeasurementExport"}
+            text/csv:
+              schema: {type: string}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "422": {$ref: "#/components/responses/ValidationFailed"}
+
+  # ---------------------------------------------------------------------------
+  # Policy (planned)
+  # ---------------------------------------------------------------------------
+
+  /api/policy/effective:
+    get:
+      tags: [policy]
+      summary: Resolve policy keys for a context, with source and precedence chain
+      operationId: getEffectivePolicy
+      x-implementation-status: planned
+      x-task: T-E-115
+      x-required-capability: authenticated
+      x-scope-check: |
+        course_id must be in the caller's course list; learner_id defaults to
+        the caller and must be self or a student the caller may view
+      security:
+        - sessionCookie: []
+      description: |
+        Calls `policy.resolve` for each key. Program ids are derived from the
+        course's `part_of` edges. Without `key`, all registry keys are
+        returned. `editable` reflects whether the caller may set the key at
+        `editable_scope` right now (holds the scope and it is not locked above).
+      parameters:
+        - in: query
+          name: key
+          description: Repeatable. Registry key, e.g. `tutor.answer_mode`.
+          schema:
+            type: array
+            items: {type: string}
+          style: form
+          explode: true
+        - in: query
+          name: course_id
+          schema: {type: string, format: uuid}
+        - in: query
+          name: program_id
+          description: Resolve at program scope without a course (Program Policy surface).
+          schema: {type: string, format: uuid}
+        - in: query
+          name: learner_id
+          schema: {type: string, format: uuid}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [context, policies]
+                properties:
+                  context:
+                    type: object
+                    properties:
+                      course_id: {type: [string, "null"], format: uuid}
+                      program_ids: {type: array, items: {type: string, format: uuid}}
+                      learner_id: {type: [string, "null"], format: uuid}
+                  policies:
+                    type: array
+                    items: {$ref: "#/components/schemas/PolicyResolved"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "422": {$ref: "#/components/responses/ValidationFailed"}
+
+  /api/policy/set:
+    post:
+      tags: [policy]
+      summary: Set (or clear) a policy value at one scope
+      operationId: setPolicy
+      x-implementation-status: planned
+      x-task: T-E-115
+      x-required-capability: policy_edit
+      x-scope-check: |
+        institution: admin; program: program_lead of scope_id; course: faculty
+        of scope_id; learner: scope_id = caller (student). vendor_default is
+        never writable.
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      description: |
+        Calls `policy.set`. Append-only: supersedes the current row for
+        (key, scope_type, scope_id) and inserts version+1 with `set_by` = the
+        caller. `clear: true` supersedes without a replacement, so the scope
+        inherits again. The request is the human approval; it does not go
+        through approval_request.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key, scope_type, rationale]
+              properties:
+                key: {type: string}
+                scope_type: {$ref: "#/components/schemas/WritablePolicyScope"}
+                scope_id:
+                  type: [string, "null"]
+                  format: uuid
+                  description: Null for institution; required otherwise.
+                value:
+                  description: Must validate against the key's registry schema. Omit when clear=true.
+                locked: {type: boolean, default: false}
+                clear: {type: boolean, default: false}
+                rationale:
+                  type: string
+                  minLength: 1
+                  description: Shown in the explainer.
+                expected_version:
+                  type: [integer, "null"]
+                  description: Optimistic concurrency; 409 if the current version differs.
+      responses:
+        "200":
+          description: Saved. Returns the new row (or the superseded row when clear=true) and the re-resolved value.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [setting, resolved]
+                properties:
+                  setting: {$ref: "#/components/schemas/PolicySetting"}
+                  resolved: {$ref: "#/components/schemas/PolicyResolved"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "409":
+          description: Locked by a higher-precedence scope, or expected_version mismatch.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [detail]
+                properties:
+                  detail: {type: string}
+                  locked_by: {$ref: "#/components/schemas/PolicySource"}
+                  current_version: {type: [integer, "null"]}
+        "422":
+          description: |
+            Unknown key, scope not allowed for the key, value fails the key's
+            schema, or a learner value that is not stricter than the inherited one.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorDetail"}
+
+  /api/policy/history:
+    get:
+      tags: [policy]
+      summary: Append-only change history of policy settings, newest first
+      operationId: getPolicyHistory
+      x-implementation-status: planned
+      x-task: T-E-115
+      x-required-capability: policy_edit
+      x-scope-check: rows at scopes the caller may view (own learner, own courses, own programs; admin all)
+      security:
+        - sessionCookie: []
+      parameters:
+        - in: query
+          name: key
+          schema: {type: string}
+        - in: query
+          name: scope_type
+          schema: {$ref: "#/components/schemas/PolicyScopeType"}
+        - in: query
+          name: scope_id
+          schema: {type: string, format: uuid}
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: "#/components/schemas/PolicySetting"}
+                  next_cursor: {type: [string, "null"]}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+
+  /api/policy/precedence:
+    get:
+      tags: [policy]
+      summary: Current precedence order (institution-wide)
+      operationId: getPolicyPrecedence
+      x-implementation-status: planned
+      x-task: T-E-115
+      x-required-capability: authenticated
+      security:
+        - sessionCookie: []
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PolicyPrecedence"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+    put:
+      tags: [policy]
+      summary: Replace the precedence order and per-key overrides
+      operationId: setPolicyPrecedence
+      x-implementation-status: planned
+      x-task: T-E-115
+      x-required-capability: policy_precedence
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [order_list]
+              properties:
+                order_list:
+                  type: array
+                  description: A permutation of all five scope types.
+                  items: {$ref: "#/components/schemas/PolicyScopeType"}
+                  minItems: 5
+                  maxItems: 5
+                  uniqueItems: true
+                per_key:
+                  type: object
+                  description: Optional per-key order, same permutation rule.
+                  additionalProperties:
+                    type: array
+                    items: {$ref: "#/components/schemas/PolicyScopeType"}
+                    minItems: 5
+                    maxItems: 5
+                    uniqueItems: true
+                rationale: {type: [string, "null"]}
+      responses:
+        "200":
+          description: Saved
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PolicyPrecedence"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "422": {$ref: "#/components/responses/ValidationFailed"}
+
+  /api/policy/presets:
+    get:
+      tags: [policy]
+      summary: Institutional policy presets
+      operationId: listPolicyPresets
+      x-implementation-status: planned
+      x-task: T-E-115
+      x-required-capability: policy_precedence
+      description: Preset definitions are seeded by T-D-108.
+      security:
+        - sessionCookie: []
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [presets]
+                properties:
+                  presets:
+                    type: array
+                    items: {$ref: "#/components/schemas/PolicyPreset"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+
+  /api/policy/presets/{preset_id}/apply:
+    post:
+      tags: [policy]
+      summary: Apply a preset to the institution scope
+      operationId: applyPolicyPreset
+      x-implementation-status: planned
+      x-task: T-E-115
+      x-required-capability: policy_precedence
+      x-scope-check: admin only (institution scope)
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      description: |
+        Writes each preset setting through `policy.set` at institution scope,
+        as one change set sharing `rationale`. Keys the preset does not name
+        are left unchanged.
+      parameters:
+        - in: path
+          name: preset_id
+          required: true
+          schema: {type: string, examples: [conference, mastery_first, reflective_cycle]}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                rationale: {type: [string, "null"]}
+      responses:
+        "200":
+          description: Applied
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [preset_id, applied]
+                properties:
+                  preset_id: {type: string}
+                  applied:
+                    type: array
+                    items: {$ref: "#/components/schemas/PolicySetting"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+
+  /api/policy/compliance-report:
+    get:
+      tags: [policy]
+      summary: Generated actions whose recorded policies differ from the policy in effect
+      operationId: getPolicyComplianceReport
+      x-implementation-status: planned
+      x-task: T-E-117
+      x-required-capability: compliance_report
+      x-scope-check: program_lead of program_id, or admin (program_id omitted = institution, admin only)
+      security:
+        - sessionCookie: []
+      description: Expected `mismatches_count` is 0.
+      parameters:
+        - in: query
+          name: program_id
+          schema: {type: string, format: uuid}
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ComplianceReport"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+
+  # ---------------------------------------------------------------------------
+  # Credentials (existing + verify)
+  # ---------------------------------------------------------------------------
 
   /api/pending-credentials/{course_id}:
     get:
       tags: [credentials]
       summary: Pending microcredentials awaiting instructor review in a course
       operationId: getPendingCredentials
-      description: Proxies MCP tool `assessments.list_pending_credentials`.
+      description: "Proxies MCP tool `assessments.list_pending_credentials`. Authorization (§4.4): faculty of this course, or admin."
+      x-required-capability: badge_approve
+      x-scope-check: caller is faculty of course_id, or admin
+      security:
+        - sessionCookie: []
       parameters:
         - $ref: "#/components/parameters/CourseIdPath"
         - in: query
@@ -508,6 +1835,8 @@ paths:
                             credential_title: {type: string}
                             created_at: {type: string, format: date-time}
                   - $ref: "#/components/schemas/ToolError"
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
 
   /api/credential-evidence/{pending_id}:
     get:
@@ -515,6 +1844,10 @@ paths:
       summary: Evidence for a pending microcredential
       operationId: getCredentialEvidence
       description: Proxies MCP tool `assessments.get_credential_evidence`.
+      x-required-capability: badge_approve
+      x-scope-check: caller is faculty of the pending credential's course, or admin
+      security:
+        - sessionCookie: []
       parameters:
         - $ref: "#/components/parameters/PendingIdPath"
       responses:
@@ -547,6 +1880,8 @@ paths:
                                 - type: "null"
                             attested_at: {type: [string, "null"], format: date-time}
                   - $ref: "#/components/schemas/ToolError"
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
 
   /api/approve-credential/{pending_id}:
     post:
@@ -556,6 +1891,13 @@ paths:
       description: |
         Proxies MCP tool `assessments.approve_credential`. Does not go through
         the approval_request / POST /api/approval gate; the click is the approval.
+        Once T-E-103 lands, `reviewer_id` must equal the authenticated person
+        (403 otherwise).
+      x-required-capability: badge_approve
+      x-scope-check: caller is faculty of the pending credential's course, or admin
+      security:
+        - sessionCookie: []
+          csrfHeader: []
       parameters:
         - $ref: "#/components/parameters/PendingIdPath"
       requestBody:
@@ -572,6 +1914,8 @@ paths:
                 oneOf:
                   - $ref: "#/components/schemas/ApproveResult"
                   - $ref: "#/components/schemas/ToolError"
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
         "422":
           description: Missing reviewer_id
           content:
@@ -586,6 +1930,14 @@ paths:
       description: |
         Calls `assessments.approve_credential` once per id, sequentially. Each
         result is reported independently; one failure does not stop the rest.
+        A pending id outside the caller's courses is reported as a per-item
+        error. Once T-E-103 lands, `reviewer_id` must equal the authenticated
+        person (403 otherwise).
+      x-required-capability: badge_approve
+      x-scope-check: per pending id, caller is faculty of its course, or admin
+      security:
+        - sessionCookie: []
+          csrfHeader: []
       requestBody:
         required: true
         content:
@@ -618,11 +1970,51 @@ paths:
                         approved: {type: boolean}
                         credential_id: {type: string, format: uuid}
                         error: {type: string}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
         "422":
           description: Malformed body
           content:
             application/json:
               schema: {$ref: "#/components/schemas/ValidationError"}
+
+  /api/credentials/verify:
+    post:
+      tags: [credentials]
+      summary: Verify a signed credential's signature, issuer and revocation status
+      operationId: verifyCredential
+      x-implementation-status: planned
+      x-task: T-E-122
+      x-required-capability: authenticated
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      description: |
+        Spec §11.4 says GET; POST is used because the input is a full credential
+        document. An invalid or tampered credential is a 200 with `valid: false`;
+        422 only when the body is not a credential at all.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [credential]
+              properties:
+                credential:
+                  description: OB 3.0 credential as JSON-LD (Data Integrity proof) or a VC-JWT compact string.
+                  oneOf:
+                    - type: object
+                    - type: string
+      responses:
+        "200":
+          description: Verification result
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/VerifyResult"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "422": {$ref: "#/components/responses/ValidationFailed"}
 
   /api/credentials/{person_id}:
     get:
@@ -630,6 +2022,10 @@ paths:
       summary: Issued credentials for a student, newest first
       operationId: getIssuedCredentials
       description: Proxies MCP tool `assessments.list_issued_credentials`.
+      x-required-capability: authenticated
+      x-scope-check: scope.can_view_student(ctx, person_id, purpose="credentials")
+      security:
+        - sessionCookie: []
       parameters:
         - $ref: "#/components/parameters/PersonIdPath"
       responses:
@@ -656,13 +2052,18 @@ paths:
                               type: string
                               description: Reviewer display name.
                   - $ref: "#/components/schemas/ToolError"
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
 
   /api/settings:
     get:
       tags: [credentials]
       summary: Read system settings
       operationId: getSettings
-      description: Proxies MCP tool `assessments.get_settings`.
+      description: "Proxies MCP tool `assessments.get_settings`. Authorization (§4.4): admin only."
+      x-required-capability: system_settings
+      security:
+        - sessionCookie: []
       parameters:
         - in: query
           name: key
@@ -690,11 +2091,17 @@ paths:
                         type: object
                         additionalProperties: {}
                   - $ref: "#/components/schemas/ToolError"
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
     post:
       tags: [credentials]
       summary: Create or replace one system setting
       operationId: saveSetting
-      description: Proxies MCP tool `assessments.save_settings`. A null value is rejected.
+      description: "Proxies MCP tool `assessments.save_settings`. A null value is rejected. Authorization (§4.4): admin only."
+      x-required-capability: system_settings
+      security:
+        - sessionCookie: []
+          csrfHeader: []
       requestBody:
         required: true
         content:
@@ -718,11 +2125,551 @@ paths:
                     properties:
                       saved: {type: boolean, const: true}
                   - $ref: "#/components/schemas/ToolError"
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
         "422":
           description: Malformed body
           content:
             application/json:
               schema: {$ref: "#/components/schemas/ValidationError"}
+
+  # ---------------------------------------------------------------------------
+  # Record of learning (planned)
+  # ---------------------------------------------------------------------------
+
+  /api/programs/{program_id}/outcomes-report:
+    get:
+      tags: [record]
+      summary: Program outcome rollup / accreditation export
+      operationId: getProgramOutcomesReport
+      x-implementation-status: planned
+      x-task: T-D-111
+      x-required-capability: program_outcome_report
+      x-scope-check: program_lead of the program or admin; faculty get only their own courses' slice
+      security:
+        - sessionCookie: []
+      description: |
+        Wraps `analytics.program_outcomes`. Uses only committed data and
+        `course`/`program`-visibility evidence. Students are counted, never
+        named. `format=csv` has one row per program outcome × supporting
+        course outcome.
+      parameters:
+        - $ref: "#/components/parameters/ProgramIdPath"
+        - in: query
+          name: format
+          schema: {type: string, enum: [json, csv], default: json}
+        - in: query
+          name: cohort
+          description: Optional cohort label (e.g. a term code).
+          schema: {type: string}
+      responses:
+        "200":
+          description: ok
+          headers:
+            Content-Disposition:
+              description: Set to `attachment` when format=csv.
+              schema: {type: string}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/OutcomesReport"}
+            text/csv:
+              schema: {type: string}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+
+  /api/learners/{person_id}/clr:
+    get:
+      tags: [record]
+      summary: Signed Comprehensive Learner Record (1EdTech CLR 2.0) for a learner
+      operationId: getLearnerClr
+      x-implementation-status: planned
+      x-task: T-E-123
+      x-required-capability: authenticated
+      x-scope-check: |
+        self, assigned advisor, or admin; faculty receive only achievements from
+        their own courses. Every non-self read goes through
+        scope.can_view_student(purpose="clr").
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/PersonIdPath"
+        - in: query
+          name: download
+          description: "Adds `Content-Disposition: attachment`."
+          schema: {type: boolean, default: false}
+      responses:
+        "200":
+          description: CLR 2.0 JSON-LD document
+          content:
+            application/ld+json:
+              schema: {$ref: "#/components/schemas/ClrDocument"}
+            application/json:
+              schema: {$ref: "#/components/schemas/ClrDocument"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+
+  # ---------------------------------------------------------------------------
+  # Privacy: My Data (planned)
+  # ---------------------------------------------------------------------------
+
+  /api/me/data:
+    get:
+      tags: [privacy]
+      summary: Everything the platform holds about the caller, for the My Data page
+      operationId: getMyData
+      x-implementation-status: planned
+      x-task: T-E-124
+      x-required-capability: my_data
+      security:
+        - sessionCookie: []
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/MyData"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+
+  /api/me/data/disputes:
+    post:
+      tags: [privacy]
+      summary: Dispute a statement in the caller's learner profile
+      operationId: disputeProfileStatement
+      x-implementation-status: planned
+      x-task: T-E-124
+      x-required-capability: my_data
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      description: |
+        Writes `human_decisions(decision=disputed)` against the profile_update
+        ai_action that introduced the statement. The analyst may not reassert
+        it without new evidence.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [statement]
+              properties:
+                statement:
+                  type: string
+                  description: The disputed line, verbatim from MyData.profile.text.
+                ai_action_id:
+                  type: [string, "null"]
+                  format: uuid
+                  description: The profile_update action, when known.
+                reason: {type: [string, "null"]}
+      responses:
+        "201":
+          description: Recorded
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/HumanDecision"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "409":
+          description: The statement is already disputed.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorDetail"}
+        "422":
+          description: The statement is not in the caller's current profile, or malformed body.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorDetail"}
+
+  /api/me/data/export:
+    get:
+      tags: [privacy]
+      summary: Download all of the caller's data as JSON
+      operationId: exportMyData
+      x-implementation-status: planned
+      x-task: T-E-124
+      x-required-capability: my_data
+      security:
+        - sessionCookie: []
+      description: 'Synchronous; sent with `Content-Disposition: attachment; filename="my-data.json"`.'
+      responses:
+        "200":
+          description: ok
+          headers:
+            Content-Disposition:
+              schema: {type: string}
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/MyDataExport"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+
+  /api/me/deletion-request:
+    post:
+      tags: [privacy]
+      summary: Request deletion of the caller's personal data
+      operationId: requestDeletion
+      x-implementation-status: planned
+      x-task: T-E-124
+      x-required-capability: my_data
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      description: |
+        Queued for admin approval. On approval, conversation content and the
+        learner profile are purged; committed grades and issued credentials
+        are kept as institutional records.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: {type: [string, "null"]}
+      responses:
+        "201":
+          description: Queued
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/DeletionRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "409":
+          description: A pending request already exists.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorDetail"}
+
+  /api/deletion-requests:
+    get:
+      tags: [privacy]
+      summary: Deletion requests queue (admin)
+      operationId: listDeletionRequests
+      x-implementation-status: planned
+      x-task: T-E-124
+      x-required-capability: deletion_request_approval
+      security:
+        - sessionCookie: []
+      parameters:
+        - in: query
+          name: status
+          schema: {$ref: "#/components/schemas/DeletionRequestStatus"}
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: "#/components/schemas/DeletionRequest"}
+                  next_cursor: {type: [string, "null"]}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+
+  /api/deletion-requests/{request_id}/decision:
+    post:
+      tags: [privacy]
+      summary: Approve (and execute) or reject a deletion request (admin)
+      operationId: decideDeletionRequest
+      x-implementation-status: planned
+      x-task: T-E-124
+      x-required-capability: deletion_request_approval
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      parameters:
+        - in: path
+          name: request_id
+          required: true
+          schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision]
+              properties:
+                decision: {type: string, enum: [approve, reject]}
+                reason: {type: [string, "null"]}
+      responses:
+        "200":
+          description: Decided; on approve the purge has completed.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/DeletionRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409":
+          description: Request is not pending.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorDetail"}
+
+  # ---------------------------------------------------------------------------
+  # Notifications (planned)
+  # ---------------------------------------------------------------------------
+
+  /api/notifications:
+    get:
+      tags: [notifications]
+      summary: The caller's notifications, newest first (dismissed excluded)
+      operationId: listNotifications
+      x-implementation-status: planned
+      x-task: T-E-121
+      x-required-capability: notifications
+      security:
+        - sessionCookie: []
+      parameters:
+        - in: query
+          name: unread_only
+          schema: {type: boolean, default: false}
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, unread_count]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: "#/components/schemas/Notification"}
+                  unread_count: {type: integer, minimum: 0}
+                  next_cursor: {type: [string, "null"]}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+
+  /api/notifications/read-all:
+    post:
+      tags: [notifications]
+      summary: Mark all of the caller's notifications read
+      operationId: markAllNotificationsRead
+      x-implementation-status: planned
+      x-task: T-E-121
+      x-required-capability: notifications
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [unread_count]
+                properties:
+                  unread_count: {type: integer, const: 0}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+
+  /api/notifications/{notification_id}/read:
+    post:
+      tags: [notifications]
+      summary: Mark one notification read (idempotent)
+      operationId: markNotificationRead
+      x-implementation-status: planned
+      x-task: T-E-121
+      x-required-capability: notifications
+      x-scope-check: notification belongs to the caller (404 otherwise)
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      parameters:
+        - $ref: "#/components/parameters/NotificationIdPath"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Notification"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+
+  /api/notifications/{notification_id}/dismiss:
+    post:
+      tags: [notifications]
+      summary: Dismiss one notification (idempotent)
+      operationId: dismissNotification
+      x-implementation-status: planned
+      x-task: T-E-121
+      x-required-capability: notifications
+      x-scope-check: notification belongs to the caller (404 otherwise)
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      description: |
+        When the notification has an `ai_action_id` (nudge / alert), also
+        writes `human_decisions(decision=dismissed)`.
+      parameters:
+        - $ref: "#/components/parameters/NotificationIdPath"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Notification"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+
+  # ---------------------------------------------------------------------------
+  # Study aids: flashcards (planned)
+  # ---------------------------------------------------------------------------
+
+  /api/flashcards/decks:
+    post:
+      tags: [study]
+      summary: Generate a flashcard deck from a reading or a set of concept nodes
+      operationId: generateFlashcardDeck
+      x-implementation-status: planned
+      x-task: T-A-107
+      x-required-capability: content_generation
+      x-scope-check: student enrolled in course_id (deck is for self); faculty of course_id
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      description: |
+        Calls `content.generate_flashcards`; honors `ai.content_sources`.
+        Exactly one of `content_item_id` or `node_ids` is required.
+        Synchronous: returns once the deck is saved as a `flashcard_deck`
+        content item.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [course_id]
+              properties:
+                course_id: {type: string, format: uuid}
+                content_item_id: {type: [string, "null"], format: uuid}
+                node_ids:
+                  type: [array, "null"]
+                  items: {type: string, format: uuid}
+                count: {type: integer, minimum: 1, maximum: 50, default: 10}
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/FlashcardDeck"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403":
+          description: Out of scope, source excluded by ai.content_sources, or CSRF failure.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorDetail"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/ValidationFailed"}
+    get:
+      tags: [study]
+      summary: Flashcard decks the caller can use
+      operationId: listFlashcardDecks
+      x-implementation-status: planned
+      x-task: T-A-107
+      x-required-capability: authenticated
+      x-scope-check: decks in the caller's courses (students also see their own generated decks)
+      security:
+        - sessionCookie: []
+      parameters:
+        - in: query
+          name: course_id
+          schema: {type: string, format: uuid}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [decks]
+                properties:
+                  decks:
+                    type: array
+                    items: {$ref: "#/components/schemas/FlashcardDeckSummary"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+
+  /api/flashcards/decks/{deck_id}:
+    get:
+      tags: [study]
+      summary: One flashcard deck with its cards
+      operationId: getFlashcardDeck
+      x-implementation-status: planned
+      x-task: T-A-107
+      x-required-capability: authenticated
+      x-scope-check: same as GET /api/flashcards/decks
+      security:
+        - sessionCookie: []
+      parameters:
+        - $ref: "#/components/parameters/DeckIdPath"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/FlashcardDeck"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+
+  /api/flashcards/decks/{deck_id}/cards/{card_id}/review:
+    post:
+      tags: [study]
+      summary: Grade one card review (Again / Hard / Good / Easy)
+      operationId: reviewFlashcard
+      x-implementation-status: planned
+      x-task: T-A-107
+      x-required-capability: authenticated
+      x-scope-check: caller is a student enrolled in the deck's course
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      description: |
+        Feeds the SM-2 scheduler (§10.2, T-D-109) for the card's `node_id`.
+        Scheduling state is per concept (concept_reviews), so cards on the
+        same node share one schedule. Evidence from reviews is `private`.
+      parameters:
+        - $ref: "#/components/parameters/DeckIdPath"
+        - in: path
+          name: card_id
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [grade]
+              properties:
+                grade: {type: string, enum: [again, hard, good, easy]}
+      responses:
+        "200":
+          description: Updated schedule for the card's concept
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ReviewSchedule"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "422": {$ref: "#/components/responses/ValidationFailed"}
+
+  # ---------------------------------------------------------------------------
+  # Podcast (existing)
+  # ---------------------------------------------------------------------------
 
   /api/generate-podcast:
     post:
@@ -734,6 +2681,13 @@ paths:
         the session's conversation, else the student's emerging/proficient
         concepts. At most 5 concepts are used. Synchronous: the request returns
         once audio (or a text-only fallback) has been rendered.
+        Once T-E-103 lands: for the student role `person_id` must be the
+        caller; faculty may name a student enrolled in their course. 403 otherwise.
+      x-required-capability: content_generation
+      x-scope-check: student = self; faculty = student enrolled in own course_id
+      security:
+        - sessionCookie: []
+          csrfHeader: []
       requestBody:
         required: true
         content:
@@ -770,6 +2724,8 @@ paths:
                       segment_count: {type: integer}
                       title: {type: string}
                   - $ref: "#/components/schemas/ToolError"
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
         "422":
           description: Malformed body
           content:
@@ -781,6 +2737,12 @@ paths:
       tags: [podcast]
       summary: Serve a generated podcast file
       operationId: serveAudio
+      x-required-capability: authenticated
+      security:
+        - sessionCookie: []
+      description: |
+        Requires a session cookie (sent automatically by `<audio src>` on the
+        same host). Files carry no owner, so there is no object-level check.
       parameters:
         - in: path
           name: filename
@@ -798,8 +2760,50 @@ paths:
               schema: {type: string}
             application/json:
               schema: {$ref: "#/components/schemas/ToolError"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
 
 components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: lms_session
+      description: |
+        Opaque session token set by POST /api/auth/login. HttpOnly;
+        SameSite=Lax; Path=/; Secure when COOKIE_SECURE=true; Max-Age =
+        SESSION_TTL_HOURS (default 12) with sliding expiry. The server stores
+        only sha256(token) in auth_sessions.
+    csrfHeader:
+      type: apiKey
+      in: header
+      name: X-CSRF-Token
+      description: |
+        Double-submit CSRF token. Must equal the `lms_csrf` cookie (the
+        session's csrf_token). Required on every non-GET /api/* request except
+        POST /api/auth/login; missing or mismatched returns 403.
+
+  responses:
+    Unauthorized:
+      description: No session cookie, or the session is expired or revoked. Clients clear state and redirect to /login.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ErrorDetail"}
+    Forbidden:
+      description: Missing or mismatched X-CSRF-Token, or the caller lacks the capability or scope.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ErrorDetail"}
+    NotFound:
+      description: No such resource in the caller's scope.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ErrorDetail"}
+    ValidationFailed:
+      description: Malformed body or parameters.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ValidationError"}
+
   parameters:
     PersonIdPath:
       in: path
@@ -821,6 +2825,56 @@ components:
       name: pending_id
       required: true
       schema: {type: string, format: uuid}
+    ProgramIdPath:
+      in: path
+      name: program_id
+      required: true
+      description: Program node id.
+      schema: {type: string, format: uuid}
+    SubmissionIdPath:
+      in: path
+      name: submission_id
+      required: true
+      schema: {type: string, format: uuid}
+    AiActionIdPath:
+      in: path
+      name: ai_action_id
+      required: true
+      schema: {type: string, format: uuid}
+    NotificationIdPath:
+      in: path
+      name: notification_id
+      required: true
+      schema: {type: string, format: uuid}
+    DeckIdPath:
+      in: path
+      name: deck_id
+      required: true
+      description: content_items.id of a `flashcard_deck`.
+      schema: {type: string, format: uuid}
+    From:
+      in: query
+      name: from
+      required: false
+      description: Inclusive start (ISO 8601).
+      schema: {type: string, format: date-time}
+    To:
+      in: query
+      name: to
+      required: false
+      description: Exclusive end (ISO 8601). Default now.
+      schema: {type: string, format: date-time}
+    Limit:
+      in: query
+      name: limit
+      required: false
+      schema: {type: integer, minimum: 1, maximum: 200, default: 50}
+    Cursor:
+      in: query
+      name: cursor
+      required: false
+      description: Opaque `next_cursor` from the previous page.
+      schema: {type: string}
 
   schemas:
     ToolError:
@@ -849,6 +2903,1274 @@ components:
               loc: {type: array, items: {}}
               msg: {type: string}
               type: {type: string}
+
+    # ---- auth --------------------------------------------------------------
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          description: Case-insensitive; defaults to the person's email.
+        password: {type: string}
+
+    PersonRole:
+      type: string
+      enum: [student, faculty, program_lead, advisor, admin]
+
+    Enrollment:
+      type: object
+      required: [course_id, slug, title, role]
+      properties:
+        course_id: {type: string, format: uuid}
+        slug: {type: string, examples: [cs101]}
+        title: {type: string}
+        role:
+          type: string
+          description: enrollments.role
+          enum: [student, faculty, ta, observer]
+
+    CapabilityGrant:
+      description: |
+        Present = granted. `scope` is whose data; `access` is how much. Values
+        already reflect policy (e.g. data.instructor_transcript_access), so a
+        policy of `none` removes the key.
+      type: object
+      required: [scope, access]
+      properties:
+        scope: {type: string, enum: [self, own, program, assigned, all]}
+        access: {type: string, enum: [full, read, summary, aggregate]}
+
+    Capabilities:
+      description: |
+        Computed server-side from the §17 matrix for the active role. A missing
+        key means not permitted. The server enforces the same rules.
+      type: object
+      additionalProperties: false
+      properties:
+        course_list: {$ref: "#/components/schemas/CapabilityGrant"}
+        tutor_chat: {$ref: "#/components/schemas/CapabilityGrant"}
+        content_generation: {$ref: "#/components/schemas/CapabilityGrant"}
+        submit_work: {$ref: "#/components/schemas/CapabilityGrant"}
+        feedback_release: {$ref: "#/components/schemas/CapabilityGrant"}
+        grade_commit: {$ref: "#/components/schemas/CapabilityGrant"}
+        improvement_view: {$ref: "#/components/schemas/CapabilityGrant"}
+        mastery_matrix: {$ref: "#/components/schemas/CapabilityGrant"}
+        attestation_override: {$ref: "#/components/schemas/CapabilityGrant"}
+        badge_approve: {$ref: "#/components/schemas/CapabilityGrant"}
+        badge_revoke: {$ref: "#/components/schemas/CapabilityGrant"}
+        roster: {$ref: "#/components/schemas/CapabilityGrant"}
+        transcripts_of_others: {$ref: "#/components/schemas/CapabilityGrant"}
+        learner_profile_of_others: {$ref: "#/components/schemas/CapabilityGrant"}
+        early_alert_flags: {$ref: "#/components/schemas/CapabilityGrant"}
+        degree_audit: {$ref: "#/components/schemas/CapabilityGrant"}
+        ai_review: {$ref: "#/components/schemas/CapabilityGrant"}
+        ai_actions_log: {$ref: "#/components/schemas/CapabilityGrant"}
+        policy_edit: {$ref: "#/components/schemas/CapabilityGrant"}
+        policy_precedence: {$ref: "#/components/schemas/CapabilityGrant"}
+        compliance_report: {$ref: "#/components/schemas/CapabilityGrant"}
+        program_outcome_report: {$ref: "#/components/schemas/CapabilityGrant"}
+        my_data: {$ref: "#/components/schemas/CapabilityGrant"}
+        deletion_request_approval: {$ref: "#/components/schemas/CapabilityGrant"}
+        system_settings:
+          description: §17 "Badge issuer / provider settings"; gates /api/settings.
+          $ref: "#/components/schemas/CapabilityGrant"
+        notifications: {$ref: "#/components/schemas/CapabilityGrant"}
+
+    Me:
+      description: The /api/auth/me payload (also returned by login and role switch).
+      type: object
+      required: [person, roles, active_role, enrollments, advisees_count, home_route,
+                 capabilities, effective_ui_policy, must_change_password]
+      properties:
+        person:
+          type: object
+          required: [id, display_name, email]
+          properties:
+            id: {type: string, format: uuid}
+            display_name: {type: string}
+            email: {type: [string, "null"]}
+        roles:
+          type: array
+          items: {$ref: "#/components/schemas/PersonRole"}
+          minItems: 1
+        active_role: {$ref: "#/components/schemas/PersonRole"}
+        enrollments:
+          type: array
+          description: Courses for the course list. Empty for advisor/admin, who use a scope entry instead.
+          items: {$ref: "#/components/schemas/Enrollment"}
+        advisees_count:
+          type: integer
+          minimum: 0
+          description: Rows in advisor_assignments for this person; 0 unless advisor.
+        home_route:
+          type: string
+          description: Default landing route for the active role (§9), e.g. `/`.
+        capabilities: {$ref: "#/components/schemas/Capabilities"}
+        effective_ui_policy:
+          type: object
+          description: |
+            Resolved values of `ui`-enforced policy keys the UI needs (e.g.
+            `gamification.show_mastery_bars`), keyed by registry key. Values only;
+            use /api/policy/effective for sources.
+          additionalProperties: {}
+        must_change_password:
+          type: boolean
+          description: credentials.must_change; the UI routes to Change password when true.
+
+    # ---- home --------------------------------------------------------------
+
+    HomePayload:
+      oneOf:
+        - $ref: "#/components/schemas/StudentHome"
+        - $ref: "#/components/schemas/FacultyHome"
+        - $ref: "#/components/schemas/ProgramLeadHome"
+        - $ref: "#/components/schemas/AdvisorHome"
+        - $ref: "#/components/schemas/AdminHome"
+      discriminator:
+        propertyName: role
+        mapping:
+          student: "#/components/schemas/StudentHome"
+          faculty: "#/components/schemas/FacultyHome"
+          program_lead: "#/components/schemas/ProgramLeadHome"
+          advisor: "#/components/schemas/AdvisorHome"
+          admin: "#/components/schemas/AdminHome"
+
+    CourseRef:
+      type: object
+      required: [course_id, title]
+      properties:
+        course_id: {type: string, format: uuid}
+        slug: {type: [string, "null"]}
+        title: {type: string}
+
+    DueItem:
+      type: object
+      required: [assignment_id, title, course, due_at, status]
+      properties:
+        assignment_id: {type: string, format: uuid}
+        title: {type: string}
+        course: {$ref: "#/components/schemas/CourseRef"}
+        due_at: {type: string, format: date-time}
+        status: {type: string, enum: [not_started, draft_submitted, submitted]}
+        link: {type: [string, "null"]}
+
+    WhyItem:
+      description: One plain-language reason with the source it came from.
+      type: object
+      required: [text]
+      properties:
+        text: {type: string, examples: ["Your last two ENG 102 drafts scored 'Developing' on Evidence."]}
+        source: {$ref: "#/components/schemas/ProvenanceSource"}
+
+    Recommendation:
+      type: object
+      required: [ai_action_id, title, why]
+      properties:
+        ai_action_id:
+          type: string
+          format: uuid
+          description: Start / Snooze / Not helpful post to /api/ai-actions/{ai_action_id}/decisions.
+        title: {type: string}
+        course: {$ref: "#/components/schemas/CourseRef"}
+        link: {type: [string, "null"]}
+        why:
+          type: array
+          minItems: 1
+          items: {$ref: "#/components/schemas/WhyItem"}
+
+    CalendarEvent:
+      type: object
+      required: [id, title, starts_at, kind]
+      properties:
+        id: {type: string}
+        title: {type: string}
+        starts_at: {type: string, format: date-time}
+        ends_at: {type: [string, "null"], format: date-time}
+        kind: {type: string, enum: [due, review, event]}
+        course: {$ref: "#/components/schemas/CourseRef"}
+        link: {type: [string, "null"]}
+
+    Goal:
+      type: object
+      properties:
+        description: {type: string}
+        target_date: {type: [string, "null"]}
+        created_at: {type: string, format: date-time}
+        status: {type: string}
+
+    StudentHome:
+      type: object
+      required: [role, due_items, practice_sets, reviews_due, recommendations, mastery,
+                 goals, grade_outlook, calendar, unread_notifications]
+      properties:
+        role: {type: string, const: student}
+        due_items:
+          type: array
+          description: Sorted by due_at ascending, across all enrolled courses.
+          items: {$ref: "#/components/schemas/DueItem"}
+        practice_sets:
+          type: array
+          items:
+            type: object
+            required: [ai_action_id, title, item_count]
+            properties:
+              ai_action_id: {type: string, format: uuid}
+              title: {type: string}
+              course: {$ref: "#/components/schemas/CourseRef"}
+              criterion_key: {type: [string, "null"]}
+              item_count: {type: integer}
+              link: {type: [string, "null"]}
+        reviews_due:
+          type: array
+          items:
+            type: object
+            required: [node_id, title, due_at]
+            properties:
+              node_id: {type: string, format: uuid}
+              title: {type: string}
+              course: {$ref: "#/components/schemas/CourseRef"}
+              due_at: {type: string, format: date-time}
+        recommendations:
+          type: array
+          maxItems: 3
+          items: {$ref: "#/components/schemas/Recommendation"}
+        mastery:
+          type: object
+          required: [display]
+          properties:
+            display:
+              type: string
+              enum: [bars, narrative]
+              description: "`narrative` when gamification.show_mastery_bars=false."
+            courses:
+              type: array
+              items:
+                type: object
+                required: [course, counts]
+                properties:
+                  course: {$ref: "#/components/schemas/CourseRef"}
+                  counts: {$ref: "#/components/schemas/LevelCounts"}
+            narrative: {type: [string, "null"]}
+        goals:
+          type: array
+          items: {$ref: "#/components/schemas/Goal"}
+        grade_outlook:
+          type: array
+          description: Inputs for the client-side what-if projection. No LLM involved.
+          items:
+            type: object
+            required: [course, current_percent, remaining_items]
+            properties:
+              course: {$ref: "#/components/schemas/CourseRef"}
+              current_percent:
+                type: [number, "null"]
+                description: From committed grades only; null if none.
+              graded_weight:
+                type: [number, "null"]
+                description: Fraction (0–1) of the course grade already committed.
+              remaining_items:
+                type: array
+                items:
+                  type: object
+                  required: [assignment_id, title]
+                  properties:
+                    assignment_id: {type: string, format: uuid}
+                    title: {type: string}
+                    weight: {type: [number, "null"]}
+                    points_possible: {type: [number, "null"]}
+        calendar:
+          type: array
+          items: {$ref: "#/components/schemas/CalendarEvent"}
+        unread_notifications: {type: integer, minimum: 0}
+
+    ReviewQueueItem:
+      type: object
+      required: [kind, id, title, course, created_at]
+      properties:
+        kind: {type: string, enum: [feedback_release, grade_commit, credential_approval, attestation_override]}
+        id:
+          type: string
+          description: Submission, grade, pending credential or attestation id, by kind.
+        title: {type: string}
+        course: {$ref: "#/components/schemas/CourseRef"}
+        student_id: {type: [string, "null"], format: uuid}
+        student_name: {type: [string, "null"]}
+        created_at: {type: string, format: date-time}
+        link: {type: [string, "null"]}
+
+    AttentionSignal:
+      type: object
+      required: [kind, why, created_at]
+      properties:
+        kind: {type: string, enum: [review_flag, early_alert, stalled]}
+        ai_action_id: {type: [string, "null"], format: uuid}
+        why:
+          type: array
+          items: {$ref: "#/components/schemas/WhyItem"}
+        created_at: {type: string, format: date-time}
+
+    FacultyHome:
+      type: object
+      required: [role, review_queue, students_needing_attention, ai_review]
+      properties:
+        role: {type: string, const: faculty}
+        review_queue:
+          type: array
+          items: {$ref: "#/components/schemas/ReviewQueueItem"}
+        students_needing_attention:
+          type: array
+          items:
+            type: object
+            required: [student_id, display_name, course, signals]
+            properties:
+              student_id: {type: string, format: uuid}
+              display_name: {type: string}
+              course: {$ref: "#/components/schemas/CourseRef"}
+              signals:
+                type: array
+                items: {$ref: "#/components/schemas/AttentionSignal"}
+        ai_review:
+          type: array
+          description: Per own course.
+          items:
+            type: object
+            required: [course, totals]
+            properties:
+              course: {$ref: "#/components/schemas/CourseRef"}
+              totals: {$ref: "#/components/schemas/DecisionRates"}
+
+    ProgramLeadHome:
+      type: object
+      required: [role, programs]
+      properties:
+        role: {type: string, const: program_lead}
+        programs:
+          type: array
+          items:
+            type: object
+            required: [program_id, title, outcome_coverage]
+            properties:
+              program_id: {type: string, format: uuid}
+              title: {type: string}
+              courses:
+                type: array
+                items: {$ref: "#/components/schemas/CourseRef"}
+              outcome_coverage:
+                type: array
+                items:
+                  type: object
+                  required: [program_outcome_id, title, counts]
+                  properties:
+                    program_outcome_id: {type: string, format: uuid}
+                    title: {type: string}
+                    counts: {$ref: "#/components/schemas/OutcomeStudentCounts"}
+              ai_review: {$ref: "#/components/schemas/DecisionRates"}
+
+    AdvisorHome:
+      type: object
+      required: [role, caseload]
+      properties:
+        role: {type: string, const: advisor}
+        caseload:
+          type: array
+          items:
+            type: object
+            required: [student_id, display_name, courses, flags, upcoming_deadlines]
+            properties:
+              student_id: {type: string, format: uuid}
+              display_name: {type: string}
+              courses:
+                type: array
+                items:
+                  type: object
+                  required: [course, counts]
+                  properties:
+                    course: {$ref: "#/components/schemas/CourseRef"}
+                    counts: {$ref: "#/components/schemas/LevelCounts"}
+                    last_active: {type: [string, "null"], format: date-time}
+              flags:
+                type: array
+                description: Subject to data.* policies.
+                items: {$ref: "#/components/schemas/AttentionSignal"}
+              upcoming_deadlines:
+                type: array
+                items: {$ref: "#/components/schemas/DueItem"}
+
+    AdminHome:
+      type: object
+      required: [role, overview, compliance, ai_review]
+      properties:
+        role: {type: string, const: admin}
+        overview:
+          type: object
+          properties:
+            students: {type: integer}
+            faculty: {type: integer}
+            courses: {type: integer}
+            programs: {type: integer}
+            active_sessions_7d: {type: integer}
+        compliance:
+          type: object
+          required: [mismatches_count]
+          properties:
+            from: {type: string, format: date-time}
+            to: {type: string, format: date-time}
+            mismatches_count: {type: integer}
+        ai_review: {$ref: "#/components/schemas/DecisionRates"}
+        pending_deletion_requests: {type: integer}
+
+    # ---- provenance --------------------------------------------------------
+
+    AiActionType:
+      type: string
+      enum: [generation, grade_draft, criterion_feedback, practice_item, recommendation,
+             attestation, profile_update, nudge, alert]
+
+    ProvenanceSource:
+      type: object
+      required: [type, id]
+      properties:
+        type: {type: string, enum: [content_item, node, submission, rubric, policy]}
+        id: {type: string}
+        version: {type: [integer, string, "null"]}
+        title:
+          type: [string, "null"]
+          description: Display label resolved at read time.
+
+    AppliedPolicy:
+      type: object
+      required: [key, value, scope_type]
+      properties:
+        key: {type: string}
+        value: {}
+        scope_type: {$ref: "#/components/schemas/PolicyScopeType"}
+        scope_id: {type: [string, "null"], format: uuid}
+        version: {type: [integer, "null"]}
+
+    HumanDecisionValue:
+      type: string
+      enum: [accepted, edited, rejected, overridden, dismissed, disputed, snoozed]
+
+    HumanDecision:
+      type: object
+      required: [id, ai_action_id, decided_by, decision, decided_at]
+      properties:
+        id: {type: string, format: uuid}
+        ai_action_id: {type: string, format: uuid}
+        decided_by: {type: string, format: uuid}
+        decided_by_name: {type: [string, "null"]}
+        decision: {$ref: "#/components/schemas/HumanDecisionValue"}
+        diff:
+          type: [object, "null"]
+          description: Structured diff, e.g. per-criterion score deltas and text edit stats.
+        reason: {type: [string, "null"]}
+        decided_at: {type: string, format: date-time}
+
+    OutcomeLink:
+      type: object
+      required: [ai_action_id, observed_at]
+      properties:
+        ai_action_id: {type: string, format: uuid}
+        evidence_id: {type: [string, "null"], format: uuid}
+        attestation_id: {type: [string, "null"], format: uuid}
+        delta:
+          type: [object, "null"]
+          examples: [{criterion: thesis, before: 2, after: 3}]
+        observed_at: {type: string, format: date-time}
+
+    AiAction:
+      description: Anything the software produced that a person could see or act on.
+      type: object
+      required: [id, agent, action_type, sources, policies, output, created_at, decisions]
+      properties:
+        id: {type: string, format: uuid}
+        session_id: {type: [string, "null"], format: uuid}
+        turn_id: {type: [string, "null"], format: uuid}
+        agent: {type: string}
+        action_type: {$ref: "#/components/schemas/AiActionType"}
+        subject_person_id: {type: [string, "null"], format: uuid}
+        course_id: {type: [string, "null"], format: uuid}
+        target_type: {type: [string, "null"], examples: [grades]}
+        target_id: {type: [string, "null"], format: uuid}
+        sources:
+          type: array
+          items: {$ref: "#/components/schemas/ProvenanceSource"}
+        policies:
+          type: array
+          items: {$ref: "#/components/schemas/AppliedPolicy"}
+        model: {type: [string, "null"]}
+        prompt_sha256: {type: [string, "null"]}
+        output: {type: object}
+        created_at: {type: string, format: date-time}
+        decisions:
+          type: array
+          description: Oldest first.
+          items: {$ref: "#/components/schemas/HumanDecision"}
+        outcome_links:
+          type: array
+          items: {$ref: "#/components/schemas/OutcomeLink"}
+
+    # ---- measurement -------------------------------------------------------
+
+    DecisionRates:
+      description: Counts and rates of human decisions on generated items. Rates are over decided items, 0–1.
+      type: object
+      required: [total, accepted, edited, rejected, undecided]
+      properties:
+        agent: {type: [string, "null"]}
+        action_type:
+          oneOf:
+            - $ref: "#/components/schemas/AiActionType"
+            - type: "null"
+        total: {type: integer}
+        accepted: {type: integer}
+        edited: {type: integer}
+        rejected: {type: integer}
+        other:
+          type: integer
+          description: overridden, dismissed, disputed, snoozed.
+        undecided: {type: integer}
+        acceptance_rate: {type: [number, "null"]}
+        edit_rate: {type: [number, "null"]}
+        reject_rate: {type: [number, "null"]}
+
+    DeltaStat:
+      type: object
+      required: [n]
+      properties:
+        n: {type: integer}
+        mean_delta: {type: [number, "null"]}
+
+    MeasurementSummary:
+      type: object
+      required: [scope, from, to, rates, criterion_score_changes, learning_delta_by_decision,
+                 most_edited_criteria]
+      properties:
+        scope:
+          type: object
+          required: [type]
+          properties:
+            type: {type: string, enum: [course, program, institution]}
+            id: {type: [string, "null"], format: uuid}
+            title: {type: [string, "null"]}
+        from: {type: [string, "null"], format: date-time}
+        to: {type: string, format: date-time}
+        rates:
+          type: array
+          description: One row per (agent, action_type).
+          items: {$ref: "#/components/schemas/DecisionRates"}
+        criterion_score_changes:
+          type: array
+          description: Mean instructor change to AI-drafted criterion scores.
+          items:
+            type: object
+            required: [criterion_id, criterion_key, n, mean_delta]
+            properties:
+              criterion_id: {type: string, format: uuid}
+              criterion_key: {type: string}
+              n: {type: integer}
+              mean_delta: {type: number}
+        learning_delta_by_decision:
+          type: object
+          required: [accepted, edited, rejected]
+          properties:
+            accepted: {$ref: "#/components/schemas/DeltaStat"}
+            edited: {$ref: "#/components/schemas/DeltaStat"}
+            rejected: {$ref: "#/components/schemas/DeltaStat"}
+        most_edited_criteria:
+          type: array
+          items:
+            type: object
+            required: [criterion_id, criterion_key, edit_count, edit_rate]
+            properties:
+              criterion_id: {type: string, format: uuid}
+              criterion_key: {type: string}
+              edit_count: {type: integer}
+              edit_rate: {type: number}
+        offloading:
+          type: object
+          description: §13.2 metrics.
+          properties:
+            hint_dependency_ratio: {type: [number, "null"]}
+            solution_check_trips: {type: integer}
+
+    MeasurementRollup:
+      allOf:
+        - $ref: "#/components/schemas/MeasurementSummary"
+        - type: object
+          required: [per_course, compliance]
+          properties:
+            per_course:
+              type: array
+              items:
+                type: object
+                required: [course, totals]
+                properties:
+                  course: {$ref: "#/components/schemas/CourseRef"}
+                  totals: {$ref: "#/components/schemas/DecisionRates"}
+            compliance:
+              type: object
+              required: [mismatches_count]
+              properties:
+                mismatches_count: {type: integer}
+
+    MeasurementExport:
+      type: object
+      required: [course_id, from, to, ai_actions, human_decisions, outcome_links]
+      properties:
+        course_id: {type: string, format: uuid}
+        from: {type: [string, "null"], format: date-time}
+        to: {type: string, format: date-time}
+        generated_at: {type: string, format: date-time}
+        ai_actions:
+          type: array
+          items: {$ref: "#/components/schemas/AiAction"}
+        human_decisions:
+          type: array
+          items: {$ref: "#/components/schemas/HumanDecision"}
+        outcome_links:
+          type: array
+          items: {$ref: "#/components/schemas/OutcomeLink"}
+
+    # ---- policy ------------------------------------------------------------
+
+    PolicyScopeType:
+      type: string
+      enum: [vendor_default, institution, program, course, learner]
+
+    WritablePolicyScope:
+      type: string
+      enum: [institution, program, course, learner]
+
+    PolicySource:
+      type: object
+      required: [scope_type]
+      properties:
+        scope_type: {$ref: "#/components/schemas/PolicyScopeType"}
+        scope_id: {type: [string, "null"], format: uuid}
+        scope_title: {type: [string, "null"]}
+        version: {type: [integer, "null"]}
+        set_by: {type: [string, "null"], format: uuid}
+        set_by_name: {type: [string, "null"]}
+        effective_from: {type: [string, "null"], format: date-time}
+        rationale: {type: [string, "null"]}
+
+    PolicyChainEntry:
+      allOf:
+        - $ref: "#/components/schemas/PolicySource"
+        - type: object
+          required: [outcome]
+          properties:
+            value: {}
+            locked: {type: boolean}
+            outcome:
+              type: string
+              enum: [winner, overridden, overridden_by_lock, not_stricter, not_set]
+              description: |
+                What the resolver did with this scope. `not_stricter` = a learner
+                value rejected by the learner_may_tighten rule.
+
+    PolicyDefinition:
+      description: Registry entry for a key.
+      type: object
+      required: [key, schema, allowed_scopes, enforced_in, description]
+      properties:
+        key: {type: string}
+        schema:
+          type: object
+          description: JSON Schema for the value.
+        default: {}
+        allowed_scopes:
+          type: array
+          items: {$ref: "#/components/schemas/WritablePolicyScope"}
+        learner_may_tighten: {type: boolean}
+        enforced_in:
+          type: array
+          items: {type: string, enum: [code, prompt, ui]}
+        description: {type: string}
+
+    PolicyResolved:
+      type: object
+      required: [key, value, source, chain, locked]
+      properties:
+        key: {type: string}
+        value: {}
+        source: {$ref: "#/components/schemas/PolicySource"}
+        chain:
+          type: array
+          description: Every scope considered, in precedence order.
+          items: {$ref: "#/components/schemas/PolicyChainEntry"}
+        locked:
+          type: boolean
+          description: True when the winning value comes from a locked scope.
+        conflicts:
+          type: array
+          description: Conflicting program values for a course in several programs; the most restrictive won.
+          items: {$ref: "#/components/schemas/PolicyChainEntry"}
+        editable:
+          type: boolean
+          description: Whether the caller may set this key at editable_scope now.
+        editable_scope:
+          oneOf:
+            - $ref: "#/components/schemas/WritablePolicyScope"
+            - type: "null"
+        definition: {$ref: "#/components/schemas/PolicyDefinition"}
+
+    PolicySetting:
+      description: One policy_settings row.
+      type: object
+      required: [id, key, scope_type, value, locked, version, effective_from]
+      properties:
+        id: {type: string, format: uuid}
+        key: {type: string}
+        scope_type: {$ref: "#/components/schemas/PolicyScopeType"}
+        scope_id: {type: [string, "null"], format: uuid}
+        value: {}
+        locked: {type: boolean}
+        rationale: {type: [string, "null"]}
+        version: {type: integer}
+        set_by: {type: [string, "null"], format: uuid}
+        set_by_name: {type: [string, "null"]}
+        effective_from: {type: string, format: date-time}
+        superseded_at: {type: [string, "null"], format: date-time}
+
+    PolicyPrecedence:
+      type: object
+      required: [order_list, per_key]
+      properties:
+        order_list:
+          type: array
+          items: {$ref: "#/components/schemas/PolicyScopeType"}
+          examples: [[institution, program, course, learner, vendor_default]]
+        per_key:
+          type: object
+          additionalProperties:
+            type: array
+            items: {$ref: "#/components/schemas/PolicyScopeType"}
+        set_by: {type: [string, "null"], format: uuid}
+        updated_at: {type: [string, "null"], format: date-time}
+
+    PolicyPreset:
+      type: object
+      required: [id, name, description, settings]
+      properties:
+        id: {type: string, examples: [conference]}
+        name: {type: string, examples: [Conference / Narrative]}
+        description: {type: string}
+        settings:
+          type: array
+          items:
+            type: object
+            required: [key, value]
+            properties:
+              key: {type: string}
+              value: {}
+              locked: {type: boolean, default: false}
+
+    ComplianceReport:
+      type: object
+      required: [scope, from, to, actions_checked, mismatches_count, mismatches, denied_policy_events]
+      properties:
+        scope:
+          type: object
+          required: [type]
+          properties:
+            type: {type: string, enum: [program, institution]}
+            id: {type: [string, "null"], format: uuid}
+        from: {type: [string, "null"], format: date-time}
+        to: {type: string, format: date-time}
+        actions_checked: {type: integer}
+        mismatches_count: {type: integer}
+        mismatches:
+          type: array
+          items:
+            type: object
+            required: [ai_action_id, key, recorded_value, effective_value, created_at]
+            properties:
+              ai_action_id: {type: string, format: uuid}
+              key: {type: string}
+              recorded_value: {}
+              effective_value: {}
+              effective_source: {$ref: "#/components/schemas/PolicySource"}
+              created_at: {type: string, format: date-time}
+        denied_policy_events:
+          type: array
+          description: tool_calls rows with outcome `denied_policy`.
+          items:
+            type: object
+            required: [tool_call_id, agent, tool, created_at]
+            properties:
+              tool_call_id: {type: integer}
+              turn_id: {type: [string, "null"], format: uuid}
+              agent: {type: string}
+              tool: {type: string}
+              created_at: {type: string, format: date-time}
+
+    # ---- assessment --------------------------------------------------------
+
+    SubmissionStatus:
+      type: string
+      enum: [draft, final]
+
+    Submission:
+      type: object
+      required: [id, person_id, assignment_id, version, status, submitted_at]
+      properties:
+        id: {type: string, format: uuid}
+        person_id: {type: string, format: uuid}
+        assignment_id: {type: string, format: uuid}
+        course_id: {type: [string, "null"], format: uuid}
+        version: {type: integer, minimum: 1}
+        parent_id: {type: [string, "null"], format: uuid}
+        status: {$ref: "#/components/schemas/SubmissionStatus"}
+        body_md: {type: [string, "null"]}
+        attachments:
+          type: array
+          items: {type: object}
+        submitted_at: {type: string, format: date-time}
+        feedback_status: {$ref: "#/components/schemas/FeedbackStatus"}
+
+    FeedbackStatus:
+      type: string
+      enum: [pending, awaiting_release, released, suppressed, none]
+      description: "`none` for finals, which get a grade draft instead of formative feedback."
+
+    EvidenceSpan:
+      type: object
+      required: [quote]
+      properties:
+        quote: {type: string}
+        start:
+          type: [integer, "null"]
+          description: Character offset in body_md.
+        end: {type: [integer, "null"]}
+
+    CriterionFeedback:
+      type: object
+      required: [criterion_id, criterion_key, description, ai_score, evidence_spans]
+      properties:
+        criterion_id: {type: string, format: uuid}
+        criterion_key: {type: string, examples: [evidence]}
+        description: {type: string}
+        ai_score:
+          type: [integer, "null"]
+          description: Null to the student on drafts when feedback.show_scores_on_drafts=false.
+        level_label:
+          type: [string, "null"]
+          examples: [Developing]
+        ai_rationale: {type: [string, "null"]}
+        evidence_spans:
+          type: array
+          items: {$ref: "#/components/schemas/EvidenceSpan"}
+        next_step: {type: [string, "null"]}
+        final_score:
+          type: [integer, "null"]
+          description: Instructor-confirmed score (finals only).
+        ai_action_id: {type: [string, "null"], format: uuid}
+        released_at: {type: [string, "null"], format: date-time}
+
+    SubmissionFeedback:
+      type: object
+      required: [submission_id, status, release_mode, criteria]
+      properties:
+        submission_id: {type: string, format: uuid}
+        assignment_id: {type: string, format: uuid}
+        person_id: {type: string, format: uuid}
+        student_name: {type: [string, "null"]}
+        status: {$ref: "#/components/schemas/FeedbackStatus"}
+        release_mode:
+          type: string
+          enum: [auto, instructor_release]
+          description: Resolved feedback.release_mode.
+        criteria:
+          type: array
+          items: {$ref: "#/components/schemas/CriterionFeedback"}
+        practice_set_ai_action_id:
+          type: [string, "null"]
+          format: uuid
+          description: Practice generated for a detected weakness, if any ("Practice for this").
+
+    Improvement:
+      type: object
+      required: [course_id, criteria, students]
+      properties:
+        course_id: {type: string, format: uuid}
+        criteria:
+          type: array
+          items:
+            type: object
+            required: [criterion_id, criterion_key, description]
+            properties:
+              criterion_id: {type: string, format: uuid}
+              criterion_key: {type: string}
+              description: {type: string}
+              target_score: {type: [integer, "null"]}
+        students:
+          type: array
+          description: Empty for aggregate-only callers (program_lead, admin).
+          items:
+            type: object
+            required: [student_id, display_name, trajectories]
+            properties:
+              student_id: {type: string, format: uuid}
+              display_name: {type: string}
+              trajectories:
+                type: array
+                items: {$ref: "#/components/schemas/CriterionTrajectory"}
+        aggregate:
+          type: array
+          description: Per criterion, across students.
+          items:
+            type: object
+            required: [criterion_id, n_students, flag_counts]
+            properties:
+              criterion_id: {type: string, format: uuid}
+              n_students: {type: integer}
+              mean_delta: {type: [number, "null"]}
+              flag_counts:
+                type: object
+                additionalProperties: {type: integer}
+
+    CriterionTrajectory:
+      type: object
+      required: [criterion_id, points, flag]
+      properties:
+        criterion_id: {type: string, format: uuid}
+        points:
+          type: array
+          description: One per submission version, oldest first.
+          items:
+            type: object
+            required: [submission_id, version, status, score, submitted_at]
+            properties:
+              submission_id: {type: string, format: uuid}
+              version: {type: integer}
+              status: {$ref: "#/components/schemas/SubmissionStatus"}
+              score: {type: [integer, "null"]}
+              submitted_at: {type: string, format: date-time}
+        latest_delta: {type: [integer, "null"]}
+        flag:
+          type: [string, "null"]
+          enum: [improving, plateaued, regressed, ready_for_summative, null]
+
+    # ---- record ------------------------------------------------------------
+
+    OutcomeStudentCounts:
+      type: object
+      required: [mastery, proficient, emerging, no_evidence]
+      properties:
+        mastery: {type: integer}
+        proficient: {type: integer}
+        emerging: {type: integer}
+        no_evidence: {type: integer}
+
+    OutcomesReport:
+      type: object
+      required: [program, generated_at, outcomes]
+      properties:
+        program:
+          type: object
+          required: [id, title]
+          properties:
+            id: {type: string, format: uuid}
+            title: {type: string}
+        cohort: {type: [string, "null"]}
+        generated_at: {type: string, format: date-time}
+        partial:
+          type: boolean
+          description: True when limited to the caller's own courses (faculty slice).
+        outcomes:
+          type: array
+          items:
+            type: object
+            required: [program_outcome_id, title, supporting_outcomes, students,
+                       criterion_distributions, evidence_count, sample_artifacts]
+            properties:
+              program_outcome_id: {type: string, format: uuid}
+              title: {type: string}
+              description: {type: [string, "null"]}
+              supporting_outcomes:
+                type: array
+                items:
+                  type: object
+                  required: [outcome_id, title, course]
+                  properties:
+                    outcome_id: {type: string, format: uuid}
+                    title: {type: string}
+                    course: {$ref: "#/components/schemas/CourseRef"}
+              students:
+                description: How well — students by highest attested level.
+                $ref: "#/components/schemas/OutcomeStudentCounts"
+              criterion_distributions:
+                type: array
+                description: What they can do — committed scores on aligned rubric criteria.
+                items:
+                  type: object
+                  required: [criterion_id, criterion_key, course, distribution]
+                  properties:
+                    criterion_id: {type: string, format: uuid}
+                    criterion_key: {type: string}
+                    course: {$ref: "#/components/schemas/CourseRef"}
+                    distribution:
+                      type: object
+                      description: Score → student count.
+                      additionalProperties: {type: integer}
+              evidence_count: {type: integer}
+              sample_artifacts:
+                type: array
+                items:
+                  type: object
+                  required: [type, id]
+                  properties:
+                    type: {type: string, enum: [submission, attestation, credential]}
+                    id: {type: string, format: uuid}
+                    title: {type: [string, "null"]}
+                    link: {type: [string, "null"]}
+
+    VerifyResult:
+      type: object
+      required: [valid, signature_valid, revoked, checks]
+      properties:
+        valid:
+          type: boolean
+          description: True only if every check passed.
+        signature_valid: {type: boolean}
+        proof_format:
+          type: [string, "null"]
+          enum: [eddsa-rdfc-2022, vc-jwt, null]
+        credential_id: {type: [string, "null"]}
+        issuer:
+          type: [object, "null"]
+          properties:
+            id: {type: string, description: "Issuer did:key."}
+            name: {type: [string, "null"]}
+            url: {type: [string, "null"]}
+        revoked: {type: boolean}
+        revoked_at: {type: [string, "null"], format: date-time}
+        revocation_reason: {type: [string, "null"]}
+        checks:
+          type: array
+          items:
+            type: object
+            required: [check, passed]
+            properties:
+              check: {type: string, examples: [signature, issuer_known, not_revoked, not_expired, schema]}
+              passed: {type: boolean}
+              message: {type: [string, "null"]}
+
+    ClrDocument:
+      description: |
+        Opaque here: a signed 1EdTech Comprehensive Learner Record 2.0 JSON-LD
+        document (ClrCredential), validated against the 1EdTech CLR 2.0 JSON
+        schema in CI. See https://www.imsglobal.org/spec/clr/v2p0/. Contains
+        achievements, evidence references (never `private` evidence) and
+        associations to program outcomes; signed with the §11.4 key.
+      type: object
+      additionalProperties: true
+
+    # ---- privacy -----------------------------------------------------------
+
+    AccessLogEntry:
+      type: object
+      required: [actor_id, resource, purpose, created_at]
+      properties:
+        actor_id: {type: string, format: uuid}
+        actor_name: {type: [string, "null"]}
+        actor_role: {type: [string, "null"]}
+        resource: {type: string, examples: [transcript]}
+        resource_id: {type: [string, "null"]}
+        purpose: {type: string}
+        created_at: {type: string, format: date-time}
+
+    DeletionRequestStatus:
+      type: string
+      enum: [pending, approved, rejected, completed]
+
+    DeletionRequest:
+      type: object
+      required: [id, person_id, status, requested_at]
+      properties:
+        id: {type: string, format: uuid}
+        person_id: {type: string, format: uuid}
+        person_name: {type: [string, "null"]}
+        status: {$ref: "#/components/schemas/DeletionRequestStatus"}
+        reason: {type: [string, "null"]}
+        requested_at: {type: string, format: date-time}
+        decided_by: {type: [string, "null"], format: uuid}
+        decided_at: {type: [string, "null"], format: date-time}
+        decision_reason: {type: [string, "null"]}
+        completed_at: {type: [string, "null"], format: date-time}
+
+    MyData:
+      type: object
+      required: [person, profile, analyst_summaries, insights, goals, flags, flags_visible,
+                 ai_actions, access_log, deletion_request]
+      properties:
+        person:
+          type: object
+          required: [id, display_name]
+          properties:
+            id: {type: string, format: uuid}
+            display_name: {type: string}
+            email: {type: [string, "null"]}
+        profile:
+          type: object
+          required: [text, disputed_statements]
+          properties:
+            text:
+              type: [string, "null"]
+              description: persons.attributes.learner_profile.
+            disputed_statements:
+              type: array
+              items:
+                type: object
+                required: [statement, disputed_at]
+                properties:
+                  statement: {type: string}
+                  reason: {type: [string, "null"]}
+                  disputed_at: {type: string, format: date-time}
+        analyst_summaries:
+          type: array
+          items:
+            type: object
+            required: [session_id, summary, created_at]
+            properties:
+              session_id: {type: string}
+              course: {$ref: "#/components/schemas/CourseRef"}
+              summary: {type: string}
+              created_at: {type: string, format: date-time}
+        insights: {type: array, items: {}}
+        goals:
+          type: array
+          items: {$ref: "#/components/schemas/Goal"}
+        flags_visible:
+          type: boolean
+          description: Resolved data.flags_visible_to_learner.
+        flags:
+          type: array
+          description: Empty when flags_visible is false.
+          items: {$ref: "#/components/schemas/AttentionSignal"}
+        ai_actions:
+          type: array
+          description: Most recent 50 about the caller; page further with GET /api/ai-actions.
+          items: {$ref: "#/components/schemas/AiAction"}
+        access_log:
+          type: array
+          description: Who accessed my data (non-self reads), newest first.
+          items: {$ref: "#/components/schemas/AccessLogEntry"}
+        deletion_request:
+          oneOf:
+            - $ref: "#/components/schemas/DeletionRequest"
+            - type: "null"
+
+    MyDataExport:
+      description: MyData plus the full underlying records. Additional sections may be added.
+      allOf:
+        - $ref: "#/components/schemas/MyData"
+        - type: object
+          required: [exported_at]
+          properties:
+            exported_at: {type: string, format: date-time}
+            enrollments:
+              type: array
+              items: {$ref: "#/components/schemas/Enrollment"}
+            sessions:
+              type: array
+              description: Sessions with transcript turns (text "[purged]" past retention).
+              items: {type: object}
+            submissions:
+              type: array
+              items: {$ref: "#/components/schemas/Submission"}
+            evidence:
+              type: array
+              description: Includes private evidence.
+              items: {type: object}
+            attestations: {type: array, items: {type: object}}
+            grades: {type: array, items: {type: object}}
+            issued_credentials: {type: array, items: {type: object}}
+            notifications:
+              type: array
+              items: {$ref: "#/components/schemas/Notification"}
+            policy_preferences:
+              type: array
+              items: {$ref: "#/components/schemas/PolicySetting"}
+
+    # ---- notifications -----------------------------------------------------
+
+    Notification:
+      type: object
+      required: [id, kind, title, created_at]
+      properties:
+        id: {type: string, format: uuid}
+        kind:
+          type: string
+          examples: [review_due, deadline, stalled_student, feedback_ready, alert]
+        title: {type: string}
+        body: {type: [string, "null"]}
+        link: {type: [string, "null"]}
+        ai_action_id: {type: [string, "null"], format: uuid}
+        created_at: {type: string, format: date-time}
+        read_at: {type: [string, "null"], format: date-time}
+        dismissed_at: {type: [string, "null"], format: date-time}
+
+    # ---- study -------------------------------------------------------------
+
+    Flashcard:
+      type: object
+      required: [id, front, back, node_id]
+      properties:
+        id:
+          type: string
+          description: Stable within the deck.
+        front: {type: string}
+        back: {type: string}
+        source_span:
+          type: [string, "null"]
+          description: Quoted span of the reading the card was generated from.
+        node_id: {type: string, format: uuid}
+
+    FlashcardDeckSummary:
+      type: object
+      required: [id, title, course_id, card_count, created_at]
+      properties:
+        id: {type: string, format: uuid}
+        title: {type: string}
+        course_id: {type: string, format: uuid}
+        source:
+          type: [object, "null"]
+          description: '"Generated from: <reading title>".'
+          properties:
+            content_item_id: {type: string, format: uuid}
+            title: {type: string}
+        card_count: {type: integer}
+        author_id: {type: [string, "null"], format: uuid}
+        ai_action_id: {type: [string, "null"], format: uuid}
+        created_at: {type: string, format: date-time}
+
+    FlashcardDeck:
+      allOf:
+        - $ref: "#/components/schemas/FlashcardDeckSummary"
+        - type: object
+          required: [cards]
+          properties:
+            cards:
+              type: array
+              items: {$ref: "#/components/schemas/Flashcard"}
+
+    ReviewSchedule:
+      type: object
+      required: [node_id, due_at, interval_days, ease, reps, lapses]
+      properties:
+        node_id: {type: string, format: uuid}
+        due_at: {type: string, format: date-time}
+        interval_days: {type: number}
+        ease: {type: number}
+        reps: {type: integer}
+        lapses: {type: integer}
+
+    # ---- existing ----------------------------------------------------------
 
     MasteryLevel:
       type: string
@@ -931,7 +4253,7 @@ components:
         reviewer_id:
           type: string
           format: uuid
-          description: persons.id of the approving instructor.
+          description: persons.id of the approving instructor; must equal the caller once T-E-103 lands.
 
     ApproveResult:
       type: object

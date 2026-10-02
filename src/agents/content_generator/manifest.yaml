@@ -77,6 +77,10 @@ agent:
   - content.get_skill
   - content.save_skill
   - content.list_skills
+  planned_mcp_tools:
+  - content.generate_practice
+  - content.generate_flashcards
+  - content.publish
   composable_with:
   - tutor
   - course_architect

@@ -21,6 +21,14 @@ interface EventEnvelope<P = unknown> {
 
 Ordering guarantee: events with lower `sequence` always precede events with higher `sequence` within the same turn. Clients MUST reorder if they receive out-of-order.
 
+```typescript
+type EventType =
+  | "reasoning" | "plan" | "agent_start" | "agent_token" | "agent_tool_call"
+  | "agent_result" | "clarify" | "approval_request" | "final" | "error"
+  // Round 2 — Status: planned (see each type below)
+  | "guardrail" | "policy_context" | "feedback_ready" | "notification" | "session_ended";
+```
+
 ---
 
 ## Event types
@@ -133,9 +141,25 @@ interface ApprovalRequestPayload {
   agent: string;
   action: string;             // human-readable ("Commit grades for 23 students")
   preview: object;            // the drafted artifact (rubric, message, etc.)
-  artifact_type: "rubric_grades" | "message" | "quiz" | "content_draft" | "other";
+  artifact_type: "rubric_grades" | "message" | "quiz" | "content_draft" | "other"
+      // Round 2 — Status: planned (T-E-107, spec.md §5.3)
+      | "grade_commit" | "credential" | "attestation_override"
+      | "policy_change" | "content_publish" | "feedback_release";
 }
 ```
+
+`artifact_type` for each write-gated tool in spec.md §5.3:
+
+| Tool | `artifact_type` | Status |
+|---|---|---|
+| `assessments.commit_grade` | `grade_commit` | planned (T-E-107, T-E-114) |
+| `assessments.approve_credential` | `credential` | planned (T-E-107) |
+| `assessments.create_question` (publishing to a live bank) | `quiz` | existing value |
+| `attestations.override` | `attestation_override` | planned (T-E-107, T-D-112) |
+| `communications.send_message` | `message` | existing value |
+| `content.publish` | `content_publish` | planned (T-E-107) |
+| `feedback.release` (under `feedback.release_mode = instructor_release`) | `feedback_release` | planned (T-E-107, T-E-116) |
+| `policy.set` | `policy_change` | planned (T-E-107, T-E-116) |
 
 ### `final`
 
@@ -170,6 +194,127 @@ interface ErrorPayload {
 }
 ```
 
+`budget_exceeded` is emitted by the tool gateway's budget step (spec.md §5.2 step 6) when a per-turn or per-session cap is hit; the turn hard-stops.
+
+---
+
+## Round 2 event types
+
+The types below are added by T-C-103 (spec.md §18). Each is **Status: planned** until the named task ships it.
+
+Delivery: like every event, these travel on a turn's SSE stream and carry that turn's `session_id`, `turn_id` and `sequence`. `notification`, `feedback_ready` and `session_ended` can originate outside any turn the recipient is streaming (scheduler jobs, another user's approval); in that case they are not pushed, and the client reads the same state through REST (`GET /api/notifications`, `/api/feedback/*`, `/api/sessions/{id}`, per T-C-102).
+
+### `guardrail`
+
+**Status: planned** — `denied_permission`, `denied_scope`: T-E-106 (spec.md §5.2 steps 1–3). `denied_policy`: T-E-116 (§5.2 step 4, §8.4). `offload_check`: T-E-118 (§13.2).
+
+Emitted when the tool gateway refuses a tool call, or when the tutor offload post-check replaces a reply. It does **not** end the turn: a denied tool call returns a "not permitted" tool error to the model and the agent continues. A turn-ending authorization failure is `error{code:"permission_denied"}` instead.
+
+| `kind` | Emitted by |
+|---|---|
+| `denied_permission` | Gateway step 1 (tool not in the agent's manifest `tools`) or step 2 (`active_role` not in the tool's `allowed_roles`) |
+| `denied_scope` | Gateway step 3 (`ScopeDenied` from the §4.5 identity and scope rules) |
+| `denied_policy` | Gateway step 4 (`policy.check_tool` refused, e.g. `ai.allowed_agents`) |
+| `offload_check` | `tutor_offload_check` post-processor: the regenerated reply still contained a full solution, so it was replaced with a hint-level reply |
+
+```typescript
+interface GuardrailPayload {
+  kind: "denied_permission" | "denied_scope" | "denied_policy" | "offload_check";
+  step_id: string;
+  agent: string;
+  tool?: string;              // absent for offload_check
+  reason: string;             // user-safe; never contains other students' names or raw arguments
+  policy?: {                  // present for denied_policy; for offload_check, the tutor.answer_mode in effect
+    key: string;              // policy registry key, e.g. "ai.allowed_agents"
+    value: unknown;           // resolved value that caused the decision
+    scope_type: "vendor_default" | "institution" | "program" | "course" | "learner";
+    scope_id: string | null;  // null for vendor_default and institution
+    version: number;
+  };
+  assignment_id?: string;     // offload_check only: the open assignment the session is linked to
+}
+```
+
+The `kind` values match `tool_calls.outcome` (spec.md §6.3) so the compliance report (§8.7) can join gateway events to provenance rows.
+
+### `policy_context`
+
+**Status: planned** — T-E-115 (spec.md §8.5).
+
+Emitted once per agent invocation, after `agent_start` and before the agent's first `agent_tool_call`. Lists exactly the resolved prompt-enforced keys placed in that invocation's `<policy_context>` block, with their sources.
+
+```typescript
+interface PolicyContextPayload {
+  step_id: string;
+  agent: string;
+  policies: Array<{
+    key: string;              // policy registry key, e.g. "tutor.answer_mode"
+    value: unknown;           // resolved value; shape per the key's registry schema
+    scope_type: "vendor_default" | "institution" | "program" | "course" | "learner";
+    scope_id: string | null;  // null for vendor_default and institution
+    version: number;          // policy_settings.version of the winning row
+    locked: boolean;          // true if the value came from a locked higher scope
+    conflict?: boolean;       // true if programs disagreed and the most restrictive value won
+  }>;
+}
+```
+
+### `feedback_ready`
+
+**Status: planned** — T-E-116 (spec.md §7.3, §8.4 `feedback.release_mode`); consumed by T-F-106.
+
+Emitted when criterion-level formative feedback on a submission becomes visible to the student: immediately after the feedback agent saves it under `auto`, or when faculty release it under `instructor_release`.
+
+```typescript
+interface FeedbackReadyPayload {
+  submission_id: string;
+  criteria_count: number;     // criteria with released feedback on this submission
+  release_mode: "auto" | "instructor_release";
+  released_at: string;        // ISO 8601; equals criterion_scores.released_at
+}
+```
+
+### `notification`
+
+**Status: planned** — T-E-121 (spec.md §10.4); consumed by T-F-113.
+
+Emitted when a row is inserted into `notifications` for the person streaming. Jobs apply `nudges.enabled` and `nudges.quiet_hours` before inserting, so none is emitted during the recipient's quiet hours.
+
+```typescript
+interface NotificationPayload {
+  id: string;
+  person_id: string;          // always the authenticated recipient
+  kind: string;               // e.g. "review_due" | "deadline" | "stalled_student" | "alert"
+  title: string;
+  body: string;
+  link: string | null;        // in-app route
+  ai_action_id: string | null;
+  created_at: string;         // ISO 8601
+  read_at: string | null;
+  dismissed_at: string | null;
+}
+```
+
+### `session_ended`
+
+**Status: planned** — T-E-120 (spec.md §10.1).
+
+Emitted when a session closes, either from the **End session** button or the `idle_session_closer` job. It is the last event for the session.
+
+```typescript
+interface SessionEndedPayload {
+  reason: "user_ended" | "idle_timeout";
+  reflection: {
+    mode: "off" | "optional" | "required";   // resolved reflection.after_session
+    status: "not_requested" | "submitted" | "skipped" | "pending";
+    evidence_id?: string;     // present when status is "submitted"
+  };
+  ended_at: string;           // ISO 8601
+}
+```
+
+`status` is `not_requested` when `mode` is `off`, and `pending` only for an `idle_timeout` close while a required reflection is outstanding.
+
 ---
 
 ## Example event sequence (scenario 5: draft announcement)
@@ -187,4 +332,20 @@ interface ErrorPayload {
 {event:"reasoning", sequence:53, payload:{step:"synthesize", text:"Approved; sending."}}
 {event:"agent_tool_call", sequence:54, payload:{step_id:"s1", tool:"messages.send", ...}}
 {event:"final", sequence:55, payload:{answer_markdown:"Announcement sent to 50 recipients.", artifacts:[...]}}
+```
+
+## Example event sequence (scenario: offload check under a locked answer mode) — Status: planned
+
+Institution has locked `tutor.answer_mode = socratic_only`; Emma asks the tutor for the answer to an open assignment.
+
+```
+{event:"reasoning",      sequence:1, payload:{step:"interpret", text:"Student wants help with Assignment 3."}}
+{event:"plan",           sequence:2, payload:{strategy:"react", steps:[{step_id:"s1", agent:"tutor", ...}]}}
+{event:"agent_start",    sequence:3, payload:{step_id:"s1", agent:"tutor", inputs:{...}}}
+{event:"policy_context", sequence:4, payload:{step_id:"s1", agent:"tutor", policies:[{key:"tutor.answer_mode", value:"socratic_only", scope_type:"institution", scope_id:null, version:2, locked:true}]}}
+{event:"agent_tool_call", sequence:5, payload:{step_id:"s1", agent:"tutor", tool:"content.retrieve", ...}}
+# --- first draft leaked a solution; regenerated once; regenerated reply also failed ---
+{event:"guardrail",      sequence:6, payload:{kind:"offload_check", step_id:"s1", agent:"tutor", reason:"Reply replaced with a hint because the assignment is still open.", policy:{key:"tutor.answer_mode", value:"socratic_only", scope_type:"institution", scope_id:null, version:2}, assignment_id:"..."}}
+{event:"agent_result",   sequence:7, payload:{step_id:"s1", agent:"tutor", output:{...}, ...}}
+{event:"final",          sequence:8, payload:{answer_markdown:"What do you think the first step is?", artifacts:[]}}
 ```

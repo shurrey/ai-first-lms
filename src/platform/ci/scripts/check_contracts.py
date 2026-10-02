@@ -30,6 +30,8 @@ FRONTEND_SUBDIRS = ("app", "components", "lib")
 
 # Everything after this heading in mcp-tools.md lists tools that are deliberately not served.
 NOT_IMPLEMENTED_HEADING = "## Not implemented"
+# Approved-but-unbuilt tools; documented here so contract changes can land before implementation.
+PLANNED_HEADING = "## Planned (Round 2)"
 
 
 class Skip(Exception):
@@ -84,22 +86,45 @@ def runner_agent_tools() -> dict[str, list[str]]:
     raise ValueError(f"{RUNNER}: no module-level _AGENT_TOOLS literal")
 
 
-def documented_tools() -> dict[str, dict[str, Any]]:
-    """Tools in the main sections of mcp-tools.md, with their Mutates/Requires approval lines."""
-    text = (CONTRACTS / "mcp-tools.md").read_text()
-    main = text.split(NOT_IMPLEMENTED_HEADING, 1)[0]
-    tools: dict[str, dict[str, Any]] = {}
-    for block in re.split(r"(?m)^###\s+", main)[1:]:
+def _tool_blocks(section: str) -> dict[str, str]:
+    blocks: dict[str, str] = {}
+    for block in re.split(r"(?m)^###\s+", section)[1:]:
         m = re.match(r"`([^`]+)`", block)
-        if not m:
-            continue
-        entry: dict[str, Any] = {}
-        for field, key in (("Mutates", "mutates"), ("Requires approval", "requires_approval")):
-            fm = re.search(rf"(?m)^- {field}:\s*(true|false)\b", block)
-            entry[key] = None if fm is None else fm.group(1) == "true"
-        entry["has_roles"] = re.search(r"(?m)^- Allowed roles:\s*\S", block) is not None
-        tools[m.group(1)] = entry
-    return tools
+        if m:
+            blocks[m.group(1)] = block
+    return blocks
+
+
+def _tool_entry(block: str) -> dict[str, Any]:
+    entry: dict[str, Any] = {}
+    for field, key in (("Mutates", "mutates"), ("Requires approval", "requires_approval")):
+        fm = re.search(rf"(?m)^- {field}:\s*(true|false)\b", block)
+        entry[key] = None if fm is None else fm.group(1) == "true"
+    entry["has_roles"] = re.search(r"(?m)^- Allowed roles:\s*\S", block) is not None
+    entry["pending_change"] = re.search(r"(?m)^- Change:\s*T-C-\d+", block) is not None
+    entry["planned_status"] = re.search(r"(?m)^- Status:\s*planned\b", block) is not None
+    return entry
+
+
+def _doc_sections() -> tuple[str, str]:
+    """(served-tool sections, planned section) of mcp-tools.md."""
+    text = (CONTRACTS / "mcp-tools.md").read_text().split(NOT_IMPLEMENTED_HEADING, 1)[0]
+    main, _, planned = text.partition(PLANNED_HEADING)
+    return main, planned
+
+
+def documented_tools() -> dict[str, dict[str, Any]]:
+    """Tools in the server sections of mcp-tools.md, with their metadata lines."""
+    return {name: _tool_entry(b) for name, b in _tool_blocks(_doc_sections()[0]).items()}
+
+
+def planned_tools() -> dict[str, dict[str, Any]]:
+    """Tools in the Planned (Round 2) section of mcp-tools.md."""
+    return {name: _tool_entry(b) for name, b in _tool_blocks(_doc_sections()[1]).items()}
+
+
+def _is_planned_agent(agent: dict[str, Any]) -> bool:
+    return agent.get("status") == "planned"
 
 
 def _normalize_path(path: str) -> str:
@@ -163,7 +188,9 @@ def check_manifest_tools_documented() -> list[str]:
 
 def check_manifests_match_runner() -> list[str]:
     runner = runner_agent_tools()
-    manifests = {a["name"]: list(a.get("mcp_tools", [])) for a in manifest_agents()}
+    manifests = {
+        a["name"]: list(a.get("mcp_tools", [])) for a in manifest_agents() if not _is_planned_agent(a)
+    }
     errors = []
     for name in sorted(set(runner) - set(manifests)):
         errors.append(f"_AGENT_TOOLS has agent '{name}' with no manifest")
@@ -202,10 +229,39 @@ def check_mcp_tools_doc() -> list[str]:
         for key in ("mutates", "requires_approval"):
             if doc[key] is None:
                 errors.append(f"mcp-tools.md {name}: missing '{key}' line")
-            elif doc[key] != served[name][key]:
+            elif doc[key] != served[name][key] and not (key == "requires_approval" and doc["pending_change"]):
                 errors.append(f"mcp-tools.md {name}: {key}={doc[key]} but server has {served[name][key]}")
         if not doc["has_roles"]:
             errors.append(f"mcp-tools.md {name}: missing 'Allowed roles' line")
+    return errors
+
+
+def check_planned_tools() -> list[str]:
+    served = server_tools()
+    documented = documented_tools()
+    planned = planned_tools()
+    errors = []
+    for name, entry in sorted(planned.items()):
+        if name in served:
+            errors.append(f"planned tool {name} is now served; move it into its server section")
+        if name in documented:
+            errors.append(f"{name} is documented both as served and as planned")
+        if not entry["planned_status"]:
+            errors.append(f"mcp-tools.md planned {name}: missing '- Status: planned (T-...)' line")
+        for key in ("mutates", "requires_approval"):
+            if entry[key] is None:
+                errors.append(f"mcp-tools.md planned {name}: missing '{key}' line")
+        if not entry["has_roles"]:
+            errors.append(f"mcp-tools.md planned {name}: missing 'Allowed roles' line")
+    for agent in manifest_agents():
+        current = set(agent.get("mcp_tools", []))
+        for tool in agent.get("planned_mcp_tools", []):
+            if tool in current:
+                errors.append(f"agent '{agent['name']}' lists {tool} in both mcp_tools and planned_mcp_tools")
+            elif tool not in planned and tool not in documented:
+                errors.append(f"agent '{agent['name']}' plans {tool}, which mcp-tools.md does not document")
+        if _is_planned_agent(agent) and current:
+            errors.append(f"planned agent '{agent['name']}' must not have live mcp_tools yet")
     return errors
 
 
@@ -254,6 +310,7 @@ CHECKS: list[tuple[str, Callable[[], list[str]]]] = [
     ("manifest tools == runner _AGENT_TOOLS", check_manifests_match_runner),
     ("src/agents/*/manifest.yaml == contract", check_local_manifest_copies),
     ("mcp-tools.md == server tools", check_mcp_tools_doc),
+    ("planned tools and agents well-formed", check_planned_tools),
     ("frontend endpoints in api.openapi.yaml", check_frontend_endpoints),
     ("api.openapi.yaml structure", check_openapi_structure),
     ("db-schema.sql present", check_db_schema_file),

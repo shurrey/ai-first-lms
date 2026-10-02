@@ -32,6 +32,8 @@ class PermissionMatrix:
         matrix = cls()
         for agent_name in registry.list_agents():
             manifest = registry.get_manifest(agent_name)
+            if manifest.status == "planned":
+                continue
             for persona in manifest.persona_scope:
                 # Allow agent access
                 if persona not in matrix._agent_permissions:
