@@ -12,4 +12,4 @@ expected:
   artifacts_of_type:
     - degree_audit
   min_agent_invocations: 1
-  max_wall_time_ms: 15000
+  max_wall_time_ms: 60000

@@ -18,6 +18,10 @@ user_turns:
       - decision: approve          # approve | reject | edit
         edits: null                # optional: edited payload (for 'edit' decisions)
       - decision: approve
+    default_approval:              # optional; answers approval requests past `approvals`
+      decision: approve
+
+xfail: "T-D-104: tool not granted yet"  # optional; known failure, reported as xfail
 
 expected:
   final_event: final               # the last event type expected
@@ -42,12 +46,14 @@ Unknown top-level keys (including the removed `persona`) are rejected.
 | `course_id` | string | yes | Course node slug (`cs101`, `math201`, ...) or UUID |
 | `user_turns` | list | yes | Sequence of user messages |
 | `expected` | object | yes | Validation criteria |
+| `xfail` | string | no | Why the scenario is expected to fail (name the task that fixes it). A failing run reports `xfail` and does not fail `--check`; a passing run reports `xpass`, a cue to remove the field |
 
 ### `user_turns[*]`
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `message` | string | yes | The user's message |
 | `approvals` | list | no | Scripted responses to approval_request events |
+| `default_approval` | object | no | Decision for approval requests beyond `approvals`, when the number of gated writes is up to the model (one per quiz question, say). Without it, an unscripted approval request is rejected and recorded as an error |
 
 ### `user_turns[*].approvals[*]`
 | Field | Type | Required | Description |
@@ -61,7 +67,7 @@ Unknown top-level keys (including the removed `persona`) are rejected.
 | `final_event` | string | yes | Expected final event type |
 | `artifacts_of_type` | list[str] | no | Artifact types that must appear |
 | `min_agent_invocations` | int | no | Minimum agent_start events |
-| `max_wall_time_ms` | int | no | Wall time budget in ms |
+| `max_wall_time_ms` | int | no | Wall time budget in ms (default 30000). The shipped scenarios use 60000 for one agent and 120000 for multi-agent turns; spec §16 latency targets are measured separately |
 
 ## Executor behavior
 
@@ -81,4 +87,5 @@ Unknown top-level keys (including the removed `persona`) are rejected.
    - Check artifact types are present
    - Check agent invocation count
    - Check wall time
-6. Return pass/fail with details
+6. Return a status with details: `pass`, `fail`, or for a scenario with `xfail`, `xfail`
+   (it failed as expected) or `xpass` (it passed). `--check` exits 1 only on `fail`.
