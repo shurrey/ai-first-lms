@@ -1,7 +1,7 @@
 import type { FullConfig } from "@playwright/test";
 
 const ROUTES = ["/", "/login", "/account/password", "/course/warm", "/course/warm/roster", "/course/warm/gradebook",
-  "/course/warm/analytics", "/course/warm/credentials", "/course/warm/calendar"];
+  "/course/warm/analytics", "/course/warm/credentials", "/course/warm/calendar", "/course/warm/ai-review"];
 
 /**
  * next dev compiles a route on first request; parallel workers hitting an

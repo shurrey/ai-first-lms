@@ -174,11 +174,16 @@ interface FinalPayload {
         | "content_draft" | "wcag_report" | "risk_list" | "learning_path";
     data: object;             // shape depends on type
   }>;
+  ai_action_ids: string[];    // ids of the ai_actions rows written during this turn; [] if none
   cost_usd: number;
   tokens: number;
   wall_time_ms: number;
 }
 ```
+
+`ai_action_ids` lets a client link the turn's generated items to their provenance
+(`GET /api/ai-actions/{id}`). It lists each row once, in the order written, including rows
+for actions a person declined at approval. (Change: T-C-115.)
 
 ### `error`
 

@@ -4,6 +4,8 @@ import { use, useEffect, useState } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { apiFetch } from "@/lib/api";
 import { NoAccess } from "@/components/NoAccess";
+import { AiGeneratedLabel } from "@/components/AiGeneratedLabel";
+import { useInsightsActionId } from "@/lib/provenance";
 import { BarChart3, TrendingUp, Award, MessageSquare } from "lucide-react";
 
 interface StudentAnalytics {
@@ -23,16 +25,19 @@ export default function AnalyticsPage({ params }: { params: Promise<{ courseId: 
   const { activeRole, capabilities, personId } = useAuth();
 
   if (activeRole === "student") {
-    return <StudentAnalyticsView courseId={courseId} personId={personId} />;
+    return <StudentAnalyticsView courseId={courseId} personId={personId} canReadProvenance={!!capabilities.ai_actions_log} />;
   }
   if (!capabilities.roster || !capabilities.mastery_matrix) return <NoAccess />;
   return <FacultyAnalyticsView courseId={courseId} />;
 }
 
-function StudentAnalyticsView({ courseId, personId }: { courseId: string; personId: string | null }) {
+function StudentAnalyticsView({ courseId, personId, canReadProvenance }: {
+  courseId: string; personId: string | null; canReadProvenance: boolean;
+}) {
   const [data, setData] = useState<any>(null);
   const [sessions, setSessions] = useState<any[]>([]);
   const [insights, setInsights] = useState<string[]>([]);
+  const insightsActionId = useInsightsActionId(personId, canReadProvenance && insights.length > 0);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -127,6 +132,7 @@ function StudentAnalyticsView({ courseId, personId }: { courseId: string; person
               </p>
             ))}
           </div>
+          <AiGeneratedLabel aiActionId={insightsActionId} />
         </div>
       )}
     </div>

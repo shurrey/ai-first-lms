@@ -5,6 +5,8 @@ import { useAuth } from "@/lib/auth-context";
 import { apiFetch } from "@/lib/api";
 import { credentialsView } from "@/components/CourseTabs";
 import { NoAccess } from "@/components/NoAccess";
+import { AiGeneratedLabel } from "@/components/AiGeneratedLabel";
+import { aiActionsPath, matchCredentialRecommendation, useAiActionLists, type AiActionQuery } from "@/lib/provenance";
 import { Award, CheckCircle, Clock, Eye, Shield } from "lucide-react";
 
 interface PendingCredential {
@@ -46,7 +48,7 @@ export default function CredentialsPage({ params }: { params: Promise<{ courseId
 
   if (view === "own") return <StudentCredentials personId={personId} />;
   if (view === "settings") return <AdminSettings />;
-  if (view === "approve") return <FacultyCredentials courseId={courseId} personId={personId} />;
+  if (view === "approve") return <FacultyCredentials courseId={courseId} personId={personId} canReadProvenance={!!capabilities.ai_actions_log} />;
   return <NoAccess />;
 }
 
@@ -98,9 +100,20 @@ function StudentCredentials({ personId }: { personId: string | null }) {
   );
 }
 
-function FacultyCredentials({ courseId, personId }: { courseId: string; personId: string | null }) {
+function FacultyCredentials({ courseId, personId, canReadProvenance }: {
+  courseId: string; personId: string | null; canReadProvenance: boolean;
+}) {
   const [pending, setPending] = useState<PendingCredential[]>([]);
   const [loading, setLoading] = useState(true);
+  const recommendationQuery = (personId: string): AiActionQuery =>
+    ({ course_id: courseId, subject_person_id: personId, action_type: "recommendation", limit: 200 });
+  const recommendations = useAiActionLists(
+    canReadProvenance && !loading ? pending.map((c) => recommendationQuery(c.person_id)) : null,
+  );
+  const recommendationId = (c: PendingCredential): string | null => {
+    const items = recommendations?.get(aiActionsPath(recommendationQuery(c.person_id)));
+    return items ? matchCredentialRecommendation(items, c) : null;
+  };
   const [evidence, setEvidence] = useState<Evidence | null>(null);
   const [approving, setApproving] = useState<string | null>(null);
 
@@ -183,6 +196,7 @@ function FacultyCredentials({ courseId, personId }: { courseId: string; personId
                   <div className="text-sm font-semibold">{c.student_name}</div>
                   <div className="text-xs text-gray-500">{c.credential_title}</div>
                   <div className="text-[10px] text-gray-400">{new Date(c.created_at).toLocaleDateString()}</div>
+                  <AiGeneratedLabel aiActionId={recommendationId(c)} />
                 </div>
                 <div className="flex gap-2">
                   <button onClick={() => handleReview(c.id)} className="rounded-lg border border-gray-300 px-3 py-1.5 text-xs hover:bg-gray-100 flex items-center gap-1">

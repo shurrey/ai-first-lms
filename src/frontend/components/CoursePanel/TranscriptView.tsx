@@ -126,7 +126,7 @@ export function TranscriptView({
                   >
                     <div className="flex items-center justify-between mb-2">
                       <span className="text-xs font-semibold text-muted-foreground">
-                        {turn.role === "user" ? data.student_name : "AI Tutor"}
+                        {turn.role === "user" ? data.student_name : "Tutor (AI)"}
                       </span>
                       <span className="text-[10px] text-muted-foreground">
                         {formatTime(turn.created_at)}
@@ -180,7 +180,7 @@ function TranscriptMessages({ data }: { data: TranscriptData }) {
         >
           <div className="flex items-center justify-between mb-1">
             <span className="text-[10px] font-semibold uppercase text-muted-foreground">
-              {turn.role === "user" ? data.student_name : "AI Tutor"}
+              {turn.role === "user" ? data.student_name : "Tutor (AI)"}
             </span>
             <span className="text-[9px] text-muted-foreground">
               {formatTime(turn.created_at)}

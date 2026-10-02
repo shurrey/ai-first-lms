@@ -64,3 +64,12 @@ def test_only_an_approval_change_line_excuses_an_approval_mismatch():
     tool = "content.save_skill"
     assert check_contracts.documented_tools(roles_only)[tool]["approval_change"] is False
     assert check_contracts.documented_tools(approval)[tool]["approval_change"] is True
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("/api/measurement/rollup${q", "/api/measurement/rollup"),
+    ("/api/measurement/courses/${encodeURIComponent(courseId)}${q", "/api/measurement/courses/{}"),
+    ("/api/sessions/${id}/turns", "/api/sessions/{}/turns"),
+])
+def test_a_trailing_query_expression_is_not_part_of_the_path(raw, expected):
+    assert check_contracts._normalize_path(check_contracts._url_from_literal(raw)) == expected

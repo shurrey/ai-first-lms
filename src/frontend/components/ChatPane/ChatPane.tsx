@@ -5,13 +5,15 @@ import { useMutation } from "@tanstack/react-query";
 import { useSession } from "@/lib/session-context";
 import { useTurn } from "@/lib/turn-context";
 import { converse } from "@/lib/api";
-import { ThinkingDrawer, buildThinkingSteps } from "./ThinkingDrawer";
+import { ActivityDrawer, buildActivitySteps } from "./ActivityDrawer";
 import { MessageBubble, type ChatMessage } from "./MessageBubble";
 import { ChatInput } from "./ChatInput";
 import { ClarifyPrompt } from "./ClarifyPrompt";
 import { ErrorDisplay } from "./ErrorDisplay";
 import { ApprovalGate } from "@/components/ApprovalGate";
 import { CanvasRouter } from "@/components/Canvas/CanvasRouter";
+import { AiGeneratedLabel } from "@/components/common/AiGeneratedLabel";
+import { artifactAiActionId, buildTurnSources } from "@/lib/provenance";
 
 export function ChatPane() {
   const { sessionId } = useSession();
@@ -28,7 +30,7 @@ export function ChatPane() {
   const renderedRef = useRef(new Set<string>());
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll to bottom when messages change or thinking updates
+  // Auto-scroll to bottom when messages change or activity updates
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -63,11 +65,16 @@ export function ChatPane() {
             content: turnState.finalResult!.answer_markdown,
             timestamp: new Date().toISOString(),
             followUps: turnState.finalResult!.follow_ups,
+            artifacts: turnState.finalResult!.artifacts,
+            provenance: {
+              aiActionIds: turnState.finalResult!.ai_action_ids ?? [],
+              sources: buildTurnSources(turnState.completedAgents, turnState.toolCalls),
+            },
           },
         ];
       });
     }
-  }, [turnState.status, turnState.finalResult, turnState.activeTurnId]);
+  }, [turnState.status, turnState.finalResult, turnState.activeTurnId, turnState.completedAgents, turnState.toolCalls]);
 
   // While streaming, show accumulated agent tokens as a live message
   useEffect(() => {
@@ -114,12 +121,13 @@ export function ChatPane() {
     }
   }, [turnState.status, turnState.error, turnState.activeTurnId]);
 
-  // Build thinking steps for the drawer
-  const thinkingSteps = buildThinkingSteps(
+  const activitySteps = buildActivitySteps(
     turnState.reasoning,
     turnState.toolCalls,
     turnState.thinkingMessages,
   );
+  const lastTool = turnState.toolCalls[turnState.toolCalls.length - 1]?.tool;
+  const turnSources = buildTurnSources(turnState.completedAgents, turnState.toolCalls);
 
   const converseMutation = useMutation({
     mutationFn: (message: string) => {
@@ -168,15 +176,20 @@ export function ChatPane() {
         {messages.map((msg) => (
           <MessageBubble key={msg.id} message={msg} />
         ))}
-        {/* Thinking drawer: shows after the last user message, before the response */}
-        {thinkingSteps.length > 0 && (
-          <ThinkingDrawer
-            steps={thinkingSteps}
+        {activitySteps.length > 0 && (
+          <ActivityDrawer
+            steps={activitySteps}
             isStreaming={turnState.status === "streaming"}
             tokenCount={turnState.finalResult?.tokens}
-            toolCallCount={thinkingSteps.filter(s => s.type === "tool_call").length}
           />
         )}
+        <p role="status" className="text-xs text-muted-foreground">
+          {turnState.status === "streaming" && !pendingApproval && !turnState.clarify
+            ? lastTool
+              ? `Running: ${lastTool}`
+              : "Working…"
+            : ""}
+        </p>
       </div></div>
 
       {pendingApproval && (
@@ -189,6 +202,13 @@ export function ChatPane() {
                 data: pendingApproval.preview,
               }}
               status="awaiting_approval"
+            />
+            <AiGeneratedLabel
+              aiActionIds={(() => {
+                const id = artifactAiActionId(pendingApproval.preview);
+                return id ? [id] : [];
+              })()}
+              sources={turnSources}
             />
             <ApprovalGate
               approvalId={pendingApproval.approval_id}

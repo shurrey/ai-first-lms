@@ -49,3 +49,7 @@ htmlcov/
 certs/*
 !certs/.gitkeep
 *.pem
+
+# Recorded LLM fixtures replay only on the day they were recorded until T-P-106 lands; the
+# README, overlay and run-live-e2e beside them stay tracked.
+src/platform/llm-fixtures/recordings/

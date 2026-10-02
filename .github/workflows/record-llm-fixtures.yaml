@@ -1,0 +1,57 @@
+# Records the LLM fixtures that ci.yaml's e2e-live-replay job replays. Manual only: it makes
+# real model calls with the ANTHROPIC_API_KEY repo secret. Replay the same day by running CI
+# manually with this run's id as fixtures_run_id; fixtures are not committed until T-P-106.
+name: Record LLM Fixtures
+
+on:
+  workflow_dispatch:
+
+jobs:
+  record-llm-fixtures:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set SEED_DEMO_PASSWORD
+        # Repo secret when set (absent on fork PRs), otherwise a fresh value per run.
+        env:
+          SECRET_SEED_DEMO_PASSWORD: ${{ secrets.SEED_DEMO_PASSWORD }}
+        run: |
+          pw="${SECRET_SEED_DEMO_PASSWORD:-$(openssl rand -hex 24)}"
+          echo "::add-mask::$pw"
+          echo "SEED_DEMO_PASSWORD=$pw" >> "$GITHUB_ENV"
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked --extra dev
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: src/frontend/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: src/frontend
+      - run: pnpm exec playwright install --with-deps chromium
+        working-directory: src/frontend
+      - name: Record through the live specs and scripts/demo
+        run: src/platform/llm-fixtures/run-live-e2e record
+        env:
+          KEEP_STACK: "1"
+      # Uploaded even when a spec fails: the fixtures may still be usable, and a partial set
+      # shows how far the run got.
+      - name: Upload recordings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: llm-fixtures
+          path: src/platform/llm-fixtures/recordings/*.json
+          if-no-files-found: warn
+      - name: Collect logs on failure
+        if: failure()
+        run: docker compose -p lms-llm-fixtures -f docker-compose.yaml -f src/platform/llm-fixtures/compose.yaml logs --tail=300
+      - name: Tear down
+        if: always()
+        run: docker compose -p lms-llm-fixtures -f docker-compose.yaml -f src/platform/llm-fixtures/compose.yaml down -v

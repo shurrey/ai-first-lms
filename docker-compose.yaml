@@ -236,6 +236,16 @@ services:
       APPROVAL_TIMEOUT_MINUTES: ${APPROVAL_TIMEOUT_MINUTES:-30}
       ENGINE_API_DOCS: ${ENGINE_API_DOCS:-false}
       PII_PSEUDONYM_SALT: ${PII_PSEUDONYM_SALT:-}
+      # Measurement window and scheduled jobs (spec §6).
+      MEASURE_WINDOW_DAYS: ${MEASURE_WINDOW_DAYS:-14}
+      SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-true}
+      OUTCOME_LINKER_INTERVAL_MINUTES: ${OUTCOME_LINKER_INTERVAL_MINUTES:-15}
+      # off | record | replay. record/replay also need LLM_FIXTURE_DIR and LLM_FIXTURE_ALLOW=1,
+      # or the orchestrator refuses to start; use src/platform/llm-fixtures/run-live-e2e
+      # (docs/setup.md "Recording and Replaying"), whose overlay sets both.
+      LLM_FIXTURE_MODE: ${LLM_FIXTURE_MODE:-off}
+      LLM_FIXTURE_DIR: ${LLM_FIXTURE_DIR:-}
+      LLM_FIXTURE_ALLOW: ${LLM_FIXTURE_ALLOW:-}
     ports:
       - "${ORCHESTRATOR_PORT:-8000}:8000"
     volumes:

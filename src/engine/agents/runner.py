@@ -14,6 +14,8 @@ from typing import Any, Protocol
 import anthropic
 from opentelemetry import trace
 
+from engine.agents.artifacts import artifact_instruction, collect_artifacts, split_artifact_blocks
+from engine.agents.post import ToolOutput, apply_artifact_post_processors, apply_post_processors
 from engine.guardrails.approval import ApprovalTimeoutError
 from engine.guardrails.budget import ActiveClock, BudgetExceededError
 from engine.guardrails.gateway import GatewayContext, ToolGateway
@@ -25,6 +27,7 @@ from engine.guardrails.injection import (
 from engine.guardrails.registry import get_manifest_registry
 from engine.http import make_anthropic_client
 from engine.logging_config import get_logger
+from engine.provenance import ProvenanceTrail, prompt_sha256
 from engine.telemetry import span_tool
 
 logger = logging.getLogger(__name__)
@@ -84,8 +87,12 @@ IMPORTANT RULES FOR RESPONSE FORMAT:
 - If you want to suggest follow-up questions, include them naturally in your response text.
 - Your FINAL response must be a complete, user-facing answer — NOT a status update about what you just did or are about to do.
 - BAD final response: "Quiz saved. Now saving the study guide."
-- GOOD final response: "Here's your recursion quiz with 5 questions covering base cases, recursive thinking, and memoization. I've also created a study guide covering the key concepts."
-- If you used tools to create or save something, summarize WHAT you created for the user, don't narrate the process.
+- GOOD final response: "Generated a 5-question recursion quiz covering base cases, recursive thinking, and memoization, plus a study guide on the key concepts."
+- If you used tools to create or save something, summarize WHAT was generated for the user, don't narrate the process.
+
+IMPORTANT RULES FOR LANGUAGE:
+- You are a software tool. Do not present yourself as a person, and do not describe your own feelings or enthusiasm.
+- Describe what you produce as generated, retrieved or estimated, and name the sources it came from.
 """
 
 
@@ -351,7 +358,8 @@ class ClaudeAgentRunner:
         if prompt_path.exists():
             prompt = prompt_path.read_text()
         else:
-            prompt = f"You are the {agent_name} agent in an AI-native learning management system. Help the user with their request."
+            prompt = (f"You are the {agent_name} agent, a software tool in an AI-native "
+                      "learning management system. Respond to the user's request.")
 
         self._prompt_cache[agent_name] = prompt
         return prompt
@@ -365,7 +373,8 @@ class ClaudeAgentRunner:
             auth=None, session_id=inputs.get("session_id", ""),
         )
         agent_clock = ActiveClock()
-        tool_ctx = replace(tool_ctx, agent_clock=agent_clock)
+        tool_ctx = replace(tool_ctx, agent_clock=agent_clock,
+                           provenance=ProvenanceTrail(model=self._model))
         logger.info("ClaudeAgentRunner: invoking %s with tools", agent_name)
         start = time.monotonic()
         try:
@@ -375,7 +384,8 @@ class ClaudeAgentRunner:
 
         await _ensure_tool_schemas()
         base_prompt = self._load_system_prompt(agent_name)
-        system_prompt = base_prompt + _TOOL_USE_ADDENDUM + INJECTION_GUARDRAIL_INSTRUCTION
+        system_prompt = (base_prompt + _TOOL_USE_ADDENDUM + artifact_instruction(agent_name)
+                         + INJECTION_GUARDRAIL_INSTRUCTION)
         message = gateway.redact_context(agent_name, inputs.get("message", ""))
         persona = inputs.get("persona", "student")
         person_id = inputs.get("person_id", "")
@@ -487,11 +497,13 @@ class ClaudeAgentRunner:
         session_id: str = "",
     ) -> dict[str, Any]:
         usage = [0, 0]
+        tool_outputs: list[ToolOutput] = []
         final_text: str | None
         try:
             final_text = await self._tool_rounds(
                 agent_name, system_prompt, messages, claude_tools, tool_name_map,
                 tool_call_records, gateway, tool_ctx, on_event, session_id, usage,
+                tool_outputs,
             )
         except BudgetExceededError:
             final_text = None
@@ -519,8 +531,13 @@ class ClaudeAgentRunner:
         if final_text is None:
             return _budget_exceeded_result(cost_usd, total_tokens, tool_call_records)
 
+        reply, blocks = split_artifact_blocks(agent_name, final_text)
+        output = apply_post_processors(agent_name, _parse_agent_output(reply), tool_outputs)
         return {
-            "output": _parse_agent_output(final_text),
+            "output": output,
+            "artifacts": collect_artifacts(
+                agent_name, output, tool_outputs, apply_artifact_post_processors(blocks)
+            ),
             "cost_usd": round(cost_usd, 6),
             "tokens": total_tokens,
             "success": True,
@@ -540,8 +557,10 @@ class ClaudeAgentRunner:
         on_event: Any,
         session_id: str,
         usage: list[int],
+        tool_outputs: list[ToolOutput],
     ) -> str:
-        """Model/tool rounds until a final text; `usage` accumulates [input, output] tokens.
+        """Model/tool rounds until a final text; `usage` accumulates [input, output] tokens
+        and `tool_outputs` the successful tool results, for the post-processors.
 
         Raises BudgetExceededError from the gateway, which ends the turn.
         """
@@ -554,6 +573,8 @@ class ClaudeAgentRunner:
                     max_tokens=2048,
                 )
 
+                if tool_ctx.provenance is not None:
+                    tool_ctx.provenance.prompt_sha256 = prompt_sha256(system_prompt, messages)
                 usage[0] += response.usage.input_tokens
                 usage[1] += response.usage.output_tokens
                 gateway.charge(
@@ -607,6 +628,7 @@ class ClaudeAgentRunner:
                             with trace.use_span(span, end_on_exit=True):
                                 result = await gateway.invoke(
                                     tool_ctx, agent_name, mcp_name, tool_args,
+                                    call_id=str(getattr(block, "id", "") or ""),
                                 )
                                 success = result.success
                                 span.set_attribute("success", success)
@@ -635,6 +657,8 @@ class ClaudeAgentRunner:
                             if result.approval is not None:
                                 record["approval"] = result.approval
                             tool_call_records.append(record)
+                            if success:
+                                tool_outputs.append(ToolOutput(mcp_name, tool_args, result.value))
                             if on_event:
                                 await on_event({"event": "agent_tool_call", "payload": {
                                     "step_id": "", "agent": agent_name,

@@ -168,6 +168,12 @@ def _normalize_path(path: str) -> str:
     return re.sub(r"\{[^}/]*\}", "{}", path.rstrip("/") or "/")
 
 
+def _url_from_literal(raw: str) -> str:
+    """`/api/x/${id}${q ? `?${q}` : ""}` -> `/api/x/{}`. The capture stops inside a trailing
+    expression that appends a query string, leaving an unclosed `${`."""
+    return re.sub(r"\$\{[^}]*\}", "{}", re.sub(r"\$\{[^}]*$", "", raw))
+
+
 def frontend_paths() -> dict[str, set[str]]:
     """Map normalized /api/... or /audio/... path -> files that reference it."""
     pattern = re.compile(r"""[`'"](?:\$\{[A-Za-z_]+\})?(/(?:api|audio)/[^`'"?#\s]*)""")
@@ -181,7 +187,7 @@ def frontend_paths() -> dict[str, set[str]]:
                 if path.suffix not in (".ts", ".tsx", ".js", ".jsx") or "node_modules" in path.parts:
                     continue
                 for m in pattern.finditer(path.read_text(errors="replace")):
-                    url = re.sub(r"\$\{[^}]*\}", "{}", m.group(1))
+                    url = _url_from_literal(m.group(1))
                     found.setdefault(_normalize_path(url), set()).add(str(path.relative_to(REPO_ROOT)))
     return found
 

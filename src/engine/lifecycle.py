@@ -91,5 +91,5 @@ def get_reflection_injection() -> str:
     reflection = random.choice(REFLECTION_TYPES)
     return (
         f"SESSION_ENDING: {reflection} "
-        "Keep it brief — one question, then close warmly with encouragement."
+        "Keep it brief — one question, then close by naming what the student practiced."
     )

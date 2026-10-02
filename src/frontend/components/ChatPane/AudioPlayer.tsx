@@ -2,14 +2,18 @@
 
 import { Headphones, Play, Pause } from "lucide-react";
 import { useRef, useState } from "react";
+import { AiGeneratedLabel } from "@/components/common/AiGeneratedLabel";
+import type { TurnSources } from "@/lib/provenance";
 
 interface AudioPlayerProps {
   audioUrl: string;
   title: string;
   concepts?: string[];
+  aiActionIds?: string[];
+  sources?: TurnSources;
 }
 
-export function AudioPlayer({ audioUrl, title, concepts }: AudioPlayerProps) {
+export function AudioPlayer({ audioUrl, title, concepts, aiActionIds, sources }: AudioPlayerProps) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const [playing, setPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -49,7 +53,9 @@ export function AudioPlayer({ audioUrl, title, concepts }: AudioPlayerProps) {
         </div>
         {!isScript && (
           <button
+            type="button"
             onClick={togglePlay}
+            aria-label={playing ? "Pause podcast" : "Play podcast"}
             className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-indigo-500 text-white hover:bg-indigo-600"
           >
             {playing ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4 ml-0.5" />}
@@ -96,6 +102,7 @@ export function AudioPlayer({ audioUrl, title, concepts }: AudioPlayerProps) {
           <span className="text-muted-foreground ml-1">(Audio generation requires Fish Audio API key)</span>
         </div>
       )}
+      <AiGeneratedLabel aiActionIds={aiActionIds} sources={sources} />
     </div>
   );
 }

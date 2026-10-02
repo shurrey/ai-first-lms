@@ -1,17 +1,21 @@
 import { defineConfig } from "@playwright/test";
 import { E2E_PORT, FAKE_API_ORIGIN } from "./tests/e2e/fixtures/fake-api";
 
-// E2E_BASE_URL points the run at an already-running UI (e.g. the dockerised one on
-// :3000, whose origin the orchestrator's CORS allows) for *.live.spec.ts.
-// Otherwise a dev server on E2E_PORT talks to an unresolvable fake API that the
-// specs mock with page.route.
-const LIVE_BASE_URL = process.env.E2E_BASE_URL;
+// E2E_LIVE=1 (or E2E_BASE_URL) runs the live specs, *.live.spec.ts and scenario-*.spec.ts,
+// against an already-running UI: E2E_BASE_URL, default the dockerised one on :3000, whose
+// origin the orchestrator's CORS allows. Otherwise a dev server on E2E_PORT talks to an
+// unresolvable fake API that the specs mock with page.route.
+const LIVE = process.env.E2E_LIVE === "1" || !!process.env.E2E_BASE_URL;
+const LIVE_BASE_URL = LIVE ? (process.env.E2E_BASE_URL ?? "http://localhost:3000") : undefined;
 
 export default defineConfig({
   testDir: "./tests/e2e",
   // Mocked specs route the fake API origin, which a live UI never calls.
-  ...(LIVE_BASE_URL && { testMatch: /.*\.live\.spec\.ts$/ }),
-  timeout: 60000,
+  ...(LIVE && { testMatch: /(\.live\.spec\.ts|\/scenario-\d+\.spec\.ts)$/ }),
+  // Live specs share one seeded database, and a recorded LLM fixture matches only a request
+  // made against the database state it was recorded on, so they run one at a time in order.
+  ...(LIVE && { workers: 1, fullyParallel: false }),
+  timeout: LIVE ? 300000 : 60000,
   retries: 0,
   forbidOnly: !!process.env.CI,
   reporter: process.env.CI ? [["list"], ["html", { open: "never" }]] : "list",

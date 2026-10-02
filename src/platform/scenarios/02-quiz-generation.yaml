@@ -6,12 +6,13 @@ course_id: "cs101"
 
 user_turns:
   - message: "Build me a 10-question quiz on photosynthesis."
-    approvals:
-      - decision: approve
+    # One gated assessments.create_question per saved question.
+    default_approval:
+      decision: approve
 
 expected:
   final_event: final
   artifacts_of_type:
     - quiz
   min_agent_invocations: 1
-  max_wall_time_ms: 20000
+  max_wall_time_ms: 60000

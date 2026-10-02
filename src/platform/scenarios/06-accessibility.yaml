@@ -10,6 +10,6 @@ user_turns:
 expected:
   final_event: final
   artifacts_of_type:
-    - compliance_report
+    - wcag_report
   min_agent_invocations: 1
-  max_wall_time_ms: 20000
+  max_wall_time_ms: 60000

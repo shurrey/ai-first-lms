@@ -32,6 +32,7 @@ dependencies = [
     # MCP SSE transport (uses starlette internally)
     "starlette>=0.37",
     "argon2-cffi>=23.1",
+    "apscheduler>=3.10,<4",
 ]
 
 [project.optional-dependencies]

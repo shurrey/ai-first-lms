@@ -42,6 +42,7 @@ export const EMMA_ME: FakeMe = {
     tutor_chat: self(),
     mastery_matrix: self("read"),
     improvement_view: self("read"),
+    ai_actions_log: self("read"),
     my_data: self(),
     notifications: self(),
   },
@@ -56,6 +57,8 @@ const FACULTY_CAPS = {
   roster: own(),
   badge_approve: own(),
   improvement_view: own(),
+  ai_review: own(),
+  ai_actions_log: own("read"),
   my_data: self(),
   notifications: self(),
 };
@@ -108,6 +111,130 @@ export const OKAFOR_ME: FakeMe = {
   effective_ui_policy: {},
   must_change_password: false,
 };
+
+export const ADMIN_ME: FakeMe = {
+  person: { id: "0a0a0a0a-0000-4000-8000-0000000000ae", display_name: "Admin User", email: "admin@university.edu" },
+  roles: ["admin"],
+  active_role: "admin",
+  enrollments: [],
+  advisees_count: 0,
+  home_route: "/",
+  capabilities: {
+    course_list: { scope: "all", access: "read" },
+    system_settings: { scope: "all", access: "full" },
+    ai_review: { scope: "all", access: "full" },
+    ai_actions_log: { scope: "all", access: "read" },
+    my_data: self(),
+    notifications: self(),
+  },
+  effective_ui_policy: {},
+  must_change_password: false,
+};
+
+export const SMOKE_AI_ACTION_ID = "a1a1a1a1-0000-4000-8000-0000000000a1";
+
+// MeasurementSummary in contracts/api.openapi.yaml.
+export const CS101_MEASUREMENT = {
+  scope: { type: "course", id: CS101_ID, title: "CS 101 — Introduction to Computer Science" },
+  from: null,
+  to: "2026-10-02T00:00:00Z",
+  rates: [
+    { agent: "grader", action_type: "grade_draft", total: 12, accepted: 6, edited: 4, rejected: 1, other: 0, undecided: 1,
+      acceptance_rate: 6 / 11, edit_rate: 4 / 11, reject_rate: 1 / 11 },
+    { agent: "tutor", action_type: "criterion_feedback", total: 8, accepted: 5, edited: 2, rejected: 0, other: 1, undecided: 0,
+      acceptance_rate: 5 / 8, edit_rate: 2 / 8, reject_rate: 0 },
+  ],
+  criterion_score_changes: [
+    { criterion_id: "c0000000-0000-4000-8000-000000000001", criterion_key: "thesis", n: 4, mean_delta: 0.75 },
+    { criterion_id: "c0000000-0000-4000-8000-000000000002", criterion_key: "evidence_use", n: 3, mean_delta: -0.5 },
+  ],
+  learning_delta_by_decision: {
+    accepted: { n: 5, mean_delta: 0.6 },
+    edited: { n: 3, mean_delta: 0.9 },
+    rejected: { n: 0, mean_delta: null },
+  },
+  most_edited_criteria: [
+    { criterion_id: "c0000000-0000-4000-8000-000000000001", criterion_key: "thesis", edit_count: 4, edit_rate: 0.4 },
+    { criterion_id: "c0000000-0000-4000-8000-000000000002", criterion_key: "evidence_use", edit_count: 3, edit_rate: 0.3 },
+  ],
+  offloading: { hint_dependency_ratio: 0.25, solution_check_trips: 2 },
+};
+
+// MeasurementRollup in contracts/api.openapi.yaml.
+export const INSTITUTION_ROLLUP = {
+  ...CS101_MEASUREMENT,
+  scope: { type: "institution", id: null, title: null },
+  per_course: [
+    { course: { course_id: CS101_ID, slug: "cs101", title: "CS 101 — Introduction to Computer Science" },
+      totals: { total: 20, accepted: 11, edited: 6, rejected: 1, other: 1, undecided: 1, acceptance_rate: 11 / 19, edit_rate: 6 / 19, reject_rate: 1 / 19 } },
+  ],
+  compliance: { mismatches_count: 0 },
+};
+
+// AiAction in contracts/api.openapi.yaml.
+export const SMOKE_AI_ACTION = {
+  id: SMOKE_AI_ACTION_ID,
+  session_id: null,
+  turn_id: null,
+  agent: "grader",
+  action_type: "grade_draft",
+  subject_person_id: EMMA_ID,
+  course_id: CS101_ID,
+  target_type: "grades",
+  target_id: null,
+  sources: [{ type: "rubric", id: "r0000000-0000-4000-8000-000000000001", version: 2, title: "Essay rubric" }],
+  policies: [{ key: "grading.release_mode", value: "instructor_release", scope_type: "course", scope_id: CS101_ID, version: 1 }],
+  model: "claude-test",
+  prompt_sha256: null,
+  output: {},
+  created_at: "2026-10-01T12:00:00Z",
+  decisions: [],
+  outcome_links: [],
+};
+
+export const PENDING_CREDENTIAL_ID = "5d1f2c3e-8a4b-4c6d-9e0f-1a2b3c4d5e6f";
+export const PYTHON_MC_ID = "6e2a3d4f-9b5c-4d7e-8f10-2b3c4d5e6f70";
+export const CREDENTIAL_RECOMMENDATION_ID = "0c9a8b7d-6e5f-4a3b-9c2d-1e0f9a8b7c6d";
+export const INSIGHTS_UPDATE_ID = "1d0b9c8e-7f6a-4b5c-8d3e-2f1a0b9c8d7e";
+
+// Engine-written badge recommendation (src/engine/provenance.py): target is the pending row.
+export const CREDENTIAL_RECOMMENDATION = {
+  ...SMOKE_AI_ACTION,
+  id: CREDENTIAL_RECOMMENDATION_ID,
+  agent: "learning_analyst",
+  action_type: "recommendation",
+  target_type: "pending_credentials",
+  target_id: PENDING_CREDENTIAL_ID,
+  sources: [{ type: "attestation", id: "a0000000-0000-4000-8000-000000000001", version: null, title: "Type Conversion attestation" }],
+  policies: [],
+  output: { kind: "credential", microcredential_id: PYTHON_MC_ID, title: "Python Fundamentals", pending_id: PENDING_CREDENTIAL_ID },
+};
+
+// An older seed-style profile_update first, so the matcher must prefer the one that wrote `insights`.
+export const INSIGHTS_UPDATES = [
+  {
+    ...SMOKE_AI_ACTION,
+    id: INSIGHTS_UPDATE_ID,
+    agent: "learning_analyst",
+    action_type: "profile_update",
+    course_id: null,
+    target_type: "persons",
+    target_id: EMMA_ID,
+    sources: [{ type: "session", id: "s0000000-0000-4000-8000-000000000001", version: null, title: "Tutoring session, 28 Sep" }],
+    policies: [],
+    output: { tool: "roster.update_student_insights", insights: ["You learn fastest from worked examples."] },
+  },
+  {
+    ...SMOKE_AI_ACTION,
+    id: "2e1c0d9f-8a7b-4c6d-9e4f-3a2b1c0d9e8f",
+    agent: "learning_analyst",
+    action_type: "profile_update",
+    target_type: null,
+    sources: [],
+    policies: [],
+    output: { strengths: ["Variables"], focus: ["Loops"] },
+  },
+];
 
 // Same shape graph.mastery_map returns (src/data_mcp/mcp_servers/content/tools.py).
 export const EMMA_CS101_MASTERY = {
@@ -191,7 +318,7 @@ export interface FakeEngine {
   accounts: Record<string, { password: string; me: FakeMe }>;
 }
 
-function corsHeaders(req: Request): Record<string, string> {
+export function corsHeaders(req: Request): Record<string, string> {
   return {
     "access-control-allow-origin": req.headers()["origin"] ?? "*",
     "access-control-allow-credentials": "true",
@@ -306,9 +433,72 @@ export async function mockEngine(page: Page, opts: Partial<Pick<FakeEngine, "me"
 
     if (method === "GET" && path === "/api/stream") {
       if (url.searchParams.get("turn_id") === "smoke-turn-1") {
-        return sse(route, [{ event: "final", payload: { answer_markdown: "Here is your smoke-test answer." } }]);
+        return sse(route, [
+          { event: "agent_start", payload: { step_id: "s1", agent: "tutor", inputs: {} } },
+          { event: "agent_tool_call", payload: { step_id: "s1", agent: "tutor", tool: "content.retrieve", arguments: {}, result_summary: "2 items", latency_ms: 5, success: true } },
+          { event: "agent_token", payload: { step_id: "s1", agent: "tutor", delta: "Here is", channel: "response" } },
+          { event: "final", payload: { answer_markdown: "Here is your smoke-test answer.", artifacts: [], cost_usd: 0, tokens: 0, wall_time_ms: 1 } },
+        ]);
       }
       return sse(route, []);
+    }
+
+    if (method === "GET" && path === `/api/measurement/courses/${CS101_ID}`) {
+      return json(route, CS101_MEASUREMENT);
+    }
+
+    if (method === "GET" && path === "/api/measurement/rollup") {
+      return json(route, INSTITUTION_ROLLUP);
+    }
+
+    if (method === "GET" && path === "/api/measurement/export") {
+      const format = url.searchParams.get("format") ?? "json";
+      const table = url.searchParams.get("table") ?? "ai_actions";
+      const filename = format === "csv" ? `${table}.csv` : "measurement.json";
+      const body = format === "csv"
+        ? "id,agent,action_type\n" + `${SMOKE_AI_ACTION_ID},grader,grade_draft\n`
+        : JSON.stringify({ course_id: url.searchParams.get("course_id"), from: null, to: "2026-10-02T00:00:00Z", ai_actions: [SMOKE_AI_ACTION], human_decisions: [], outcome_links: [] });
+      return route.fulfill({
+        status: 200,
+        contentType: format === "csv" ? "text/csv" : "application/json",
+        headers: {
+          ...corsHeaders(req),
+          "content-disposition": `attachment; filename="${filename}"`,
+          "access-control-expose-headers": "content-disposition",
+        },
+        body,
+      });
+    }
+
+    if (method === "GET" && path === "/api/ai-actions") {
+      const actionType = url.searchParams.get("action_type");
+      const subject = url.searchParams.get("subject_person_id");
+      const items = actionType === "recommendation"
+        ? [CREDENTIAL_RECOMMENDATION].filter((a) => !subject || a.subject_person_id === subject)
+        : actionType === "profile_update"
+          ? INSIGHTS_UPDATES.filter((a) => !subject || a.subject_person_id === subject)
+          : [SMOKE_AI_ACTION];
+      return json(route, { items, next_cursor: null });
+    }
+
+    const aiAction = [SMOKE_AI_ACTION, CREDENTIAL_RECOMMENDATION, ...INSIGHTS_UPDATES].find((a) => path === `/api/ai-actions/${a.id}`);
+    if (method === "GET" && aiAction) {
+      return json(route, aiAction);
+    }
+
+    if (method === "GET" && path === `/api/pending-credentials/${CS101_ID}`) {
+      return json(route, {
+        pending: [
+          {
+            id: PENDING_CREDENTIAL_ID,
+            person_id: EMMA_ID,
+            student_name: "Emma Smith",
+            microcredential_id: PYTHON_MC_ID,
+            credential_title: "Python Fundamentals",
+            created_at: "2026-09-20T12:00:00+00:00",
+          },
+        ],
+      });
     }
 
     if (method === "GET" && path === `/api/mastery/${EMMA_ID}/${CS101_ID}`) {

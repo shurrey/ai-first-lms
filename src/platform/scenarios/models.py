@@ -17,6 +17,11 @@ class ApprovalAction(BaseModel):
 class UserTurn(BaseModel):
     message: str
     approvals: list[ApprovalAction] = Field(default_factory=list)
+    default_approval: ApprovalAction | None = Field(
+        default=None,
+        description="Decision for approval requests beyond `approvals`, for turns whose "
+        "number of gated writes is up to the model (one per quiz question, say).",
+    )
 
 
 class ExpectedOutcome(BaseModel):
@@ -40,3 +45,8 @@ class Scenario(BaseModel):
     course_id: str
     user_turns: list[UserTurn]
     expected: ExpectedOutcome
+    xfail: str | None = Field(
+        default=None,
+        description="Why the scenario is expected to fail; a failing run reports xfail, a "
+        "passing one xpass.",
+    )

@@ -293,7 +293,7 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                    WHERE e.person_id = $1
                      AND e.observed_at >= now() - make_interval(days => $2)
                      AND ($3::uuid[] IS NULL OR e.node_id = ANY($3))
-                   ORDER BY e.observed_at DESC
+                   ORDER BY e.observed_at DESC, e.kind, e.score, e.source
                    LIMIT 100""",
                 uuid.UUID(person_id),
                 since_days,

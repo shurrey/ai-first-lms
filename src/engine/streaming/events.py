@@ -90,6 +90,7 @@ class ArtifactPayload(BaseModel):
 class FinalPayload(BaseModel):
     answer_markdown: str
     artifacts: list[ArtifactPayload] = Field(default_factory=list)
+    ai_action_ids: list[str] = Field(default_factory=list)  # ai_actions rows from this turn
     cost_usd: float
     tokens: int
     wall_time_ms: float

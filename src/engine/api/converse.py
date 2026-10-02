@@ -196,14 +196,18 @@ async def _execute_turn(app, session, turn: Turn, ctx: AuthContext) -> bool:  # 
         logger.warning("Turn %s halted: %s", turn.id, turn_error.get("code"))
         return False
 
+    await _persist_exchange(session, turn, turn_store)
     await turn_store.update_status(turn.id, "completed")
     logger.info("Turn %s completed with %d events", turn.id, last_event_count)
     return True
 
 
-async def _after_completed_turn(app, session, turn: Turn, turn_store) -> None:  # type: ignore[no-untyped-def]
-    """Persist the exchange and trigger post-session analysis; failures are logged, not raised."""
-    # Persist conversation turns to database for cross-session continuity
+async def _persist_exchange(session, turn: Turn, turn_store) -> None:  # type: ignore[no-untyped-def]
+    """Saves the user message and final answer for cross-session history; failures are logged.
+
+    Runs before the turn is marked completed, so a client that starts its next turn once
+    the stream closes always sees this exchange in its history.
+    """
     if session.person_id and session.course_id and turn.message != "__brief__":
         try:
             from engine.agents.runner import _call_mcp_tool
@@ -232,6 +236,9 @@ async def _after_completed_turn(app, session, turn: Turn, turn_store) -> None:  
         except Exception:
             logger.warning("Failed to persist conversation turns", exc_info=True)
 
+
+async def _after_completed_turn(app, session, turn: Turn, turn_store) -> None:  # type: ignore[no-untyped-def]
+    """Triggers post-session analysis; failures are logged, not raised."""
     # Session end detection — fire learning analyst
     if session.persona == "student" and session.person_id:
         end_phrases = ["bye", "done", "that's all", "gotta go", "see you", "i'm done", "thanks, bye", "that's it"]
@@ -243,6 +250,7 @@ async def _after_completed_turn(app, session, turn: Turn, turn_store) -> None:  
                     person_id=session.person_id,
                     course_id=session.course_id,
                     background_tasks=app.state.background_tasks,
+                    provenance=app.state.provenance,
                 ), name=f"analysis-{session.id}")
                 logger.info("Learning analyst triggered for session %s", session.id)
             except Exception:

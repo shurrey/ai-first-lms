@@ -148,6 +148,8 @@ export const FinalPayload = z.object({
   answer_markdown: z.string(),
   artifacts: z.array(Artifact),
   follow_ups: z.array(z.string()).optional(),
+  // Not yet in contracts/events.md; read when present so the AI-generated label can link to provenance.
+  ai_action_ids: z.array(z.string()).optional(),
   cost_usd: z.number(),
   tokens: z.number(),
   wall_time_ms: z.number(),

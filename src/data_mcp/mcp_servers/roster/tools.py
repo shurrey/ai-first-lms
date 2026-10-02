@@ -72,7 +72,7 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                    FROM evidence e
                    JOIN nodes n ON n.id = e.node_id
                    WHERE e.person_id = $1
-                   ORDER BY e.observed_at DESC LIMIT 10""",
+                   ORDER BY e.observed_at DESC, n.title, e.kind, e.score LIMIT 10""",
                 person_id,
             )
             recent_evidence = [
@@ -86,7 +86,7 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
             mod_rows = await conn.fetch(
                 """SELECT m.module_id, m.title
                    FROM modules m WHERE m.course_id = $1
-                   ORDER BY (m.metadata->>'order')::int""",
+                   ORDER BY (m.metadata->>'order')::int, m.title""",
                 course_id,
             )
             current_modules = [
@@ -99,7 +99,7 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                 """SELECT a.assignment_id, a.title, a.due_at
                    FROM assignments a
                    WHERE a.course_id = $1 AND a.due_at > now()
-                   ORDER BY a.due_at LIMIT 5""",
+                   ORDER BY a.due_at, a.title LIMIT 5""",
                 course_id,
             )
             upcoming = [

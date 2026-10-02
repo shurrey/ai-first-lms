@@ -1,33 +1,21 @@
 import { test, expect } from "@playwright/test";
-import { setupMockAPI, selectCourse } from "./fixtures/setup";
-import { EMMA } from "./fixtures/fake-api";
-import { scenario11Events } from "./fixtures/mock-events";
+import { login, requireLiveBackend } from "./fixtures/live-auth";
+import { expectActiveRole, loadScenario, runTurn, startCourseSession } from "./fixtures/live-scenario";
 
-const SESSION_ID = "s11-session";
-const TURN_ID = "s11-turn";
+const scenario = loadScenario(11);
 
 test.describe("Scenario 11: Student learning path (AI-native)", () => {
-  test("shows the learning path answer", async ({ page }) => {
-    await setupMockAPI(page, {
-      me: EMMA,
-      sessionId: SESSION_ID,
-      turnId: TURN_ID,
-      sseEvents: scenario11Events(SESSION_ID, TURN_ID),
-    });
+  test.beforeEach(() => requireLiveBackend());
 
-    await page.goto("/");
-    await selectCourse(page);
+  test("the answer carries a learning path canvas", async ({ page }) => {
+    await login(page, scenario.loginAs);
+    await expectActiveRole(page, scenario.activeRole);
+    await startCourseSession(page, scenario.courseSlug);
 
-    // Send the learning path request
-    const input = page.getByPlaceholder(/Type a message/);
-    await input.fill(
-      "I want to get better at writing. Help me build a path."
-    );
-    await page.getByRole("button", { name: "Send" }).click();
+    await runTurn(page, scenario.message, scenario.approvals);
 
-    // Final answer should appear in main chat area
-    await expect(
-      page.locator("main").getByText("personalized writing improvement path")
-    ).toBeVisible({ timeout: 5000 });
+    const canvas = page.locator("main > div").first().getByTestId("canvas-shell");
+    await expect(canvas.first()).toBeVisible();
+    await expect(canvas.first()).toContainText("Generated");
   });
 });

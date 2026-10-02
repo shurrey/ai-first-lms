@@ -7,10 +7,13 @@ actions (roster, credentials) need the faculty role itself.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request
 
+from engine.auth.access_log import AccessEntry, AccessLog, AccessResource
 from engine.auth.capabilities import has_capability
 from engine.auth.directory import ScopeDirectory
 from engine.auth.models import AuthContext
@@ -38,6 +41,24 @@ def get_scope_directory(request: Request) -> ScopeDirectory:
 
 
 Directory = Annotated[ScopeDirectory, Depends(get_scope_directory)]
+
+
+def get_access_log(request: Request) -> AccessLog | None:
+    """None when the engine was started without a database."""
+    return getattr(request.app.state, "access_log", None)
+
+
+AccessLogDep = Annotated[AccessLog | None, Depends(get_access_log)]
+
+
+@dataclass(frozen=True)
+class SensitiveRead:
+    """A read of transcripts, the profile, analyst summaries or a full submission, which
+    can_view_student records in data_access_log when it lets a non-self actor through."""
+
+    log: AccessLog | None
+    resource: AccessResource
+    resource_id: str | None = None
 
 
 def _faculty_course_ids(ctx: AuthContext) -> frozenset[str]:
@@ -73,7 +94,8 @@ def record_access(
     purpose: str,
     allowed: bool,
 ) -> None:
-    """Structured access log; data_access_log rows replace this in T-E-113."""
+    """Structured log of every scope decision, allowed or not; data_access_log holds only
+    allowed sensitive reads."""
     log.info(
         "data_access",
         requester_id=ctx.person_id,
@@ -85,6 +107,47 @@ def record_access(
     )
 
 
+async def record_sensitive_read(
+    ctx: AuthContext, student_id: str, purpose: str, read: SensitiveRead
+) -> None:
+    """Writes one data_access_log row for a non-self read; self reads write none. Never
+    raises: a failed write is logged at ERROR so the read itself still succeeds."""
+    if student_id == ctx.person_id:
+        return
+    if read.log is None:
+        log.warning("data_access_log_unavailable", requester_id=ctx.person_id,
+                    student_id=student_id, resource=read.resource, purpose=purpose)
+        return
+    entry = AccessEntry(actor_id=ctx.person_id, subject_id=student_id, resource=read.resource,
+                        resource_id=read.resource_id, purpose=purpose)
+    try:
+        await read.log.record(entry)
+    except Exception:
+        log.error("data_access_log_write_failed", requester_id=ctx.person_id,
+                  student_id=student_id, resource=read.resource, purpose=purpose,
+                  exc_info=True)
+
+
+async def record_bulk_read(ctx: AuthContext, subject_ids: Iterable[str], purpose: str,
+                           resource: AccessResource, access_log: AccessLog | None) -> None:
+    """One data_access_log row per distinct non-self subject, in one write. Never raises,
+    as `record_sensitive_read`."""
+    subjects = sorted({s for s in subject_ids if s and s != ctx.person_id})
+    if not subjects:
+        return
+    if access_log is None:
+        log.warning("data_access_log_unavailable", requester_id=ctx.person_id,
+                    subjects=len(subjects), resource=resource, purpose=purpose)
+        return
+    entries = [AccessEntry(actor_id=ctx.person_id, subject_id=s, resource=resource,
+                           resource_id=None, purpose=purpose) for s in subjects]
+    try:
+        await access_log.record_many(entries)
+    except Exception:
+        log.error("data_access_log_write_failed", requester_id=ctx.person_id,
+                  subjects=len(subjects), resource=resource, purpose=purpose, exc_info=True)
+
+
 async def can_view_student(
     ctx: AuthContext,
     student_id: str,
@@ -92,13 +155,17 @@ async def can_view_student(
     *,
     purpose: str,
     directory: ScopeDirectory,
+    read: SensitiveRead | None = None,
 ) -> bool:
     """Self always; admin all; advisor assigned students; faculty students in a taught course.
 
-    With `course_id`, faculty access is limited to that course. Every decision is logged.
+    With `course_id`, faculty access is limited to that course. Every decision is logged;
+    with `read`, an allowed non-self decision also writes a data_access_log row.
     """
     allowed = await _decide(ctx, student_id, course_id, directory)
     record_access(ctx, student_id, course_id, purpose, allowed)
+    if allowed and read is not None:
+        await record_sensitive_read(ctx, student_id, purpose, read)
     return allowed
 
 
@@ -128,6 +195,7 @@ async def require_student_view(
     purpose: str,
     directory: ScopeDirectory,
     capability: str | None = None,
+    read: SensitiveRead | None = None,
 ) -> None:
     """403 unless the caller is the learner, or holds `capability` and passes can_view_student."""
     lacks_capability = capability is not None and not has_capability(ctx.active_role, capability)
@@ -135,7 +203,7 @@ async def require_student_view(
         record_access(ctx, student_id, course_id, purpose, False)
         raise forbidden()
     if not await can_view_student(
-        ctx, student_id, course_id, purpose=purpose, directory=directory
+        ctx, student_id, course_id, purpose=purpose, directory=directory, read=read
     ):
         raise forbidden()
 

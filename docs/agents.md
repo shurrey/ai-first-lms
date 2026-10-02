@@ -1,10 +1,10 @@
 # Agent Reference
 
-The system has 11 specialized agents, each with a system prompt and a set of allowed MCP tools. Agents are dispatched by the orchestrator based on intent classification.
+The system has 11 specialized agents. Each agent is a software tool: a system prompt plus a set of allowed MCP tools, run by the orchestrator after intent classification. Agents describe what they produce as generated and cite the sources it came from. Wording follows [language.md](language.md).
 
 ## Tutor
 
-**Role:** Socratic learning companion for students. Drives learning sessions proactively — chooses what to teach, adapts to the student, assesses understanding, and attests mastery.
+**Role:** Socratic tutoring tool for students. Drives learning sessions proactively — chooses what to teach, adapts to the student, assesses understanding, and attests mastery.
 
 **Key behaviors:**
 - Proactive teaching: begins immediately without asking "what would you like to do?"
@@ -63,7 +63,7 @@ The system has 11 specialized agents, each with a system prompt and a set of all
 
 ## Advising
 
-**Role:** Academic advisor agent. Helps with degree audits, course planning, prerequisite checking, and graduation timelines.
+**Role:** Academic planning tool. Helps with degree audits, course planning, prerequisite checking, and graduation timelines.
 
 **Tools:** roster.get_student_context, roster.get_student, sis.get_transcript, sis.degree_audit, sis.catalog_search
 
@@ -71,7 +71,7 @@ The system has 11 specialized agents, each with a system prompt and a set of all
 
 ## Accessibility
 
-**Role:** WCAG compliance specialist. Audits content for accessibility issues and suggests accommodations.
+**Role:** WCAG compliance checker. Audits content for accessibility issues and suggests accommodations.
 
 **Tools:** content.retrieve, content.search
 

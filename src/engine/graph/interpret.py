@@ -77,6 +77,7 @@ Key routing rules:
 - Faculty asking about credentials, badges, evidence, approvals → assessment
 - Student asking about their earned badges or credentials → tutor
 - "What courses should I take next semester?" → advising
+- Student asking to build a learning path or a plan to improve a skill ("help me build a path") → advising
 - If the student says "done", "bye", "I'm done for today", "that's all", "gotta go", etc. → set action to "session_end" and agent to "tutor". The tutor will handle the farewell with a reflection question.
 
 MULTI-AGENT actions (set action to exactly these strings when the request needs multiple agents):

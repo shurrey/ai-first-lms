@@ -12,6 +12,7 @@ from typing import Any
 
 from engine.guardrails.injection import INJECTION_GUARDRAIL_INSTRUCTION, guard_prompt_data
 from engine.http import make_anthropic_client, make_sync_http_client
+from engine.provenance import AiActionRow, ProvenanceRecorder, prompt_sha256, source, stable_id
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +25,7 @@ EXPERT_VOICE_ID = os.environ.get("FISH_AUDIO_EXPERT_VOICE", "")
 FISH_AUDIO_API_KEY = os.environ.get("FISH_AUDIO_API_KEY", "")
 
 PODCAST_SCRIPT_PROMPT = """\
-You are creating a podcast script for an educational audio lesson. The student is learning {course_title} and is currently working on these concepts:
+Generate a podcast script for an educational audio lesson. The student is learning {course_title} and is currently working on these concepts:
 
 {concept_details}
 
@@ -32,17 +33,17 @@ Student context:
 - Mastery progress: {mastery_summary}
 - Learner profile: {learner_profile}
 
-Generate a conversational podcast script between two speakers:
-- HOST: Enthusiastic, curious, asks great questions, bridges between topics. Think of a podcast host who genuinely wants to understand.
-- EXPERT: Knowledgeable, patient, uses great analogies and examples. Explains clearly without being condescending.
+Generate a podcast script as a dialogue between two speaker roles:
+- HOST: asks the questions a learner would ask and links one topic to the next.
+- EXPERT: answers with clear explanations, analogies and worked examples, without being condescending.
 
 Requirements:
 - 5-8 minutes of content (roughly 800-1200 words)
 - Focus on the concepts listed above
 - Reference what the student already knows as foundation
 - Address common misconceptions from the skill content
-- Make it feel like a real conversation, not a script reading
-- Include moments of "aha" and genuine engagement
+- Write natural spoken dialogue rather than read-aloud prose
+- Include moments where a misconception is corrected or a connection becomes clear
 - End with a summary of key takeaways
 
 Format each line as:
@@ -53,15 +54,16 @@ Write ONLY the dialogue. No stage directions, no [laughs], no meta-commentary.
 """
 
 
-async def generate_podcast_script(
+PODCAST_MODEL = "claude-sonnet-4-6"
+
+
+def podcast_messages(
     concepts: list[dict[str, Any]],
     course_title: str,
     mastery_summary: str,
     learner_profile: str,
-) -> str:
-    """Generate a podcast script from concept skill content using Claude."""
-    client = make_anthropic_client()
-
+) -> list[dict[str, Any]]:
+    """The model request's messages; the request has no system prompt."""
     concept_details = ""
     for c in concepts:
         concept_details += f"\n### {c['title']}\n{c.get('body_md', '')[:1000]}\n"
@@ -73,11 +75,21 @@ async def generate_podcast_script(
         learner_profile=(guard_prompt_data(learner_profile, "learner_profile")
                          if learner_profile else "No profile yet"),
     ) + INJECTION_GUARDRAIL_INSTRUCTION
+    return [{"role": "user", "content": prompt}]
 
+
+async def generate_podcast_script(
+    concepts: list[dict[str, Any]],
+    course_title: str,
+    mastery_summary: str,
+    learner_profile: str,
+) -> str:
+    """Generate a podcast script from concept skill content using Claude."""
+    client = make_anthropic_client()
     response = await client.messages.create(
-        model="claude-sonnet-4-6",
+        model=PODCAST_MODEL,
         max_tokens=4000,
-        messages=[{"role": "user", "content": prompt}],
+        messages=podcast_messages(concepts, course_title, mastery_summary, learner_profile),
     )
     return response.content[0].text
 
@@ -187,8 +199,14 @@ async def generate_podcast(
     course_title: str,
     mastery_summary: str,
     learner_profile: str,
+    *,
+    provenance: ProvenanceRecorder | None = None,
+    person_id: str = "",
+    course_id: str = "",
+    session_id: str = "",
 ) -> dict[str, Any]:
-    """Full podcast pipeline: script generation → audio rendering."""
+    """Full podcast pipeline: script generation → audio rendering. With `provenance`, the
+    script is recorded as a `generation` ai_action about `person_id`."""
     podcast_id = uuid.uuid4().hex
 
     # Generate script
@@ -204,10 +222,24 @@ async def generate_podcast(
     # Render audio
     audio_url = await render_audio(segments, podcast_id)
 
+    title = f"Your personalized lesson: {', '.join(c['title'] for c in concepts[:3])}"
+    if provenance is not None:
+        messages = podcast_messages(concepts, course_title, mastery_summary, learner_profile)
+        sources = [s for s in (source("node", c.get("id")) for c in concepts) if s]
+        await provenance.record_safely(AiActionRow(
+            id=stable_id("podcast", podcast_id), agent="podcast", action_type="generation",
+            output={"kind": "podcast", "podcast_id": podcast_id, "title": title,
+                    "script": script, "audio_url": audio_url},
+            session_id=session_id or None, subject_person=person_id or None,
+            course_node=course_id or None, target_type="podcasts", target_id=podcast_id,
+            sources=sources, model=PODCAST_MODEL,
+            prompt_sha256=prompt_sha256("", messages),
+        ))
+
     return {
         "podcast_id": podcast_id,
         "audio_url": audio_url,
         "script": script,
         "segment_count": len(segments),
-        "title": f"Your personalized lesson: {', '.join(c['title'] for c in concepts[:3])}",
+        "title": title,
     }

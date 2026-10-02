@@ -82,3 +82,107 @@ export interface PageData<T = unknown> {
   page: string;
   data: T;
 }
+
+// ---- provenance and measurement (contracts/api.openapi.yaml) ----
+
+export type AiActionType =
+  | "generation" | "grade_draft" | "criterion_feedback" | "practice_item" | "recommendation"
+  | "attestation" | "profile_update" | "nudge" | "alert";
+
+export type HumanDecisionValue = "accepted" | "edited" | "rejected" | "overridden" | "dismissed" | "disputed" | "snoozed";
+
+export interface ProvenanceSource {
+  type: "content_item" | "node" | "submission" | "rubric" | "policy";
+  id: string;
+  version?: number | string | null;
+  title?: string | null;
+}
+
+export interface AppliedPolicy {
+  key: string;
+  value: unknown;
+  scope_type: string;
+  scope_id?: string | null;
+  version?: number | null;
+}
+
+export interface HumanDecision {
+  id: string;
+  ai_action_id: string;
+  decided_by: string;
+  decided_by_name?: string | null;
+  decision: HumanDecisionValue;
+  diff?: Record<string, unknown> | null;
+  reason?: string | null;
+  decided_at: string;
+}
+
+export interface OutcomeLink {
+  ai_action_id: string;
+  evidence_id?: string | null;
+  attestation_id?: string | null;
+  delta?: Record<string, unknown> | null;
+  observed_at: string;
+}
+
+export interface AiAction {
+  id: string;
+  session_id?: string | null;
+  turn_id?: string | null;
+  agent: string;
+  action_type: AiActionType;
+  subject_person_id?: string | null;
+  course_id?: string | null;
+  target_type?: string | null;
+  target_id?: string | null;
+  sources: ProvenanceSource[];
+  policies: AppliedPolicy[];
+  model?: string | null;
+  prompt_sha256?: string | null;
+  output: Record<string, unknown>;
+  created_at: string;
+  decisions: HumanDecision[];
+  outcome_links?: OutcomeLink[];
+}
+
+/** Rates are over decided items, 0–1, and null when nothing is decided. */
+export interface DecisionRates {
+  agent?: string | null;
+  action_type?: AiActionType | null;
+  total: number;
+  accepted: number;
+  edited: number;
+  rejected: number;
+  other?: number;
+  undecided: number;
+  acceptance_rate?: number | null;
+  edit_rate?: number | null;
+  reject_rate?: number | null;
+}
+
+export interface DeltaStat {
+  n: number;
+  mean_delta?: number | null;
+}
+
+export interface MeasurementSummary {
+  scope: { type: "course" | "program" | "institution"; id?: string | null; title?: string | null };
+  from: string | null;
+  to: string;
+  rates: DecisionRates[];
+  criterion_score_changes: { criterion_id: string; criterion_key: string; n: number; mean_delta: number }[];
+  learning_delta_by_decision: { accepted: DeltaStat; edited: DeltaStat; rejected: DeltaStat };
+  most_edited_criteria: { criterion_id: string; criterion_key: string; edit_count: number; edit_rate: number }[];
+  offloading?: { hint_dependency_ratio?: number | null; solution_check_trips?: number };
+}
+
+export interface CourseRef {
+  course_id: string;
+  slug?: string | null;
+  title: string;
+}
+
+export interface MeasurementRollup extends MeasurementSummary {
+  per_course: { course: CourseRef; totals: DecisionRates }[];
+  compliance: { mismatches_count: number };
+}

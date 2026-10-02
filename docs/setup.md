@@ -234,7 +234,22 @@ uv sync --extra dev   # pytest and ruff live in the dev extra
 uv run pytest src/engine -q
 uv run pytest src/agents -q
 uv run pytest src/platform/smoke-tests -q   # scenario executor
+uv run python src/platform/ci/language_lint.py   # banned terms in prompts and UI copy
+uv run pytest src/platform/ci/tests -q            # CI checkers, incl. the language lint
 ```
+
+`language_lint.py` reads its term list from the yaml block in `docs/language.md` and flags
+those terms (whole word, case-insensitive except entries under `case_sensitive`) in every
+`src/**/system_prompt.md`, in prompt text embedded in `src/engine/**/*.py` (strings assigned
+to names ending in `PROMPT`, `PROMPTS`, `ADDENDUM`, `INSTRUCTION` or `INSTRUCTIONS`, strings that
+reach `system=` of a `.messages.create` or `.messages.stream` call, and the module-level strings
+either one references by name), and in the user-visible strings of both UIs' `.tsx`
+files: JSX text, string and template literals, and copy attributes such as `aria-label` or
+`placeholder`.
+Identifiers, imports, comments, `className`/`data-*` values and all-lowercase keys such as
+`"thinking"` are ignored, as are test files. For a legitimate use (quoted student speech, a
+person rather than the software), reword if you can; otherwise add an entry with `path`,
+`term`, `reason` and optionally `line_contains` to `src/platform/ci/language_allowlist.yaml`.
 
 DB-backed engine tests skip unless `ENGINE_TEST_DATABASE_URL` is set. Point it at a
 throwaway database built with the migrations, never at the demo's `lms_db`:
@@ -256,14 +271,52 @@ ENGINE_TEST_DATABASE_URL=postgresql://lms:lms_dev@localhost:5432/lms_test uv run
 >   uv run pytest src/data_mcp -q
 > ```
 
+## Measurement and Scheduled Jobs
+
+These orchestrator settings come from `.env` (defaults in `.env.example`) and are passed
+through by `docker-compose.yaml`. Restart the orchestrator after changing one.
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `MEASURE_WINDOW_DAYS` | `14` | Days after an AI action during which a student's next evidence or attestation on the same node or criterion is linked to it as an outcome (spec §6.4) |
+| `SCHEDULER_ENABLED` | `true` | Runs the in-process scheduler for periodic jobs such as the outcome linker; `false` stops them all |
+| `OUTCOME_LINKER_INTERVAL_MINUTES` | `15` | How often the outcome linker runs |
+
+## Recording and Replaying Scenario Fixtures
+
+Scenario runs and the live-login Playwright specs can use recorded model responses instead
+of the Anthropic API, so they need no API key and cost nothing. Three orchestrator variables
+control it:
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `LLM_FIXTURE_MODE` | `off` | `off` calls the API; `record` calls it and saves every response; `replay` answers from saved responses and makes no API calls |
+| `LLM_FIXTURE_DIR` | empty | Where fixtures are read and written, as a path inside the orchestrator container. Required when the mode is `record` or `replay`; the orchestrator fails the turn without it |
+| `LLM_FIXTURE_ALLOW` | empty | Must be `1` when the mode is `record` or `replay`, confirming a test environment; otherwise the orchestrator refuses to start. The fixtures overlay sets it |
+
+A fixture only matches a request made against the same database state, so recording and
+replay both run through `src/platform/llm-fixtures/run-live-e2e record|replay`. It starts a
+separate compose project (`lms-llm-fixtures`) with fresh volumes and a fresh seed, sets
+`LLM_FIXTURE_DIR` and `LLM_FIXTURE_ALLOW=1`, runs the live Chat UI specs and then
+`scripts/demo all --check`. It never touches the demo database. See `src/platform/llm-fixtures/README.md` for the exact steps.
+
+A recorded set replays only on the day it was recorded: several MCP tools filter on `now()`
+against the seed's absolute dates (fixed clock: T-P-106). Until that lands,
+`src/platform/llm-fixtures/recordings/` is git-ignored, nothing in it is committed, and CI's
+`e2e-live-replay` job runs only when the CI workflow is started by hand with the run id of a
+same-day **Record LLM Fixtures** run.
+
+Re-record after changing a prompt, a manifest, a tool schema, the seed or a scenario.
+
 ## Continuous Integration
 
 Workflows live in `.github/workflows/`:
 
 | Workflow | Trigger | What it runs |
 |----------|---------|--------------|
-| `ci.yaml` | every push and PR to `main` | ruff S608 (string-built SQL), `verify=False` grep, pytest for engine (DB-backed tests against an alembic-built Postgres service) / agents / data_mcp (Postgres service container) / scenario executor, Playwright `*.smoke.spec.ts` for both the Ultra UI and the Chat UI (mocked API; `playwright-smoke` passes only when both do), `docker compose config` |
+| `ci.yaml` | every push and PR to `main`; manual (`workflow_dispatch`, needs `fixtures_run_id`) | ruff S608 (string-built SQL), `verify=False` grep, language lint (`src/platform/ci/language_lint.py` and its tests), pytest for engine (DB-backed tests against an alembic-built Postgres service) / agents / data_mcp (Postgres service container) / scenario executor, Playwright `*.smoke.spec.ts` for both the Ultra UI and the Chat UI (mocked API; `playwright-smoke` passes only when both do), `docker compose config`; on a manual run only, `e2e-live-replay` (full stack replaying the `llm-fixtures` artifact of the Record LLM Fixtures run given as `fixtures_run_id` through the live Chat UI specs and `scripts/demo all --check`) |
 | `contract-invariants.yaml` | every push and PR to `main` | `src/platform/ci/scripts/check_contracts.py`, including the migrations-vs-schema check against a Postgres service container, then `pytest src/platform/ci/tests` |
+| `record-llm-fixtures.yaml` | manual (`workflow_dispatch`) | `run-live-e2e record`; uploads the recorded fixtures as the `llm-fixtures` artifact for a same-day manual CI run to replay; needs `ANTHROPIC_API_KEY` as a repo secret |
 | `scenario-tests.yaml` | manual (`workflow_dispatch`) | full `docker compose up` plus all scenarios; needs `ANTHROPIC_API_KEY` as a repo secret |
 
 Jobs that need `SEED_DEMO_PASSWORD` take it from the `SEED_DEMO_PASSWORD` repo secret when one is set, otherwise generate a random one at job start. Never put a literal value in a workflow; `src/platform/ci/tests/test_workflows.py` fails if one appears.
@@ -275,7 +328,7 @@ Branch protection is a GitHub setting, not a file in the repo. A repo admin sets
 1. GitHub → **Settings** → **Branches** (or **Rules → Rulesets**) → add a rule for `main`.
 2. Enable **Require a pull request before merging** and **Require status checks to pass**.
 3. Under required checks, add each job from `ci.yaml` and `contract-invariants.yaml` (they
-   appear after the workflows have run once): `ruff-s608`, `no-verify-false`, `test-engine`, `test-agents`, `test-data_mcp`,
+   appear after the workflows have run once): `ruff-s608`, `no-verify-false`, `language-lint`, `test-engine`, `test-agents`, `test-data_mcp`,
    `test-platform`, `playwright-smoke`, `compose-config`, `contract-invariants`.
 4. Enable **Require branches to be up to date before merging**.
 
@@ -286,7 +339,7 @@ gh api -X PUT repos/{owner}/{repo}/branches/main/protection --input - <<'EOF'
 {
   "required_status_checks": {
     "strict": true,
-    "contexts": ["ruff-s608", "no-verify-false", "test-engine", "test-agents",
+    "contexts": ["ruff-s608", "no-verify-false", "language-lint", "test-engine", "test-agents",
                  "test-data_mcp", "test-platform", "playwright-smoke", "compose-config",
                  "contract-invariants"]
   },

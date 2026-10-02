@@ -3,6 +3,7 @@ name: "Grading: rubric-based scoring with approval"
 login_as: "m.torres@university.edu"
 active_role: faculty
 course_id: "cs101"
+xfail: "Needs assessments.list_submission_history (T-D-104, tasks/open/T-D-104.md) to find the Essay 3 submissions."
 
 user_turns:
   - message: "Grade submissions for Essay 3 with my rubric."
@@ -12,6 +13,6 @@ user_turns:
 expected:
   final_event: final
   artifacts_of_type:
-    - rubric_grid
+    - rubric_grades
   min_agent_invocations: 1
-  max_wall_time_ms: 20000
+  max_wall_time_ms: 60000

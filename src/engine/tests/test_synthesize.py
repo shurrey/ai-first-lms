@@ -180,3 +180,25 @@ async def test_synthesize_emits_reasoning_event():
     reasoning = [e for e in result["events_emitted"] if e["event"] == "reasoning"]
     assert len(reasoning) == 1
     assert reasoning[0]["payload"]["step"] == "synthesize"
+
+
+async def test_final_event_lists_the_turns_ai_action_ids_once_in_order():
+    def result(step: str, ids: list[str] | None) -> dict:
+        r = {"step_id": step, "agent": "tutor", "output": {"response_markdown": step},
+             "cost_usd": 0.0, "tokens": 0, "success": True}
+        return {**r, "ai_action_ids": ids} if ids is not None else r
+
+    state = {"agent_results": [result("a", ["x", "y"]), result("b", None),
+                               result("c", ["y", "z"])],
+             "events_emitted": [], "cost_usd": 0.0, "tokens": 0}
+
+    out = await synthesize(state)
+
+    [final] = [e for e in out["events_emitted"] if e["event"] == "final"]
+    assert final["payload"]["ai_action_ids"] == ["x", "y", "z"]
+
+
+async def test_final_event_has_empty_ai_action_ids_without_writes():
+    out = await synthesize({"agent_results": [], "events_emitted": []})
+    [final] = [e for e in out["events_emitted"] if e["event"] == "final"]
+    assert final["payload"]["ai_action_ids"] == []

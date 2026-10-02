@@ -68,9 +68,12 @@ async def _discover_courses() -> list[dict[str, str]]:
         for c in result.get("courses", [])
     ]
 
+FALLBACK_COACHING_MESSAGE = "Welcome. Ask a question about this course to get started."
+
 COACHING_SYSTEM_PROMPT = """\
-You are the Tutor in a mastery-based AI-native LMS. A student just opened their course.
-Write a brief, warm, PROACTIVE greeting that STARTS a learning session (3-5 sentences).
+You are the Tutor, a software tool in a mastery-based AI-native LMS. A student just opened
+their course. Generate a brief, direct, PROACTIVE opening message that STARTS a learning
+session (3-5 sentences).
 
 You are NOT asking the student what they want to do. You are TELLING them what's next and beginning.
 
@@ -81,8 +84,8 @@ Based on their mastery data:
 - End with a direct lead-in: "Let's start by exploring..." or "Here's the key thing to understand about..."
 
 Examples of GOOD openings:
-- "Welcome back! You've mastered 30 concepts and earned Programming Fundamentals. Your next step is 'lists' in the Data Structures module — this is how Python stores collections of items. Let's start with what a list actually is and why you'd use one."
-- "Great to see you again! You're proficient in 'for loops' — let's push that to mastery today. I'm going to give you a scenario that requires a loop with a tricky edge case."
+- "Welcome back. You've mastered 30 concepts and earned Programming Fundamentals. Your next step is 'lists' in the Data Structures module — this is how Python stores collections of items. Let's start with what a list actually is and why you'd use one."
+- "You're proficient in 'for loops' — the next step is mastery. Here is a scenario that requires a loop with a tricky edge case."
 
 Examples of BAD openings (do NOT do these):
 - "Would you like to continue where we left off?"
@@ -92,6 +95,8 @@ Examples of BAD openings (do NOT do these):
 Do NOT reference grades, percentages, or scores. Frame everything as mastery progress.
 Do NOT use JSON. Write plain markdown only.
 Do NOT use emojis excessively — one or two is fine.
+Write plain statements about the student and the material. Do not describe your own feelings
+or enthusiasm, and do not present yourself as a person.
 """
 
 
@@ -594,27 +599,46 @@ class AdminBriefGatherer:
 _COACHING_PROMPTS: dict[str, str] = {
     "student": COACHING_SYSTEM_PROMPT,
     "faculty": """\
-You are an AI assistant in an LMS. A faculty member just opened their course dashboard.
-Write a brief, professional greeting (2-4 sentences).
+You are an assistant tool in an LMS. A faculty member just opened their course dashboard.
+Generate a brief, professional opening message (2-4 sentences).
 Mention class size, any pending items needing attention (submissions to grade, at-risk students).
 End with a concrete action they could take right now.
 Do NOT use JSON. Write plain markdown only.
 """,
     "advisor": """\
-You are an AI assistant in an LMS. An academic advisor just opened a course view.
-Write a brief, professional greeting (2-3 sentences).
+You are an assistant tool in an LMS. An academic advisor just opened a course view.
+Generate a brief, professional opening message (2-3 sentences).
 Mention the number of students and any areas that might need advising attention.
-End with an offer to help identify at-risk students or review degree progress.
+End with a concrete next step: identifying at-risk students or reviewing degree progress.
 Do NOT use JSON. Write plain markdown only.
 """,
     "admin": """\
-You are an AI assistant in an LMS. An administrator just opened a course view.
-Write a brief, professional greeting (2-3 sentences).
+You are an assistant tool in an LMS. An administrator just opened a course view.
+Generate a brief, professional opening message (2-3 sentences).
 Provide a high-level overview of the course health.
-End with an offer to drill into enrollment, performance, or accessibility.
+End with a concrete next step: drilling into enrollment, performance, or accessibility.
 Do NOT use JSON. Write plain markdown only.
 """,
 }
+
+
+# Profile-class keys in persons.attributes. Roster pages leave them out so that reading
+# them stays on the logged paths (roster.get_learner_profile, roster.get_goals,
+# /api/student-insights, /api/student-goals).
+_PROFILE_ATTRIBUTE_KEYS = frozenset({"learner_profile", "student_insights", "goals"})
+
+
+def _roster_attributes(student: dict[str, Any]) -> dict[str, Any]:
+    attributes = student.get("attributes")
+    if isinstance(attributes, str):
+        try:
+            attributes = json.loads(attributes)
+        except json.JSONDecodeError:
+            logger.warning("Unparseable persons.attributes for %s", student.get("id"))
+            return {}
+    if not isinstance(attributes, dict):
+        return {}
+    return {k: v for k, v in attributes.items() if k not in _PROFILE_ATTRIBUTE_KEYS}
 
 
 class BriefGenerator:
@@ -904,7 +928,7 @@ class BriefGenerator:
                 "email": student.get("email", "") if not hide_other_grades else "",
                 "role": p.get("role", "student"),
                 "overall": avg if show_grade else None,
-                "attributes": student.get("attributes", {}) if show_grade else {},
+                "attributes": _roster_attributes(student) if show_grade else {},
             })
 
         return {"persons": enriched}
@@ -978,4 +1002,4 @@ class BriefGenerator:
             return response.content[0].text
         except Exception as exc:
             logger.warning("Coaching message generation failed: %s", exc)
-            return "Welcome! I'm here to help — ask me anything to get started."
+            return FALLBACK_COACHING_MESSAGE

@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# Brings up a freshly seeded stack whose orchestrator records or replays LLM fixtures, then runs
+# the live Chat UI specs (E2E_LIVE=1) followed by `scripts/demo all --check`. See README.md.
+#
+# Usage: src/platform/llm-fixtures/run-live-e2e record|replay
+# Needs SEED_DEMO_PASSWORD; record also needs ANTHROPIC_API_KEY. KEEP_STACK=1 leaves the
+# stack running afterwards (CI uses it to collect logs).
+set -euo pipefail
+
+mode="${1:-}"
+case "$mode" in
+  record | replay) ;;
+  *) echo "usage: $0 record|replay" >&2; exit 2 ;;
+esac
+
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+cd "$ROOT"
+: "${SEED_DEMO_PASSWORD:?SEED_DEMO_PASSWORD must be set}"
+
+# A project of its own gets fresh volumes, so `down -v` here never touches the demo's database.
+PROJECT=lms-llm-fixtures
+RECORDINGS=src/platform/llm-fixtures/recordings
+compose=(docker compose -p "$PROJECT" -f docker-compose.yaml -f src/platform/llm-fixtures/compose.yaml)
+
+# Container names are fixed in docker-compose.yaml, so another project's stack must be stopped.
+others="$(docker ps -a --filter 'name=^lms-' --format '{{.Label "com.docker.compose.project"}}' \
+  | sort -u | grep -vx "$PROJECT" || true)"
+if [ -n "$others" ]; then
+  echo "error: compose project(s) '$others' own the lms-* containers." >&2
+  echo "Stop them first without deleting volumes, e.g. 'docker compose down' (never -v)." >&2
+  exit 1
+fi
+
+mkdir -p "$RECORDINGS"
+if [ "$mode" = record ]; then
+  : "${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY must be set to record}"
+  # Fixtures are keyed by request content; start empty so none outlive the requests they matched.
+  find "$RECORDINGS" -name '*.json' -delete
+elif ! find "$RECORDINGS" -maxdepth 1 -name '*.json' | grep -q .; then
+  echo "error: no fixtures in $RECORDINGS; record them first ($0 record)" >&2
+  exit 1
+fi
+
+teardown() {
+  if [ "${KEEP_STACK:-}" != 1 ]; then "${compose[@]}" down -v --remove-orphans; fi
+}
+trap teardown EXIT
+
+"${compose[@]}" down -v --remove-orphans
+LLM_FIXTURE_MODE="$mode" "${compose[@]}" up -d --build
+
+seed_status="$(docker wait lms-db-seed)"
+if [ "$seed_status" != 0 ]; then
+  echo "error: db-seed exited with $seed_status" >&2
+  exit 1
+fi
+wait_for() {
+  for _ in $(seq 1 60); do
+    if curl -fsS "$1" > /dev/null; then return 0; fi
+    sleep 5
+  done
+  echo "error: $1 not healthy after 300s" >&2
+  return 1
+}
+wait_for http://localhost:8000/healthz
+wait_for http://localhost:3000/
+
+# Both suites always run; the database state each one sees must match recording and replay.
+status=0
+(cd src/frontend && E2E_LIVE=1 pnpm exec playwright test login.live scenario-) || status=1
+uv run python src/platform/scripts/demo all --check || status=1
+
+if [ "$mode" = record ]; then
+  echo "Recorded $(find "$RECORDINGS" -maxdepth 1 -name '*.json' | wc -l | tr -d ' ') fixtures in $RECORDINGS"
+fi
+exit "$status"

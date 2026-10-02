@@ -88,7 +88,7 @@ function StudentOwnSessions({ courseId, personId, displayName }: { courseId: str
           {transcript.turns.map((turn, i) => (
             <div key={i} className={`rounded-lg p-3 text-sm ${turn.role === "user" ? "bg-indigo-50 border border-indigo-200" : "bg-gray-50 border border-gray-200"}`}>
               <div className="flex justify-between mb-1">
-                <span className="text-[10px] font-semibold text-gray-500">{turn.role === "user" ? "You" : "AI Tutor"}</span>
+                <span className="text-[10px] font-semibold text-gray-500">{turn.role === "user" ? "You" : "Tutor (AI)"}</span>
                 <span className="text-[10px] text-gray-400">{formatTime(turn.created_at)}</span>
               </div>
               {turn.role === "user" ? <p>{turn.content}</p> : (
@@ -237,7 +237,7 @@ function FacultyRoster({ courseId }: { courseId: string }) {
               {transcript.turns.map((turn, i) => (
                 <div key={i} className={`rounded-lg p-3 text-sm ${turn.role === "user" ? "bg-indigo-50 border border-indigo-200" : "bg-gray-50 border border-gray-200"}`}>
                   <div className="flex justify-between mb-1">
-                    <span className="text-[10px] font-semibold text-gray-500">{turn.role === "user" ? transcript.student_name : "AI Tutor"}</span>
+                    <span className="text-[10px] font-semibold text-gray-500">{turn.role === "user" ? transcript.student_name : "Tutor (AI)"}</span>
                     <span className="text-[10px] text-gray-400">{formatTime(turn.created_at)}</span>
                   </div>
                   {turn.role === "user" ? (

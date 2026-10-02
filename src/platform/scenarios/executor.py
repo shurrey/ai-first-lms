@@ -7,16 +7,20 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 import yaml
 
-from .models import Scenario
+from .models import ApprovalAction, Scenario, UserTurn
+
+ScenarioStatus = Literal["pass", "fail", "xfail", "xpass"]
 
 
 @dataclass
 class ScenarioResult:
+    """`passed` is False only for status "fail"; a failing xfail scenario does not fail a run."""
+
     scenario_id: int
     scenario_name: str
     passed: bool
@@ -25,6 +29,8 @@ class ScenarioResult:
     artifacts: list[str]
     events: list[dict[str, Any]]
     errors: list[str] = field(default_factory=list)
+    status: ScenarioStatus = "pass"
+    xfail_reason: str | None = None
 
 
 def load_scenario(path: str | Path) -> Scenario:
@@ -50,6 +56,7 @@ PASSWORD_ENV = "SEED_DEMO_PASSWORD"
 SESSION_COOKIE = "lms_session"
 CSRF_COOKIE = "lms_csrf"
 CSRF_HEADER = "X-CSRF-Token"
+BRIEF_TIMEOUT_S = 120
 
 
 class ScenarioExecutor:
@@ -112,6 +119,33 @@ class ScenarioExecutor:
         except Exception as e:
             errors.append(f"Logout failed: {type(e).__name__}: {e}")
 
+    def _drain_brief(self, client: httpx.Client, session_id: str, brief_turn_id: str | None,
+                     errors: list[str]) -> None:
+        """Waits for the session's opening brief, as the UI does, so the first turn's history
+        is the same on every run (recorded LLM fixtures depend on it)."""
+        if not brief_turn_id:
+            return
+        try:
+            with client.stream(
+                "GET", "/api/stream",
+                params={"session_id": session_id, "turn_id": brief_turn_id},
+                timeout=httpx.Timeout(connect=10, read=BRIEF_TIMEOUT_S, write=10, pool=10),
+            ) as stream:
+                stream.raise_for_status()
+                for line in stream.iter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    try:
+                        event = json.loads(line[6:])
+                    except json.JSONDecodeError:
+                        continue
+                    if event.get("event") == "error":
+                        errors.append(f"Session brief failed: {event.get('payload')}")
+                    if event.get("event") in ("final", "error"):
+                        return
+        except httpx.HTTPError as e:
+            errors.append(f"Session brief stream failed: {type(e).__name__}: {e}")
+
     def run(self, scenario: Scenario) -> ScenarioResult:
         """Run a single scenario end-to-end."""
         events: list[dict[str, Any]] = []
@@ -135,6 +169,10 @@ class ScenarioExecutor:
                     resp.raise_for_status()
                     session_data = resp.json()
                     session_id = session_data.get("session_id", session_data.get("id"))
+                    self._drain_brief(client, session_id, session_data.get("brief_turn_id"),
+                                      errors)
+                    # The scenario's wall time covers its turns, not the session brief.
+                    start_time = time.monotonic()
 
                     for turn in scenario.user_turns:
                         approval_index = 0
@@ -176,31 +214,33 @@ class ScenarioExecutor:
                                 if event_type == "agent_start":
                                     agent_invocations += 1
 
-                                if event_type == "agent_result":
-                                    for artifact in event.get("payload", {}).get("artifacts", []):
+                                if event_type in ("agent_result", "final"):
+                                    payload = event.get("payload") or {}
+                                    for artifact in payload.get("artifacts") or []:
                                         artifacts.append(artifact.get("type", "unknown"))
 
                                 if event_type == "approval_request":
-                                    if approval_index < len(turn.approvals):
-                                        approval = turn.approvals[approval_index]
-                                        client.post(
-                                            "/api/approval",
-                                            json={
-                                                "session_id": session_id,
-                                                "turn_id": turn_id,
-                                                "approval_id": event.get("payload", {}).get(
-                                                    "approval_id"
-                                                ),
-                                                "decision": approval.decision,
-                                                "edited_payload": approval.edits,
-                                            },
-                                            headers=self._csrf_headers(client),
-                                        ).raise_for_status()
-                                        approval_index += 1
-                                    else:
+                                    approval = _approval_for(turn, approval_index)
+                                    if approval is None:
                                         errors.append(
-                                            f"Unexpected approval_request (no scripted approval at index {approval_index})"
+                                            "Unexpected approval_request (no scripted approval"
+                                            f" at index {approval_index}); rejected it"
                                         )
+                                        approval = ApprovalAction(decision="reject")
+                                    client.post(
+                                        "/api/approval",
+                                        json={
+                                            "session_id": session_id,
+                                            "turn_id": turn_id,
+                                            "approval_id": event.get("payload", {}).get(
+                                                "approval_id"
+                                            ),
+                                            "decision": approval.decision,
+                                            "edited_payload": approval.edits,
+                                        },
+                                        headers=self._csrf_headers(client),
+                                    ).raise_for_status()
+                                    approval_index += 1
 
                                 if event_type in ("final", "error"):
                                     break
@@ -250,13 +290,28 @@ class ScenarioExecutor:
         if errors:
             passed = False
 
+        status: ScenarioStatus
+        if scenario.xfail is None:
+            status = "pass" if passed else "fail"
+        else:
+            status = "xpass" if passed else "xfail"
+
         return ScenarioResult(
             scenario_id=scenario.id,
             scenario_name=scenario.name,
-            passed=passed,
+            passed=status != "fail",
+            status=status,
+            xfail_reason=scenario.xfail,
             wall_time_ms=wall_time_ms,
             agent_invocations=agent_invocations,
             artifacts=artifacts,
             events=events,
             errors=errors,
         )
+
+
+def _approval_for(turn: UserTurn, index: int) -> ApprovalAction | None:
+    """The scripted decision for the turn's `index`-th approval request, if any."""
+    if index < len(turn.approvals):
+        return turn.approvals[index]
+    return turn.default_approval

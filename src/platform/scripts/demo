@@ -26,8 +26,9 @@ DEFAULT_BASE_URL = "http://localhost:8000"
 
 
 def print_result(result: ScenarioResult) -> None:
-    status = "PASS" if result.passed else "FAIL"
-    print(f"  [{status}] Scenario {result.scenario_id}: {result.scenario_name}")
+    print(f"  [{result.status.upper()}] Scenario {result.scenario_id}: {result.scenario_name}")
+    if result.xfail_reason:
+        print(f"         Expected failure: {result.xfail_reason}")
     print(f"         Wall time: {result.wall_time_ms:.0f}ms")
     print(f"         Agents invoked: {result.agent_invocations}")
     if result.artifacts:
@@ -75,9 +76,11 @@ def main() -> int:
         print_result(result)
 
     # Summary
-    passed = sum(1 for r in results if r.passed)
-    failed = len(results) - passed
-    print(f"=== Summary: {passed} passed, {failed} failed out of {len(results)} ===")
+    counts = {s: sum(1 for r in results if r.status == s)
+              for s in ("pass", "fail", "xfail", "xpass")}
+    failed = counts["fail"]
+    print(f"=== Summary: {counts['pass']} passed, {counts['fail']} failed, "
+          f"{counts['xfail']} xfail, {counts['xpass']} xpass out of {len(results)} ===")
 
     if args.check and failed > 0:
         return 1
