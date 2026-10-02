@@ -1,0 +1,63 @@
+version: 1
+agent:
+  name: feedback
+  version: 0.1.0
+  status: planned
+  description: 'Formative-mode reviewer for draft and revision submissions. Scores
+    each rubric
+
+    criterion against its level descriptors, quotes evidence spans from the
+
+    submission, and gives one next step per criterion. Never assigns a grade;
+
+    release to the student follows policy feedback.release_mode.
+
+    '
+  persona_scope:
+  - student
+  - faculty
+  model: claude-sonnet-4-6
+  requires_pii: []
+  inputs:
+    type: object
+    properties:
+      submission_id:
+        type: string
+      rubric_id:
+        type: string
+        nullable: true
+    required:
+    - submission_id
+  outputs:
+    type: object
+    properties:
+      criteria:
+        type: array
+        items:
+          type: object
+          properties:
+            criterion_id:
+              type: string
+            ai_score:
+              type: integer
+            level_label:
+              type: string
+            rationale:
+              type: string
+            evidence_spans:
+              type: array
+            next_step:
+              type: string
+      summary_md:
+        type: string
+    required:
+    - criteria
+  mcp_tools: []
+  planned_mcp_tools:
+  - assessments.get_submission
+  - assessments.get_rubric
+  - assessments.list_submission_history
+  - assessments.save_criterion_feedback
+  composable_with:
+  - content_generator
+  requires_human_approval: false

@@ -1,8 +1,15 @@
 # agent-manifests.yaml
-# Source of truth for the ten routable sub-agents plus the background learning_analyst.
+# Source of truth for the ten routable sub-agents, the background learning_analyst,
+# and agents approved but not yet built (status: planned).
 # DO NOT EDIT without a T-C-* contract-change task.
 # Each agent has a local copy at src/agents/<name>/manifest.yaml that CI verifies matches.
-# mcp_tools must equal _AGENT_TOOLS in src/engine/agents/runner.py; tools are described in mcp-tools.md.
+# mcp_tools must equal _AGENT_TOOLS in src/engine/agents/runner.py until T-E-106 deletes it;
+# tools are described in mcp-tools.md.
+# planned_mcp_tools: approved for the agent but never offered to the model until moved into
+#   mcp_tools. Each is in mcp-tools.md "Planned (Round 2)" or already served.
+# status: planned agents are not routable and have no live mcp_tools.
+# requires_pii field names are the PII filter's (display_name, email); display_name is the
+#   "name" field of spec.md §5.2 step 8.
 
 version: 1
 
@@ -86,6 +93,10 @@ agents:
       - content.get_skill
       - content.save_skill
       - content.list_skills
+    planned_mcp_tools:
+      - assessments.propose_alignment      # T-D-105 / T-A-105, spec.md §7.6
+      - graph.subgraph_for_outcomes        # T-D-105, spec.md §7.6
+      - content.publish                    # write-gated, spec.md §5.3
     composable_with: [content_generator, assessment]
     requires_human_approval: true
 
@@ -121,6 +132,10 @@ agents:
       - content.get_skill
       - content.save_skill
       - content.list_skills
+    planned_mcp_tools:
+      - content.generate_practice          # T-A-104, spec.md §7.4
+      - content.generate_flashcards        # T-A-107, spec.md §10.3
+      - content.publish                    # write-gated; faculty and instructional_designer only
     composable_with: [tutor, course_architect, assessment, communication]
     requires_human_approval: false
 
@@ -348,6 +363,9 @@ agents:
     mcp_tools:
       - roster.list_by_course
       - roster.get_student_context
+    planned_mcp_tools:                     # served today; wired with the gateway (T-E-106, T-E-107)
+      - communications.draft_message
+      - communications.send_message        # write-gated, in-app channels only (spec.md §5.3)
     composable_with: []
     requires_human_approval: true
 
@@ -398,3 +416,45 @@ agents:
       - roster.save_concept_review
     composable_with: []
     requires_human_approval: false
+
+  - name: feedback
+    version: "0.1.0"
+    status: planned                       # T-A-103; not routable until built
+    description: |
+      Formative-mode reviewer for draft and revision submissions. Scores each rubric
+      criterion against its level descriptors, quotes evidence spans from the
+      submission, and gives one next step per criterion. Never assigns a grade;
+      release to the student follows policy feedback.release_mode.
+    persona_scope: [student, faculty]     # runs on a student's draft submission; faculty may re-run it
+    model: claude-sonnet-4-6
+    requires_pii: []                      # works on the requester's own submission
+    inputs:
+      type: object
+      properties:
+        submission_id: {type: string}
+        rubric_id:     {type: string, nullable: true}   # defaults to the assignment's rubric
+      required: [submission_id]
+    outputs:
+      type: object
+      properties:
+        criteria:
+          type: array
+          items:
+            type: object
+            properties:
+              criterion_id:   {type: string}
+              ai_score:       {type: integer}           # a rubric level score, not a grade
+              level_label:    {type: string}
+              rationale:      {type: string}
+              evidence_spans: {type: array}             # each: quote, start, end
+              next_step:      {type: string}
+        summary_md: {type: string}
+      required: [criteria]
+    mcp_tools: []
+    planned_mcp_tools:
+      - assessments.get_submission
+      - assessments.get_rubric
+      - assessments.list_submission_history
+      - assessments.save_criterion_feedback
+    composable_with: [content_generator]
+    requires_human_approval: false        # it never grades; release is gated by policy, not by this agent

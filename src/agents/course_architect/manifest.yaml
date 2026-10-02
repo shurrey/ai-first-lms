@@ -55,6 +55,10 @@ agent:
   - content.get_skill
   - content.save_skill
   - content.list_skills
+  planned_mcp_tools:
+  - assessments.propose_alignment
+  - graph.subgraph_for_outcomes
+  - content.publish
   composable_with:
   - content_generator
   - assessment
