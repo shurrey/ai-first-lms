@@ -105,11 +105,19 @@ class ErrorPayload(BaseModel):
     step_id: str | None = None
 
 
+class GuardrailPayload(BaseModel):
+    kind: Literal["denied_permission", "denied_scope", "denied_policy", "offload_check"]
+    step_id: str
+    agent: str
+    tool: str | None = None
+    reason: str
+
+
 # --- Union of all event types ---
 
 EventType = Literal[
     "reasoning", "plan", "agent_start", "agent_token", "agent_tool_call",
-    "agent_result", "clarify", "approval_request", "final", "error",
+    "agent_result", "clarify", "approval_request", "final", "error", "guardrail",
 ]
 
 Payload = (
@@ -123,6 +131,7 @@ Payload = (
     | ApprovalRequestPayload
     | FinalPayload
     | ErrorPayload
+    | GuardrailPayload
 )
 
 

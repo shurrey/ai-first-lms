@@ -211,3 +211,66 @@ def test_default_agent_respects_persona_scope() -> None:
     assert _default_agent({"tutor", "assessment"}) == "tutor"
     assert _default_agent({"early_alert", "advising", "communication"}) == "early_alert"
     assert _default_agent({"accessibility"}) == "accessibility"
+
+
+def _student_state() -> dict:
+    return {"session_id": "s1", "turn_id": "t1", "persona": "student",
+            "current_message": "Summarise my session", "events_emitted": []}
+
+
+async def test_classifier_cannot_route_a_student_to_learning_analyst(caplog):
+    set_llm_client(MockLLMClient({"action": "analyze", "agent": "learning_analyst",
+                                  "parameters": {}, "confidence": 0.95}))
+
+    with caplog.at_level("WARNING", logger="engine.graph.interpret"):
+        result = await interpret(_student_state())
+
+    assert result["interpretation"]["agent"] == "tutor"
+    assert "learning_analyst" in caplog.text
+
+
+async def test_classifier_cannot_route_a_student_to_a_staff_agent():
+    set_llm_client(MockLLMClient({"action": "grade", "agent": "grading_assistant",
+                                  "parameters": {}, "confidence": 0.95}))
+
+    result = await interpret(_student_state())
+
+    assert result["interpretation"]["agent"] == "tutor"
+
+
+async def test_unknown_agent_name_falls_back_to_the_persona_default():
+    set_llm_client(MockLLMClient({"action": "x", "agent": {"name": "tutor"},
+                                  "parameters": {}, "confidence": 0.95}))
+
+    result = await interpret(_student_state())
+
+    assert result["interpretation"]["agent"] == "tutor"
+
+
+async def test_multi_agent_list_is_limited_to_routable_agents_for_the_persona():
+    set_llm_client(MockLLMClient({
+        "action": "risk_analysis", "agent": "early_alert",
+        "parameters": {"agents": ["early_alert", "learning_analyst", "engagement_analyst"]},
+        "confidence": 0.95,
+    }))
+    state = {**_student_state(), "persona": "faculty"}
+
+    result = await interpret(state)
+
+    assert result["interpretation"]["parameters"]["agents"] == [
+        "early_alert", "engagement_analyst"]
+
+
+def test_every_persona_has_routable_agents_and_a_default():
+    from engine.graph.interpret import ROUTABLE_AGENTS, _default_agent
+    from engine.guardrails.registry import get_permission_matrix
+
+    matrix = get_permission_matrix()
+    expected_default = {
+        "student": "tutor", "faculty": "tutor", "advisor": "advising",
+        "admin": "engagement_analyst", "program_lead": "engagement_analyst",
+    }
+    for persona, default in expected_default.items():
+        allowed = frozenset(matrix.allowed_agents(persona)) & ROUTABLE_AGENTS
+        assert len(allowed) >= 4, persona
+        assert _default_agent(allowed, persona) == default

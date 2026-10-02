@@ -197,3 +197,20 @@ async def test_dispatch_no_plan():
 
     result = await dispatch(state)
     assert len(result.get("agent_results", [])) == 0
+
+
+async def test_dispatch_refuses_a_background_agent_even_when_the_persona_has_it():
+    runner = StubAgentRunner()
+    set_agent_runner(runner)
+    state = {
+        "session_id": "s1", "turn_id": "t1", "current_message": "x", "persona": "student",
+        "plan": {"strategy": "react", "steps": [
+            {"step_id": "s1", "agent": "learning_analyst", "input_summary": "x",
+             "depends_on": []}]},
+        "agent_results": [], "events_emitted": [],
+    }
+
+    result = await dispatch(state)
+
+    assert runner.calls == []
+    assert result["turn_error"]["code"] == "permission_denied"

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Validate contract invariants between contracts/ and the code that implements them.
 
-Needs only the standard library and PyYAML: server tools and _AGENT_TOOLS are read
-by AST-parsing the source, never by importing it. The migrations-vs-schema check
+Needs only the standard library and PyYAML: server tools and the runner's tool source
+are read by AST-parsing the source, never by importing it. The migrations-vs-schema check
 runs only when LMS_DATABASE_URL is set (it needs asyncpg and alembic).
 Exit code 0 when every check passes, 1 otherwise.
 """
@@ -32,6 +32,13 @@ FRONTEND_SUBDIRS = ("app", "components", "lib")
 NOT_IMPLEMENTED_HEADING = "## Not implemented"
 # Approved-but-unbuilt tools; documented here so contract changes can land before implementation.
 PLANNED_HEADING = "## Planned (Round 2)"
+# Write tools on shared course content, and the most each may grant. The gateway
+# enforces whatever mcp-tools.md says, so a widened line here is a live permission change.
+SHARED_CONTENT_WRITERS: dict[str, frozenset[str]] = {
+    "content.save_skill": frozenset({"faculty", "instructional_designer"}),
+    "content.save_draft": frozenset({"faculty", "instructional_designer"}),
+}
+_ROLE_ENTRY = re.compile(r"`([a-z_]+)`")
 
 
 class Skip(Exception):
@@ -75,15 +82,29 @@ def server_tools() -> dict[str, dict[str, Any]]:
     return tools
 
 
-def runner_agent_tools() -> dict[str, list[str]]:
+def runner_tool_tables(agent_names: set[str]) -> list[str]:
+    """Module-level names in runner.py bound to a dict literal keyed by agent names."""
     tree = ast.parse(RUNNER.read_text(), filename=str(RUNNER))
+    found = []
     for node in tree.body:
         target = node.target if isinstance(node, ast.AnnAssign) else (
             node.targets[0] if isinstance(node, ast.Assign) and len(node.targets) == 1 else None
         )
-        if isinstance(target, ast.Name) and target.id == "_AGENT_TOOLS" and node.value is not None:
-            return ast.literal_eval(node.value)
-    raise ValueError(f"{RUNNER}: no module-level _AGENT_TOOLS literal")
+        value = node.value if isinstance(node, (ast.Assign, ast.AnnAssign)) else None
+        if not (isinstance(target, ast.Name) and isinstance(value, ast.Dict)):
+            continue
+        keys = {k.value for k in value.keys if isinstance(k, ast.Constant)}
+        if keys & agent_names and all(isinstance(v, (ast.List, ast.Tuple)) for v in value.values):
+            found.append(target.id)
+    return found
+
+
+def runner_calls(function: str) -> bool:
+    tree = ast.parse(RUNNER.read_text(), filename=str(RUNNER))
+    return any(
+        isinstance(n, ast.Call) and getattr(n.func, "id", None) == function
+        for n in ast.walk(tree)
+    )
 
 
 def _tool_blocks(section: str) -> dict[str, str]:
@@ -100,22 +121,38 @@ def _tool_entry(block: str) -> dict[str, Any]:
     for field, key in (("Mutates", "mutates"), ("Requires approval", "requires_approval")):
         fm = re.search(rf"(?m)^- {field}:\s*(true|false)\b", block)
         entry[key] = None if fm is None else fm.group(1) == "true"
-    entry["has_roles"] = re.search(r"(?m)^- Allowed roles:\s*\S", block) is not None
-    entry["pending_change"] = re.search(r"(?m)^- Change:\s*T-C-\d+", block) is not None
+    roles_line = re.search(r"(?m)^- Allowed roles:\s*(\S.*)$", block)
+    entry["has_roles"] = roles_line is not None
+    entry["roles"] = _roles(roles_line.group(1)) if roles_line else frozenset()
+    # Only a Change line about requires_approval may let the doc's flag differ from the server's.
+    entry["approval_change"] = re.search(
+        r"(?m)^- Change:\s*T-C-\d+.*`?requires_approval`?", block) is not None
     entry["planned_status"] = re.search(r"(?m)^- Status:\s*planned\b", block) is not None
     return entry
 
 
-def _doc_sections() -> tuple[str, str]:
-    """(served-tool sections, planned section) of mcp-tools.md."""
-    text = (CONTRACTS / "mcp-tools.md").read_text().split(NOT_IMPLEMENTED_HEADING, 1)[0]
+def _roles(line: str) -> frozenset[str]:
+    """Backticked role names on an Allowed roles line, skipping any inside a qualifier."""
+    roles = set()
+    for m in _ROLE_ENTRY.finditer(line):
+        prefix = line[:m.start()]
+        if prefix.count("(") == prefix.count(")"):
+            roles.add(m.group(1))
+    return frozenset(roles)
+
+
+def _doc_sections(text: str | None = None) -> tuple[str, str]:
+    """(served-tool sections, planned section) of mcp-tools.md, or of `text` when given."""
+    if text is None:
+        text = (CONTRACTS / "mcp-tools.md").read_text()
+    text = text.split(NOT_IMPLEMENTED_HEADING, 1)[0]
     main, _, planned = text.partition(PLANNED_HEADING)
     return main, planned
 
 
-def documented_tools() -> dict[str, dict[str, Any]]:
+def documented_tools(text: str | None = None) -> dict[str, dict[str, Any]]:
     """Tools in the server sections of mcp-tools.md, with their metadata lines."""
-    return {name: _tool_entry(b) for name, b in _tool_blocks(_doc_sections()[0]).items()}
+    return {name: _tool_entry(b) for name, b in _tool_blocks(_doc_sections(text)[0]).items()}
 
 
 def planned_tools() -> dict[str, dict[str, Any]]:
@@ -186,22 +223,16 @@ def check_manifest_tools_documented() -> list[str]:
     ]
 
 
-def check_manifests_match_runner() -> list[str]:
-    runner = runner_agent_tools()
-    manifests = {
-        a["name"]: list(a.get("mcp_tools", [])) for a in manifest_agents() if not _is_planned_agent(a)
-    }
-    errors = []
-    for name in sorted(set(runner) - set(manifests)):
-        errors.append(f"_AGENT_TOOLS has agent '{name}' with no manifest")
-    for name in sorted(set(manifests) - set(runner)):
-        errors.append(f"manifest agent '{name}' has no _AGENT_TOOLS entry")
-    for name in sorted(set(runner) & set(manifests)):
-        if manifests[name] != runner[name]:
-            only_m = [t for t in manifests[name] if t not in runner[name]]
-            only_r = [t for t in runner[name] if t not in manifests[name]]
-            detail = f"manifest-only {only_m}, runner-only {only_r}" if only_m or only_r else "same tools, different order"
-            errors.append(f"agent '{name}' mcp_tools != _AGENT_TOOLS: {detail}")
+def check_runner_reads_manifests() -> list[str]:
+    """The runner gets tool lists from the manifest registry, not a table of its own."""
+    agents = {a["name"] for a in manifest_agents()}
+    errors = [
+        f"{RUNNER.relative_to(REPO_ROOT)}: {name} hardcodes per-agent tool lists; "
+        "read them from agent-manifests.yaml"
+        for name in runner_tool_tables(agents)
+    ]
+    if not runner_calls("get_manifest_registry"):
+        errors.append(f"{RUNNER.relative_to(REPO_ROOT)} never calls get_manifest_registry()")
     return errors
 
 
@@ -229,10 +260,29 @@ def check_mcp_tools_doc() -> list[str]:
         for key in ("mutates", "requires_approval"):
             if doc[key] is None:
                 errors.append(f"mcp-tools.md {name}: missing '{key}' line")
-            elif doc[key] != served[name][key] and not (key == "requires_approval" and doc["pending_change"]):
+            elif doc[key] != served[name][key] and not (
+                key == "requires_approval" and doc["approval_change"]
+            ):
                 errors.append(f"mcp-tools.md {name}: {key}={doc[key]} but server has {served[name][key]}")
         if not doc["has_roles"]:
             errors.append(f"mcp-tools.md {name}: missing 'Allowed roles' line")
+    return errors
+
+
+def check_shared_content_writers(text: str | None = None) -> list[str]:
+    documented = documented_tools(text)
+    errors = []
+    for name, limit in sorted(SHARED_CONTENT_WRITERS.items()):
+        if name not in documented:
+            continue  # check_mcp_tools_doc reports a missing tool
+        extra = documented[name]["roles"] - limit
+        if extra:
+            errors.append(
+                f"mcp-tools.md {name}: grants {', '.join(sorted(extra))}; shared course content "
+                f"is writable only by {', '.join(sorted(limit))}"
+            )
+        if not documented[name]["mutates"]:
+            errors.append(f"mcp-tools.md {name}: a shared-content writer must have Mutates: true")
     return errors
 
 
@@ -307,9 +357,10 @@ CHECKS: list[tuple[str, Callable[[], list[str]]]] = [
     ("agent-manifests.yaml structure", check_manifest_structure),
     ("manifest tools exist on a server", check_manifest_tools_served),
     ("manifest tools documented in mcp-tools.md", check_manifest_tools_documented),
-    ("manifest tools == runner _AGENT_TOOLS", check_manifests_match_runner),
+    ("runner reads tools from the manifests", check_runner_reads_manifests),
     ("src/agents/*/manifest.yaml == contract", check_local_manifest_copies),
     ("mcp-tools.md == server tools", check_mcp_tools_doc),
+    ("shared-content write tools grant only approved roles", check_shared_content_writers),
     ("planned tools and agents well-formed", check_planned_tools),
     ("frontend endpoints in api.openapi.yaml", check_frontend_endpoints),
     ("api.openapi.yaml structure", check_openapi_structure),

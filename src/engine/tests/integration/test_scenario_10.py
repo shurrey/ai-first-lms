@@ -17,10 +17,8 @@ import asyncio
 import json
 
 import pytest
-from httpx import ASGITransport, AsyncClient
 
 from engine.agents.runner import StubAgentRunner
-from engine.app import create_app
 from engine.graph.dispatch import set_agent_runner
 from engine.graph.interpret import set_llm_client
 
@@ -42,8 +40,8 @@ class MockMultiAgentLLM:
 
 
 @pytest.fixture
-def app():
-    return create_app()
+def app(auth_app):
+    return auth_app
 
 
 @pytest.fixture(autouse=True)
@@ -99,15 +97,12 @@ def _setup_mocks():
 
 
 @pytest.fixture
-async def client(app):
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
-        yield c
+async def client(authed_client):
+    return await authed_client("faculty")
 
 
 async def _create_faculty_session(client) -> str:
     resp = await client.post("/api/session", json={
-        "persona": "faculty",
         "course_id": "cs101",
     })
     assert resp.status_code == 201

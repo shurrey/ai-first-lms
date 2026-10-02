@@ -14,19 +14,30 @@ logger = logging.getLogger(__name__)
 
 CONFIDENCE_THRESHOLD = 0.7
 
-# Agents the classifier may route to; background agents (e.g. learning_analyst) are excluded
-# even when a manifest grants them to the persona.
 # Fallback order when the classifier names no agent; the first one the persona may use wins.
 _DEFAULT_AGENT_ORDER = ("tutor", "early_alert", "advising", "engagement_analyst", "communication")
+# The agent a persona's general questions go to when the classifier names none.
+_PERSONA_DEFAULT = {
+    "student": "tutor",
+    "faculty": "tutor",
+    "advisor": "advising",
+    "admin": "engagement_analyst",
+    "program_lead": "engagement_analyst",
+}
 
 
-def _default_agent(allowed: set[str] | frozenset[str]) -> str:
+def _default_agent(allowed: set[str] | frozenset[str], persona: str | None = None) -> str:
+    preferred = _PERSONA_DEFAULT.get(persona or "")
+    if preferred in allowed:
+        return preferred
     for name in _DEFAULT_AGENT_ORDER:
         if name in allowed:
             return name
     return min(allowed) if allowed else "tutor"
 
 
+# Agents a user turn may reach; background agents (learning_analyst) are excluded even when a
+# manifest grants them to the persona.
 ROUTABLE_AGENTS = frozenset({
     "tutor", "course_architect", "content_generator", "assessment", "grading_assistant",
     "early_alert", "advising", "accessibility", "engagement_analyst", "communication",
@@ -83,6 +94,32 @@ an agent outside it will be refused.
 
 Return ONLY valid JSON, no markdown fences.
 """
+
+
+def _constrain_agent(chosen: Any, allowed: frozenset[str], default: str, persona: str) -> str:
+    """The classifier's agent if routable for this persona, else the persona's default."""
+    if chosen in (None, ""):
+        return default
+    if isinstance(chosen, str) and chosen in allowed:
+        return chosen
+    logger.warning("Classifier chose agent %r, not routable for persona %s; using %s",
+                   chosen, persona, default)
+    return default
+
+
+def _constrain_parameters(params: Any, allowed: frozenset[str], persona: str) -> dict[str, Any]:
+    """`parameters` with `agents` (multi-agent plans) limited to routable agents."""
+    if not isinstance(params, dict):
+        return {}
+    agents = params.get("agents")
+    if agents is None:
+        return params
+    listed = agents if isinstance(agents, list) else [agents]
+    kept = [a for a in listed if isinstance(a, str) and a in allowed]
+    if len(kept) != len(listed):
+        logger.warning("Classifier listed agents %r; dropped those not routable for persona %s",
+                       agents, persona)
+    return {**params, "agents": kept}
 
 
 class LLMClient(Protocol):
@@ -171,9 +208,9 @@ async def interpret(state: OrchestratorState) -> OrchestratorState:
             context_lines.append(f"[{role}]: {content}")
 
     context_block = "\n".join(context_lines)
-    allowed = get_permission_matrix().allowed_agents(persona) & ROUTABLE_AGENTS
+    allowed = frozenset(get_permission_matrix().allowed_agents(persona)) & ROUTABLE_AGENTS
     allowed_agents = ", ".join(sorted(allowed)) or "none"
-    default_agent = _default_agent(allowed)
+    default_agent = _default_agent(allowed, persona)
     user_prompt = f"Persona: {persona}\nAllowed agents: {allowed_agents}\nCourse: {course_id}"
     if context_block:
         user_prompt += f"\n\nRecent conversation:\n{context_block}"
@@ -191,7 +228,8 @@ async def interpret(state: OrchestratorState) -> OrchestratorState:
         raw_response, tokens = await with_usage(**call_args)
         budget = state.get("budget")
         if budget is not None:
-            budget.add_tokens(tokens)
+            # Accounting only: the gateway's next charge in dispatch halts an over-cap turn.
+            budget.charge(tokens=tokens)
     else:
         raw_response = await client.create_message(**call_args)
 
@@ -216,8 +254,8 @@ async def interpret(state: OrchestratorState) -> OrchestratorState:
 
     interpretation = {
         "action": parsed.get("action", "unknown"),
-        "agent": parsed.get("agent") or default_agent,
-        "parameters": parsed.get("parameters", {}),
+        "agent": _constrain_agent(parsed.get("agent"), allowed, default_agent, persona),
+        "parameters": _constrain_parameters(parsed.get("parameters"), allowed, persona),
         "confidence": confidence,
     }
 

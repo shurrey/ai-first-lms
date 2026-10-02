@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any, TypedDict
 
+from engine.auth.models import AuthContext
 from engine.guardrails.budget import BudgetTracker
+from engine.guardrails.gateway import ToolGateway
 
 
 class Turn(TypedDict, total=False):
@@ -54,6 +57,11 @@ class OrchestratorState(TypedDict, total=False):
     persona: str
     person_id: str
     course_id: str
+    # {display_name, active_role} of the signed-in person (spec.md §4.5).
+    requester: dict[str, str]
+    # The signed-in caller; tool calls are denied when absent.
+    auth: AuthContext
+    tool_gateway: ToolGateway
     conversation: list[Turn]
     current_message: str
     interpretation: Intent | None
@@ -71,4 +79,6 @@ class OrchestratorState(TypedDict, total=False):
     # ErrorPayload (contracts/events.md) that halted the turn; None while the turn is healthy.
     turn_error: dict[str, Any] | None
     events_emitted: list[dict[str, Any]]
+    # Pushes an event to this turn's stream immediately; absent outside /api/converse.
+    event_sink: Callable[[dict[str, Any]], Awaitable[None]]
     needs_clarification: bool
