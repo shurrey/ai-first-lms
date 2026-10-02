@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from engine.guardrails.injection import INJECTION_GUARDRAIL_INSTRUCTION, guard_prompt_data
 from engine.http import make_anthropic_client, make_sync_http_client
 
 logger = logging.getLogger(__name__)
@@ -67,10 +68,11 @@ async def generate_podcast_script(
 
     prompt = PODCAST_SCRIPT_PROMPT.format(
         course_title=course_title,
-        concept_details=concept_details,
+        concept_details=guard_prompt_data(concept_details, "skill"),
         mastery_summary=mastery_summary,
-        learner_profile=learner_profile or "No profile yet",
-    )
+        learner_profile=(guard_prompt_data(learner_profile, "learner_profile")
+                         if learner_profile else "No profile yet"),
+    ) + INJECTION_GUARDRAIL_INSTRUCTION
 
     response = await client.messages.create(
         model="claude-sonnet-4-6",
@@ -187,7 +189,7 @@ async def generate_podcast(
     learner_profile: str,
 ) -> dict[str, Any]:
     """Full podcast pipeline: script generation → audio rendering."""
-    podcast_id = str(uuid.uuid4())[:8]
+    podcast_id = uuid.uuid4().hex
 
     # Generate script
     script = await generate_podcast_script(

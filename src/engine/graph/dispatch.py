@@ -1,4 +1,9 @@
-"""Dispatch step — execute the plan by invoking sub-agents (SPEC §4.1 step 4)."""
+"""Dispatch step — execute the plan by invoking sub-agents (SPEC §4.1 step 4).
+
+Guardrail layering: dispatch checks only whether the persona may use the agent at all. Every
+other check (budget, outgoing-prompt PII, tool permission and scope, tool-result PII and
+injection wrapping) runs in the ToolGateway, reached through the runner.
+"""
 
 from __future__ import annotations
 
@@ -9,10 +14,12 @@ from typing import Any, Callable, Coroutine
 
 from opentelemetry import trace
 
-from engine.agents.runner import AgentRunner, ClaudeAgentRunner
+from engine.agents.runner import EMITTED_LIVE, AgentRunner, ClaudeAgentRunner
+from engine.auth.models import AuthContext
+from engine.graph.interpret import ROUTABLE_AGENTS
 from engine.graph.state import AgentResult, OrchestratorState
 from engine.guardrails.budget import BudgetTracker
-from engine.guardrails.pii import scan_and_redact
+from engine.guardrails.gateway import GatewayContext, ToolGateway
 from engine.guardrails.registry import get_manifest_registry, get_permission_matrix
 from engine.logging_config import get_logger
 from engine.telemetry import span_agent
@@ -28,14 +35,7 @@ BUDGET_EXCEEDED_MESSAGE = (
 # Module-level agent runner, replaceable for testing
 _agent_runner: AgentRunner | None = None
 
-# Module-level event sink for real-time streaming
-# Set by converse._run_graph before invoking the graph
-_live_event_sink: Callable[[dict[str, Any]], Coroutine[Any, Any, None]] | None = None
-
-
-def set_live_event_sink(sink: Callable[[dict[str, Any]], Coroutine[Any, Any, None]] | None) -> None:
-    global _live_event_sink
-    _live_event_sink = sink
+EventSink = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
 
 
 def set_agent_runner(runner: AgentRunner | None) -> None:
@@ -65,7 +65,12 @@ async def dispatch(state: OrchestratorState) -> OrchestratorState:
     course_id = state.get("course_id", "")
     session_id = state.get("session_id", "")
     conversation = state.get("conversation", [])
+    requester = state.get("requester")
     budget = state.get("budget")
+    auth = state.get("auth")
+    gateway = state.get("tool_gateway")
+    turn_id = state.get("turn_id", "")
+    event_sink = state.get("event_sink")
     events: list[dict[str, Any]] = list(state.get("events_emitted", []))
     results: list[AgentResult] = list(state.get("agent_results", []))
     completed_steps: dict[str, dict[str, Any]] = {}
@@ -88,7 +93,8 @@ async def dispatch(state: OrchestratorState) -> OrchestratorState:
         for step in ready:
             tasks.append(_execute_step(
                 runner, step, message, events, persona, person_id, course_id,
-                conversation, session_id, budget,
+                conversation, session_id, budget, requester,
+                auth=auth, gateway=gateway, turn_id=turn_id, event_sink=event_sink,
             ))
 
         step_results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -157,14 +163,12 @@ def _error_payload(code: str, message: str, step_id: str) -> dict[str, Any]:
 
 def _check_permission(agent: str, persona: str) -> str | None:
     """Return a denial reason (for logs, not users) or None when the persona may use the agent."""
+    if agent not in ROUTABLE_AGENTS:
+        return f"agent {agent!r} is not routable from a user turn"
     if agent not in get_manifest_registry().list_agents():
         return f"agent {agent!r} has no manifest in contracts/agent-manifests.yaml"
     check = get_permission_matrix().check_agent(persona, agent)
     return None if check.allowed else check.reason
-
-
-def _redact(text: str, allowed_pii: list[str]) -> str:
-    return scan_and_redact(text, allowed_fields=allowed_pii).text if text else text
 
 
 def _halted_step(step_id: str, agent: str, error: dict[str, Any]) -> dict[str, Any]:
@@ -195,10 +199,17 @@ async def _execute_step(
     conversation: list[dict[str, str]] | None = None,
     session_id: str = "",
     budget: BudgetTracker | None = None,
+    requester: dict[str, str] | None = None,
+    *,
+    auth: AuthContext | None = None,
+    gateway: ToolGateway | None = None,
+    turn_id: str = "",
+    event_sink: EventSink | None = None,
 ) -> dict[str, Any]:
-    """Run the guardrail pass, then the agent; return events, result and any halting error.
-
-    Permission denial or an exhausted budget skips the agent and sets `error`.
+    """Check the agent permission, then run the agent; return events, result and any
+    halting error. A denial skips the agent; an exhausted budget or an unanswered approval
+    (reported by the runner) sets `error`. Without `auth` the agent runs but the gateway
+    denies every tool call.
     """
     step_id = step["step_id"]
     agent = step["agent"]
@@ -214,32 +225,19 @@ async def _execute_step(
             step_id,
         ))
 
-    if budget is not None:
-        budget.add_agent_invocation()
-        exceeded = budget.check()
-        if exceeded.exceeded:
-            log.warning("budget_exceeded", agent=agent, step_id=step_id, reason=exceeded.reason,
-                        **budget.summary())
-            return _halted_step(step_id, agent, _error_payload(
-                "budget_exceeded", BUDGET_EXCEEDED_MESSAGE, step_id,
-            ))
-
-    allowed_pii = get_manifest_registry().get_manifest(agent).requires_pii
-    message = _redact(message, allowed_pii)
-    conversation = [
-        {**turn, "content": _redact(turn.get("content", ""), allowed_pii)}
-        for turn in (conversation or [])
-    ]
-
-    # Emit agent_start
-    step_events.append({
+    agent_start = {
         "event": "agent_start",
         "payload": {
             "step_id": step_id,
             "agent": agent,
             "inputs": {"message": message},
         },
-    })
+    }
+    # Sent live so it precedes the agent's own live tool, thinking and approval events.
+    if event_sink is not None:
+        await event_sink(agent_start)
+    else:
+        step_events.append(agent_start)
 
     # Create real-time event callback if sink is available
     async def on_agent_event(event: dict[str, Any]) -> None:
@@ -247,22 +245,32 @@ async def _execute_step(
         payload = event.get("payload", {})
         if not payload.get("step_id"):
             payload["step_id"] = step_id
-        if _live_event_sink:
-            await _live_event_sink(event)
+        if event_sink is not None:
+            await event_sink(event)
 
     start_time = time.monotonic()
     span = span_agent(agent, step_id, persona=persona, session_id=session_id)
     with trace.use_span(span, end_on_exit=True):
-        result = await runner.run(agent, {
+        inputs: dict[str, Any] = {
             "message": message,
             "persona": persona,
             "person_id": person_id,
             "course_id": course_id,
-            "conversation": conversation,
+            "conversation": conversation or [],
             "session_id": session_id,
-            "_on_event": on_agent_event,
-            "_budget": budget,
-        })
+            "_on_event": on_agent_event if event_sink is not None else None,
+            "_tool_context": GatewayContext(
+                auth=auth, session_id=session_id, turn_id=turn_id, step_id=step_id,
+                budget=budget, course_id=course_id,
+                # approval_request must reach the client live; with no sink, gated tools deny
+                emit=on_agent_event if event_sink is not None else None,
+            ),
+        }
+        if gateway is not None:
+            inputs["_gateway"] = gateway
+        if requester:
+            inputs["requester"] = requester
+        result = await runner.run(agent, inputs)
         span.set_attribute("tokens", result.get("tokens", 0))
         span.set_attribute("success", bool(result.get("success", True)))
     elapsed_ms = (time.monotonic() - start_time) * 1000
@@ -276,8 +284,10 @@ async def _execute_step(
         success=bool(result.get("success", True)),
     )
 
-    # Emit tool_call and thinking events
+    # Tool-call, thinking and guardrail events the runner did not already send live
     for tc in result.get("tool_calls", []):
+        if tc.get(EMITTED_LIVE):
+            continue
         if tc.get("tool") == "__thinking__":
             step_events.append({
                 "event": "thinking",
@@ -300,6 +310,11 @@ async def _execute_step(
                     "success": tc.get("success", True),
                 },
             })
+            if tc.get("guardrail"):
+                step_events.append({
+                    "event": "guardrail",
+                    "payload": {**tc["guardrail"], "step_id": step_id},
+                })
 
     # Emit agent_result
     agent_result: AgentResult = {
@@ -319,4 +334,6 @@ async def _execute_step(
     error = None
     if result.get("budget_exceeded"):
         error = _error_payload("budget_exceeded", BUDGET_EXCEEDED_MESSAGE, step_id)
+    elif result.get("halt"):
+        error = _error_payload(result["halt"]["code"], result["halt"]["message"], step_id)
     return {"events": step_events, "agent_result": agent_result, "error": error}

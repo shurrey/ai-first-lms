@@ -6,7 +6,7 @@ Each tool has:
 - **Server / port**: the MCP server that serves it (SSE transport at `http://mcp-<server>:<port>/sse`).
 - **Mutates**: whether it changes state.
 - **Requires approval**: when true the orchestrator must emit `approval_request` and wait for `POST /api/approval` before committing. For served tools this is the server's `requires_approval` flag, except where a `Change:` line records a Round 2 value the gateway enforces before the server flag catches up.
-- **Allowed roles**: the union of (a) `persona_scope` of every agent whose tool list (`_AGENT_TOOLS` in `src/engine/agents/runner.py`, mirrored in `agent-manifests.yaml`) includes the tool and (b) the personas whose UI calls an engine endpoint that invokes the tool directly. Nothing enforces (b) today: the engine endpoints are unauthenticated, so those roles describe which UI calls them, not a check. From T-E-106 the tool gateway enforces this line (spec.md §5.2 step 2). `Change:` lines and every planned tool use the spec.md §17 access matrix instead; a qualifier in parentheses is a scope rule the gateway applies after the role check (spec.md §4.5).
+- **Allowed roles**: the union of (a) `persona_scope` of every agent whose `mcp_tools` in `agent-manifests.yaml` includes the tool and (b) the personas whose UI calls an engine endpoint that invokes the tool directly. For (b) the engine endpoint's own authorization applies (spec.md §4.4, since T-E-103). The tool gateway enforces this line for agent calls (spec.md §5.2 step 2, live since T-E-106). `Change:` lines and every planned tool use the spec.md §17 access matrix instead; a qualifier in parentheses describes the scope rule. The gateway enforces it only through the arguments it scope-checks (`person_id`, `student_id`, `course_id`, and the same keys inside `scope`; spec.md §4.5); a tool keyed only by another id (`submission_id`, `session_id`, ...) gets no object-level check yet.
 - **Change** (Round 2 only): a metadata change approved by a `T-C-*` task, the task that enforces it, and whether the server already matches.
 - **Reached by**: the agents and engine call sites behind those roles. "Engine-internal" means the engine calls the tool itself with no user request in the loop.
 - **Input**: the server's JSON Schema, simplified (`?` marks optional properties).
@@ -33,41 +33,45 @@ Also hosts `graph.*`; the engine routes those prefixes here (see Routing).
 - Server: `content` (port 7001)
 - Mutates: false
 - Requires approval: false
-- Allowed roles: `student`, `faculty`, `instructional_designer`, `advisor`, `admin`
+- Allowed roles: `student`, `faculty`, `instructional_designer`, `advisor`, `admin`, `program_lead`
 - Reached by: agents `tutor`, `content_generator`, `accessibility`; engine `POST /api/session page brief (page=content)` (student, faculty, advisor, admin)
 - Input: `{ node_id?: string, content_id?: string }`
 - Output: `{ id, title, body_md, citations: [] }`
 - Notes: Requires one of `node_id` / `content_id`; by `node_id` it returns the newest content item on that node. `citations` is always empty today.
+- Change: T-C-108 — added program_lead (read-only) so personas reach the agents their job needs; object-level scope still applies.
 
 ### `content.search`
 - Server: `content` (port 7001)
 - Mutates: false
 - Requires approval: false
-- Allowed roles: `student`, `faculty`, `instructional_designer`, `advisor`, `admin`
+- Allowed roles: `student`, `faculty`, `instructional_designer`, `advisor`, `admin`, `program_lead`
 - Reached by: agents `tutor`, `content_generator`, `accessibility`; engine `POST /api/session page brief (page=calendar)` (student, faculty, advisor, admin)
 - Input: `{ query: string, course_id?: string, top_k?: integer }`
 - Output: `{ results: [{ id, title, snippet, score }] }`
 - Notes: Keyword (ILIKE) match first, then topped up from pgvector similarity on the node embedding. `top_k` defaults to 10.
+- Change: T-C-108 — added program_lead (read-only) so personas reach the agents their job needs; object-level scope still applies.
 
 ### `content.save_draft`
 - Server: `content` (port 7001)
 - Mutates: true
 - Requires approval: false
-- Allowed roles: `student`, `faculty`, `instructional_designer`
+- Allowed roles: `faculty`, `instructional_designer`
 - Reached by: agents `course_architect`, `content_generator`
 - Input: `{ node_id?: string, kind: string, title: string, body_md: string, author_id: string }`
 - Output: `{ draft_id }`
-- Notes: Inserts a `content_items` row with `is_draft = true`.
+- Notes: Inserts a `content_items` row with `is_draft = true`. The gateway forces `author_id` to the requester. `node_id` and `kind` are free, and `content.get_skill` and `content.retrieve` do not filter out drafts, so a draft with `kind = 'skill'` on a concept can replace what every tutor session on it reads.
+- Change: T-C-107 — removes `advisor` and `student`: §17 gives neither write access to course content (a student's study aids go through `content.generate_flashcards`). Enforced by the gateway now (it reads this line). Approval unchanged (`false`, matches the server).
 
 ### `content.library_search`
 - Server: `content` (port 7001)
 - Mutates: false
 - Requires approval: false
-- Allowed roles: `faculty`, `instructional_designer`
+- Allowed roles: `faculty`, `instructional_designer`, `admin`, `program_lead`
 - Reached by: agents `course_architect`
 - Input: `{ query?: string, kind?: string, top_k?: integer }`
 - Output: `{ items: [{ id, kind, title, snippet }] }`
 - Notes: Title ILIKE match only. `top_k` defaults to 10.
+- Change: T-C-108 — added admin, program_lead (read-only) so personas reach the agents their job needs; object-level scope still applies.
 
 ### `content.list_modules`
 - Server: `content` (port 7001)
@@ -102,37 +106,40 @@ Also hosts `graph.*`; the engine routes those prefixes here (see Routing).
 - Server: `content` (port 7001)
 - Mutates: false
 - Requires approval: false
-- Allowed roles: `student`, `faculty`, `instructional_designer`, `advisor`, `admin`
+- Allowed roles: `student`, `faculty`, `instructional_designer`, `advisor`, `admin`, `program_lead`
 - Reached by: agents `tutor`, `assessment`, `early_alert`; engine `GET /api/mastery/{person_id}/{course_id}` (student, faculty, advisor, admin); engine `GET /api/student/{person_id}/courses` (faculty, advisor); engine `POST /api/generate-podcast` (student); engine `POST /api/session brief (student)` (student); engine `POST /api/session page brief (page=mastery)` (student, faculty, advisor, admin)
 - Input: `{ person_id: string, course_id: string }`
 - Output: `{ student_name, course_title, microcredentials: [{ id, title, earned, progress: { mastery, proficient, emerging, not_started }, total_concepts, modules: [{ id, title, concepts: [{ id, title, level }] }] }], summary: { total_concepts, mastery, proficient, emerging, not_started, microcredentials_earned, microcredentials_total } }`
 - Notes: Hierarchy is microcredential ← module (`contributes_to`) ← concept (`part_of`); `level` is the latest attestation or `not_started`.
+- Change: T-C-108 — added program_lead (read-only) so personas reach the agents their job needs; object-level scope still applies.
 
 ### `content.get_skill`
 - Server: `content` (port 7001)
 - Mutates: false
 - Requires approval: false
-- Allowed roles: `student`, `faculty`, `instructional_designer`
+- Allowed roles: `student`, `faculty`, `instructional_designer`, `advisor`, `admin`, `program_lead`
 - Reached by: agents `tutor`, `course_architect`, `content_generator`; engine `POST /api/generate-podcast` (student)
 - Input: `{ concept_id: string, person_id?: string }`
 - Output: `{ id, concept_title, body_md, prerequisite_gaps?: [{ id, title, required_level, student_level }] }`
 - Notes: `concept_id` may be a UUID or a concept title. `prerequisite_gaps` is present only when `person_id` is given and a prerequisite is below `proficient`.
+- Change: T-C-108 — added admin, program_lead (read-only) so personas reach the agents their job needs; object-level scope still applies.
 
 ### `content.save_skill`
 - Server: `content` (port 7001)
 - Mutates: true
 - Requires approval: false
-- Allowed roles: `student`, `faculty`, `instructional_designer`
+- Allowed roles: `faculty`, `instructional_designer`
 - Reached by: agents `course_architect`, `content_generator`
 - Input: `{ concept_id: string, body_md: string, author_id?: string }`
 - Output: `{ id, created: true }` or `{ id, updated: true }`
-- Notes: Upserts the single `kind = 'skill'` content item on the concept.
+- Notes: Upserts the single `kind = 'skill'` content item on the concept. That document is shared: every tutor session on the concept reads it.
+- Change: T-C-107 — removes `student` and `advisor`; a concept's skill document is shared course content, writable only by faculty and instructional designers. Enforced by the gateway now (it reads this line). Approval unchanged (`false`, matches the server).
 
 ### `content.list_skills`
 - Server: `content` (port 7001)
 - Mutates: false
 - Requires approval: false
-- Allowed roles: `student`, `faculty`, `instructional_designer`
+- Allowed roles: `student`, `faculty`, `instructional_designer`, `advisor`, `admin`, `program_lead`
 - Reached by: agents `course_architect`, `content_generator`
 - Input: `{ course_id: string }`
 - Output: `{ skills: [{ concept_id, concept_title, module_title, has_skill, word_count }] }`
@@ -142,6 +149,7 @@ Also hosts `graph.*`; the engine routes those prefixes here (see Routing).
 ---
 
 ## `roster` (port 7002)
+- Change: T-C-108 — added admin, program_lead (read-only) so personas reach the agents their job needs; object-level scope still applies.
 
 ### `roster.get`
 - Server: `roster` (port 7002)
@@ -156,30 +164,34 @@ Also hosts `graph.*`; the engine routes those prefixes here (see Routing).
 - Server: `roster` (port 7002)
 - Mutates: false
 - Requires approval: false
-- Allowed roles: `student`, `faculty`, `instructional_designer`, `advisor`, `admin`
+- Allowed roles: `student`, `faculty`, `instructional_designer`, `advisor`, `admin`, `program_lead`
 - Reached by: agents `assessment`, `advising`; engine `GET /api/student/{person_id}/courses` (faculty, advisor); engine `POST /api/session page brief (page=gradebook)` (student, faculty, advisor, admin); engine `POST /api/session page brief (page=roster)` (student, faculty, advisor, admin)
 - Input: `{ person_id: string, course_id?: string }`
 - Output: `{ id, display_name, roles[], attributes, enrollment?: { role, status, enrolled_at } }`
 - Notes: `enrollment` is present only when `course_id` is given and an enrollment exists.
+- Change: T-C-108 — added program_lead (read-only) so personas reach the agents their job needs; object-level scope still applies.
 
 ### `roster.get_student_context`
 - Server: `roster` (port 7002)
 - Mutates: false
 - Requires approval: false
-- Allowed roles: `student`, `faculty`, `advisor`, `admin`
+- Allowed roles: `student`, `faculty`, `advisor`, `admin`, `program_lead`
 - Reached by: agents `tutor`, `early_alert`, `advising`, `communication`; engine `POST /api/session brief (student)` (student); engine `POST /api/session page brief (page=gradebook)` (student, faculty, advisor, admin)
 - Input: `{ person_id: string, course_id: string }`
 - Output: `{ recent_evidence: [{ node_id, kind, score, title, observed_at }], current_modules: [{ id, title }], upcoming_assignments: [{ id, title, due_at }] }`
 - Notes: `recent_evidence` is the person's last 10 evidence rows across all courses; modules and assignments are scoped to `course_id`.
+- Change: T-C-108 — added program_lead (read-only) so personas reach the agents their job needs; object-level scope still applies.
 
 ### `roster.list_by_course`
 - Server: `roster` (port 7002)
 - Mutates: false
 - Requires approval: false
-- Allowed roles: `student`, `faculty`, `instructional_designer`, `advisor`, `admin`
+- Allowed roles: `student`, `faculty`, `instructional_designer`, `advisor`, `admin`, `program_lead`
 - Reached by: agents `assessment`, `early_alert`, `engagement_analyst`, `communication`; engine `GET /api/roster/{course_id}` (faculty, advisor, admin); engine `GET /api/student/{person_id}/courses` (faculty, advisor); engine `POST /api/session brief (faculty)` (faculty); engine `POST /api/session brief (advisor)` (advisor); engine `POST /api/session brief (admin)` (admin); engine `POST /api/session page brief (page=courses)` (student, faculty, advisor, admin); engine `POST /api/session page brief (page=content)` (student, faculty, advisor, admin); engine `POST /api/session page brief (page=gradebook)` (student, faculty, advisor, admin); engine `POST /api/session page brief (page=roster)` (student, faculty, advisor, admin); engine `POST /api/session page brief (page=analytics)` (student, faculty, advisor, admin)
 - Input: `{ course_id: string, role?: string }`
 - Output: `{ persons: [{ id, display_name, role }] }`
+- Notes: Advisors hold no enrollments. With `role` omitted or `advisor`, an advisor assigned (`advisor_assignments`) to any student enrolled in the course is listed once with `role: advisor`. Admins are never listed.
+- Change: T-C-108 — added program_lead (read-only) so personas reach the agents their job needs; object-level scope still applies.
 
 ### `roster.save_turn`
 - Server: `roster` (port 7002)
@@ -235,11 +247,12 @@ Also hosts `graph.*`; the engine routes those prefixes here (see Routing).
 - Server: `roster` (port 7002)
 - Mutates: false
 - Requires approval: false
-- Allowed roles: `student`, `faculty`, `instructional_designer`, `advisor`, `admin`
+- Allowed roles: `student`, `faculty`, `instructional_designer`, `advisor`, `admin`, `program_lead`
 - Reached by: agents `assessment`, `learning_analyst`; engine `GET /api/roster/{course_id}` (faculty, advisor, admin); engine `GET /api/student/{person_id}/sessions` (student, faculty, advisor, admin); engine `GET /api/student/{person_id}/courses` (faculty, advisor); engine-internal `engine/analyst.py` (background, student sessions)
 - Input: `{ person_id: string, course_id?: string }`
 - Output: `{ sessions: [{ session_id, course_id, course_title, created_at, turn_count, first_message }] }`
 - Notes: Only sessions with `persona = 'student'`, newest first. `first_message` is truncated to 100 characters.
+- Change: T-C-108 — added program_lead (read-only) so personas reach the agents their job needs; object-level scope still applies.
 
 ### `roster.get_session_transcript`
 - Server: `roster` (port 7002)
@@ -331,31 +344,34 @@ Also hosts `attestations.*`; the engine routes those prefixes here (see Routing)
 - Server: `assessments` (port 7003)
 - Mutates: false
 - Requires approval: false
-- Allowed roles: `faculty`, `instructional_designer`
+- Allowed roles: `faculty`, `instructional_designer`, `admin`, `advisor`, `program_lead`
 - Reached by: agents `assessment`
 - Input: `{ bank_id?: string, query?: string, aligned_nodes?: string[] }`
 - Output: `{ questions: [{ id, type, stem, options, bloom_level, difficulty, aligned_nodes }] }`
 - Notes: At most 50 rows.
+- Change: T-C-108 — added admin, advisor, program_lead (read-only) so personas reach the agents their job needs; object-level scope still applies.
 
 ### `assessments.get_submission`
 - Server: `assessments` (port 7003)
 - Mutates: false
 - Requires approval: false
-- Allowed roles: `faculty`, `student` (own submissions only)
+- Allowed roles: `faculty`, `student` (own submissions only), `admin`
 - Reached by: agents `grading_assistant`
 - Input: `{ submission_id: string }`
 - Output: `{ id, person_id, assignment_node, body_md, attachments, submitted_at }`
 - Change: T-C-105 — adds `student` (own submissions only) so the planned `feedback` agent can read the draft in a student session; enforced by the gateway from T-E-106. Approval unchanged (`false`, matches the server).
+- Change: T-C-108 — added admin (read-only) so personas reach the agents their job needs; object-level scope still applies.
 
 ### `assessments.get_rubric`
 - Server: `assessments` (port 7003)
 - Mutates: false
 - Requires approval: false
-- Allowed roles: `faculty`, `instructional_designer`, `student` (rubrics of assignments in enrolled courses)
+- Allowed roles: `faculty`, `instructional_designer`, `student` (rubrics of assignments in enrolled courses), `admin`, `advisor`, `program_lead`
 - Reached by: agents `assessment`, `grading_assistant`
 - Input: `{ rubric_id: string }`
 - Output: `{ id, title, criteria }`
 - Change: T-C-105 — adds `student` (rubrics of assignments in enrolled courses) for the planned `feedback` agent; enforced by the gateway from T-E-106. Approval unchanged (`false`, matches the server).
+- Change: T-C-108 — added admin, advisor, program_lead (read-only) so personas reach the agents their job needs; object-level scope still applies.
 
 ### `assessments.draft_grade`
 - Server: `assessments` (port 7003)
@@ -382,11 +398,12 @@ Also hosts `attestations.*`; the engine routes those prefixes here (see Routing)
 - Server: `assessments` (port 7003)
 - Mutates: false
 - Requires approval: false
-- Allowed roles: `student`, `faculty`, `instructional_designer`, `advisor`, `admin`
+- Allowed roles: `student`, `faculty`, `instructional_designer`, `advisor`, `admin`, `program_lead`
 - Reached by: agents `tutor`, `assessment`, `early_alert`, `engagement_analyst`; engine `POST /api/session brief (student)` (student); engine `POST /api/session brief (faculty)` (faculty); engine `POST /api/session brief (advisor)` (advisor); engine `POST /api/session brief (admin)` (admin); engine `POST /api/session page brief (page=roster)` (student, faculty, advisor, admin); engine `POST /api/session page brief (page=analytics)` (student, faculty, advisor, admin)
 - Input: `{ person_id: string, node_ids?: string[], since_days?: integer }`
 - Output: `{ evidence: [{ id, node_id, kind, score, confidence, source, observed_at }] }`
 - Notes: `since_days` defaults to 30; at most 100 rows. Not course-scoped: a `course_id` argument (the engine sends one) is ignored.
+- Change: T-C-108 — added program_lead (read-only) so personas reach the agents their job needs; object-level scope still applies.
 
 ### `attestations.attest`
 - Server: `assessments` (port 7003)
@@ -402,10 +419,11 @@ Also hosts `attestations.*`; the engine routes those prefixes here (see Routing)
 - Server: `assessments` (port 7003)
 - Mutates: false
 - Requires approval: false
-- Allowed roles: `student`, `faculty`, `instructional_designer`, `advisor`, `admin`
+- Allowed roles: `student`, `faculty`, `instructional_designer`, `advisor`, `admin`, `program_lead`
 - Reached by: agents `tutor`, `assessment`, `early_alert`, `learning_analyst`; engine-internal `engine/analyst.py` (background, student sessions)
 - Input: `{ person_id: string, course_id?: string }`
 - Output: `{ attestations: [{ node_id, node_title, level, issued_at }] }`
+- Change: T-C-108 — added program_lead (read-only) so personas reach the agents their job needs; object-level scope still applies.
 
 ### `assessments.check_pending_credentials`
 - Server: `assessments` (port 7003)
@@ -421,40 +439,44 @@ Also hosts `attestations.*`; the engine routes those prefixes here (see Routing)
 - Server: `assessments` (port 7003)
 - Mutates: false
 - Requires approval: false
-- Allowed roles: `faculty`, `instructional_designer`, `advisor`
+- Allowed roles: `faculty`, `instructional_designer`, `advisor`, `admin`, `program_lead`
 - Reached by: agents `assessment`; engine `GET /api/pending-credentials/{course_id}` (faculty, advisor)
 - Input: `{ course_id: string, person_id?: string }`
 - Output: `{ pending: [{ id, person_id, student_name, microcredential_id, credential_title, created_at }] }`
 - Notes: Only `status = 'pending'`.
+- Change: T-C-108 — added admin, program_lead (read-only) so personas reach the agents their job needs; object-level scope still applies.
 
 ### `assessments.get_credential_evidence`
 - Server: `assessments` (port 7003)
 - Mutates: false
 - Requires approval: false
-- Allowed roles: `faculty`, `instructional_designer`, `advisor`
+- Allowed roles: `faculty`, `instructional_designer`, `advisor`, `admin`, `program_lead`
 - Reached by: agents `assessment`; engine `GET /api/credential-evidence/{pending_id}` (faculty, advisor)
 - Input: `{ pending_id: string }`
 - Output: `{ pending_id, student_name, credential_title, created_at, session_count, concepts: [{ id, title, level, attested_at }] }`
+- Change: T-C-108 — added admin, program_lead (read-only) so personas reach the agents their job needs; object-level scope still applies.
 
 ### `assessments.approve_credential`
 - Server: `assessments` (port 7003)
 - Mutates: true
 - Requires approval: true
-- Allowed roles: `faculty`, `instructional_designer`, `advisor`
+- Allowed roles: `faculty` (own course), `admin`
 - Reached by: agents `assessment`; engine `POST /api/approve-credential/{pending_id}` (faculty, advisor); engine `POST /api/approve-credentials/bulk` (faculty, advisor)
 - Input: `{ pending_id: string, reviewer_id: string }`
 - Output: `{ approved: true, credential_id }`
 - Notes: Marks the pending row approved and stores an Open Badges 3.0 JSON-LD credential (unsigned) in `issued_credentials`.
-- Change: T-C-105 — `requires_approval` false → true (spec.md §5.3); enforced by the gateway from T-E-107. Server flag is still `false`: it does not match until the server is updated. §17 limits badge approval to faculty of the course; narrowing the `advisor` and `instructional_designer` roles is an open question.
+- Change: T-C-105 — `requires_approval` false → true (spec.md §5.3); enforced by the gateway from T-E-107, and the server flag matches. §17 limits badge approval to faculty of the course; narrowing the `advisor` and `instructional_designer` roles is an open question.
+- Change: T-C-108 — roles are course faculty and admin (an admin can approve when the instructor is unavailable, decided 2026-10-02); advisor and instructional_designer removed. Matches the REST endpoint and the gateway's object-level check.
 
 ### `assessments.list_issued_credentials`
 - Server: `assessments` (port 7003)
 - Mutates: false
 - Requires approval: false
-- Allowed roles: `student`, `faculty`, `instructional_designer`
+- Allowed roles: `student`, `faculty`, `instructional_designer`, `admin`, `advisor`, `program_lead`
 - Reached by: agents `assessment`; engine `GET /api/credentials/{person_id}` (student)
 - Input: `{ person_id: string }`
 - Output: `{ credentials: [{ id, credential_title, course_title, issued_at, issued_by }] }`
+- Change: T-C-108 — added admin, advisor, program_lead (read-only) so personas reach the agents their job needs; object-level scope still applies.
 
 ### `assessments.get_settings`
 - Server: `assessments` (port 7003)
@@ -485,11 +507,12 @@ Also hosts `attestations.*`; the engine routes those prefixes here (see Routing)
 - Server: `analytics` (port 7004)
 - Mutates: false
 - Requires approval: false
-- Allowed roles: `faculty`, `advisor`, `admin`
+- Allowed roles: `faculty`, `advisor`, `admin`, `program_lead`
 - Reached by: agents `early_alert`, `engagement_analyst`
 - Input: `{ scope: object, metric: string, window: object, breakdown?: string, filters?: object }`
 - Output: `{ rows: [{ value, sample_size, dimension? }], metadata: { metric, scope, window } }`
 - Notes: `metric`: `evidence_count`, `avg_score`, `engagement_count` (evidence table) or `mastery_rate` (attestations). `scope`: `{ course_id?, person_id? }`; `window`: `{ start?, end? }` ISO-8601 (ignored by `mastery_rate`); `filters`: `{ kind?, node_id? }`. `breakdown` is whitelisted per metric: evidence metrics allow `kind`, `node_id`, `person_id`, `source`; `mastery_rate` allows `issuer_id`, `level`, `node_id`, `person_id`. Anything else returns `{ error, code: "validation_error", rows: [], metadata }` without querying. An unknown metric returns `{ rows: [], metadata: { error } }`.
+- Change: T-C-108 — added program_lead (read-only) so personas reach the agents their job needs; object-level scope still applies.
 
 ### `analytics.describe_schema`
 - Server: `analytics` (port 7004)
@@ -505,21 +528,23 @@ Also hosts `attestations.*`; the engine routes those prefixes here (see Routing)
 - Server: `analytics` (port 7004)
 - Mutates: false
 - Requires approval: false
-- Allowed roles: `faculty`, `advisor`, `admin`
+- Allowed roles: `faculty`, `advisor`, `admin`, `program_lead`
 - Reached by: agents `early_alert`, `engagement_analyst`
 - Input: `{ scope: object, metric: string, window: object, interval: string }`
 - Output: `{ series: [{ x, y }] }`
 - Notes: `interval`: `hour`, `day`, `week` or `month` (anything else is treated as `day`). `mastery_rate` falls back to `evidence_count`.
+- Change: T-C-108 — added program_lead (read-only) so personas reach the agents their job needs; object-level scope still applies.
 
 ### `analytics.cohort_compare`
 - Server: `analytics` (port 7004)
 - Mutates: false
 - Requires approval: false
-- Allowed roles: `faculty`, `advisor`, `admin`
+- Allowed roles: `faculty`, `advisor`, `admin`, `program_lead`
 - Reached by: agents `early_alert`, `engagement_analyst`
 - Input: `{ scope: object, cohorts: object[], metric: string, window: object }`
 - Output: `{ cohort_results: [{ cohort, value, sample_size }] }`
 - Notes: Each cohort is `{ label, scope }`, merged over the top-level `scope`. `mastery_rate` falls back to `evidence_count`.
+- Change: T-C-108 — added program_lead (read-only) so personas reach the agents their job needs; object-level scope still applies.
 
 ### `analytics.render_chart`
 - Server: `analytics` (port 7004)
@@ -540,20 +565,22 @@ Also hosts `attestations.*`; the engine routes those prefixes here (see Routing)
 - Server: `sis` (port 7005)
 - Mutates: false
 - Requires approval: false
-- Allowed roles: `student`, `faculty`, `advisor`, `admin`
+- Allowed roles: `student`, `faculty`, `advisor`, `admin`, `program_lead`
 - Reached by: agents `early_alert`, `advising`
 - Input: `{ student_id: string }`
 - Output: `{ courses: [{ term, title, grade, credits }], gpa, credits_earned }`
 - Notes: Grades are derived from evidence scores; `IP` marks in-progress courses.
+- Change: T-C-108 — added program_lead (read-only) so personas reach the agents their job needs; object-level scope still applies.
 
 ### `sis.degree_audit`
 - Server: `sis` (port 7005)
 - Mutates: false
 - Requires approval: false
-- Allowed roles: `student`, `advisor`
+- Allowed roles: `student`, `advisor`, `faculty`, `admin`, `program_lead`
 - Reached by: agents `advising`
 - Input: `{ student_id: string, program_id?: string }`
 - Output: `{ program, requirements: [{ id, name, credits_required, credits_applied, satisfied }], satisfied, remaining, projected_graduation }`
+- Change: T-C-108 — added admin, program_lead (read-only) so personas reach the agents their job needs; object-level scope still applies.
 
 ### `sis.check_prerequisites`
 - Server: `sis` (port 7005)
@@ -568,11 +595,12 @@ Also hosts `attestations.*`; the engine routes those prefixes here (see Routing)
 - Server: `sis` (port 7005)
 - Mutates: false
 - Requires approval: false
-- Allowed roles: `student`, `faculty`, `advisor`, `admin`
+- Allowed roles: `student`, `faculty`, `advisor`, `admin`, `program_lead`
 - Reached by: agents `early_alert`, `advising`; engine `GET /api/student/{person_id}/courses` (faculty, advisor); engine `POST /api/session brief (advisor)` (advisor); engine `POST /api/session brief (admin)` (admin); engine `POST /api/session page brief (page=courses)` (student, faculty, advisor, admin)
 - Input: `{ query?: string, subject?: string, level?: string, term?: string }`
 - Output: `{ courses: [{ id, title, description, credits, term, level, tags[] }] }`
 - Notes: At most 50 rows; an empty `query` lists the catalog.
+- Change: T-C-108 — added program_lead (read-only) so personas reach the agents their job needs; object-level scope still applies.
 
 ### `sis.schedule_availability`
 - Server: `sis` (port 7005)
@@ -594,7 +622,7 @@ Also hosts `attestations.*`; the engine routes those prefixes here (see Routing)
 - Mutates: true
 - Requires approval: false
 - Allowed roles: `faculty`, `advisor`, `admin`
-- Reached by: nothing today; agent `communication` once its `planned_mcp_tools` go live
+- Reached by: agents `communication`
 - Input: `{ author_id: string, channel: string, audience: object | string, subject?: string, body_md: string, scheduled_for?: string }`
 - Output: `{ draft_id }`
 - Notes: Inserts a `messages` row with `is_draft = true`; `audience` may be an object or a JSON string.
@@ -605,10 +633,10 @@ Also hosts `attestations.*`; the engine routes those prefixes here (see Routing)
 - Mutates: true
 - Requires approval: true
 - Allowed roles: `faculty`, `advisor`, `admin`
-- Reached by: nothing today; agent `communication` once its `planned_mcp_tools` go live
+- Reached by: agents `communication`
 - Input: `{ draft_id: string }`
 - Output: `{ sent_at, recipient_count }`
-- Notes: In-app only this round: from T-E-107 a draft whose `channel` is not `inbox` or `announcement` is refused (email delivery is deferred with other external calls, spec.md §0.4).
+- Notes: In-app only this round: a draft whose `channel` is not `inbox` or `announcement` is refused with `{ error }` and stays a draft (email delivery is deferred with other external calls, spec.md §0.4).
 - Change: T-C-105 — `requires_approval: true` is now enforced in the live path, and Allowed roles none → `faculty`, `advisor`, `admin` (spec.md §5.3); enforced by the gateway from T-E-107. Server flag already `true`, so it matches. Spec.md §5.3 calls this tool "new"; it is already served.
 
 ### `communications.list_templates`
@@ -629,11 +657,12 @@ Also hosts `attestations.*`; the engine routes those prefixes here (see Routing)
 - Server: `standards` (port 7007)
 - Mutates: false
 - Requires approval: false
-- Allowed roles: `faculty`, `instructional_designer`
+- Allowed roles: `faculty`, `instructional_designer`, `admin`, `program_lead`
 - Reached by: agents `course_architect`
 - Input: `{ framework?: string, code?: string, query?: string }`
 - Output: `{ standards: [{ id, code, title, description, framework }] }`
 - Notes: `framework` is required at runtime even though the schema does not mark it.
+- Change: T-C-108 — added admin, program_lead (read-only) so personas reach the agents their job needs; object-level scope still applies.
 
 ### `standards.align`
 - Server: `standards` (port 7007)

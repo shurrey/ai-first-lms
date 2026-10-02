@@ -1,7 +1,12 @@
 """Pydantic models for scenario YAML files."""
+
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+PersonRole = Literal["student", "faculty", "program_lead", "advisor", "admin"]
 
 
 class ApprovalAction(BaseModel):
@@ -22,9 +27,16 @@ class ExpectedOutcome(BaseModel):
 
 
 class Scenario(BaseModel):
+    # Unknown keys are rejected so a stale `persona:` field fails loudly.
+    model_config = ConfigDict(extra="forbid")
+
     id: int
     name: str
-    persona: str
+    login_as: str = Field(..., min_length=1, description="Seeded username (the person's email).")
+    active_role: PersonRole | None = Field(
+        default=None,
+        description="Role to switch to after login when it differs from the session's default.",
+    )
     course_id: str
     user_turns: list[UserTurn]
     expected: ExpectedOutcome

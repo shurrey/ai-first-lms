@@ -1,109 +1,70 @@
-import { type Page } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
+import { api, fulfill, mockAuth, mockCreateSession, type FakeMe } from "./fake-api";
 
 /**
- * Set up API route mocks for a test page.
- * Intercepts all orchestrator API calls and returns mock responses.
+ * Signs `me` in against the fake API and mocks the conversation endpoints.
+ * `sseEvents` is served as one SSE body for any /api/stream request.
  */
 export async function setupMockAPI(
   page: Page,
   options: {
+    me: FakeMe;
     sessionId?: string;
     turnId?: string;
-    sseEvents?: Record<string, unknown>[];
-  } = {}
+    sseEvents?: object[];
+  }
 ) {
   const sessionId = options.sessionId ?? "test-session-1";
   const turnId = options.turnId ?? "test-turn-1";
 
-  // Mock POST /api/session
-  await page.route("**/api/session", async (route) => {
-    await route.fulfill({
-      status: 201,
-      contentType: "application/json",
-      body: JSON.stringify({ session_id: sessionId }),
-    });
-  });
+  await mockAuth(page, { me: options.me });
+  await mockCreateSession(page, sessionId);
 
-  // Mock POST /api/converse
-  await page.route("**/api/converse", async (route) => {
-    await route.fulfill({
-      status: 202,
-      contentType: "application/json",
-      body: JSON.stringify({
-        turn_id: turnId,
-        stream_url: `/api/stream?session_id=${sessionId}&turn_id=${turnId}`,
-      }),
-    });
-  });
+  await page.route(api("/api/converse"), (route) =>
+    fulfill(route, 202, {
+      turn_id: turnId,
+      stream_url: `/api/stream?session_id=${sessionId}&turn_id=${turnId}`,
+    })
+  );
 
-  // Mock GET /api/stream — SSE
   if (options.sseEvents) {
-    await page.route("**/api/stream**", async (route) => {
-      const events = options.sseEvents!;
-      const sseBody = events
-        .map((e) => `data: ${JSON.stringify(e)}\n\n`)
-        .join("");
-
+    const sseBody = options.sseEvents.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("");
+    await page.route(`${api("/api/stream")}**`, async (route) => {
+      if (route.request().method() === "OPTIONS") return fulfill(route, 204);
       await route.fulfill({
         status: 200,
-        contentType: "text/event-stream",
         headers: {
-          "Cache-Control": "no-cache",
-          Connection: "keep-alive",
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+          "access-control-allow-origin": new URL(page.url()).origin,
+          "access-control-allow-credentials": "true",
         },
         body: sseBody,
       });
     });
   }
 
-  // Mock POST /api/approval
-  await page.route("**/api/approval", async (route) => {
-    await route.fulfill({ status: 202 });
-  });
-
-  // Mock POST /api/clarify
-  await page.route("**/api/clarify", async (route) => {
-    await route.fulfill({ status: 202 });
-  });
-
-  // Mock GET /api/sessions/*/history
-  await page.route("**/api/sessions/*/history", async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ turns: [] }),
-    });
-  });
+  await page.route(api("/api/approval"), (route) => fulfill(route, 202));
+  await page.route(api("/api/clarify"), (route) => fulfill(route, 202));
+  await page.route(`${api("/api/sessions/")}*/history`, (route) => fulfill(route, 200, { turns: [] }));
 }
 
-/**
- * Select a persona and course in the UI to activate a session.
- */
-export async function selectPersonaAndCourse(
-  page: Page,
-  persona: string,
-  courseIndex: number = 1
-) {
-  // Wait for the persona select to be visible (after hydration)
-  const personaSelect = page.locator("#persona-select");
-  await personaSelect.waitFor({ state: "visible", timeout: 10000 });
-
-  // Select persona
-  await personaSelect.selectOption(persona);
-
-  // Wait for the course select to be visible
+/** Picks the first enrolled course (or the scope entry for advisor/admin) to start a session. */
+export async function selectCourse(page: Page, optionIndex: number = 1) {
   const courseSelect = page.locator("#course-select");
-  await courseSelect.waitFor({ state: "visible", timeout: 5000 });
+  await courseSelect.waitFor({ state: "visible", timeout: 30000 });
+  const value = await courseSelect.locator("option").nth(optionIndex).getAttribute("value");
+  if (!value) throw new Error(`No course option at index ${optionIndex}`);
+  const created = page.waitForResponse((r) => r.url() === api("/api/session") && r.request().method() === "POST");
+  await courseSelect.selectOption(value);
+  await created;
+}
 
-  // Select first course
-  const options = await courseSelect.locator("option").all();
-  if (options.length > courseIndex) {
-    const value = await options[courseIndex].getAttribute("value");
-    if (value) {
-      await courseSelect.selectOption(value);
-    }
-  }
-
-  // Wait for session creation response
-  await page.waitForTimeout(500);
+/** Tool calls stream inline, then collapse into the chat's "Thinking" drawer once the turn ends. */
+export async function expectToolCall(page: Page, tool: string) {
+  const step = page.getByText(tool, { exact: true }).first();
+  const drawer = page.getByRole("button", { name: /Thinking/ }).last();
+  await expect(step.or(drawer)).toBeVisible({ timeout: 10000 });
+  if (!(await step.isVisible())) await drawer.click();
+  await expect(step).toBeVisible();
 }

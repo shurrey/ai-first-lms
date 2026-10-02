@@ -1,7 +1,9 @@
 """Deterministic seed script for ALL 4 demo courses.
 
 Seeds CS 101, MATH 201, ENG 102, BIO 150 with shared students,
-per-course faculty, one advisor, and one admin.
+per-course faculty, one advisor, and one admin, each with a login.
+Requires SEED_DEMO_PASSWORD. Generated skill documents (content_items
+kind='skill') survive a re-seed because node ids are stable per seed value.
 
 Usage: uv run python -m data_mcp.seed.all_courses --seed 42
 """
@@ -10,14 +12,70 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import random
+import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import asyncpg
+from argon2 import PasswordHasher
 
+from data_mcp.seed.demo_accounts import fetch_demo_accounts, format_demo_accounts
 from data_mcp.settings import settings
+
+DEMO_PASSWORD_ENV = "SEED_DEMO_PASSWORD"
+
+# Faculty usernames that also hold program_lead (spec §4.2).
+PROGRAM_LEADS = {"m.torres"}
+
+# Every table the seed owns. One TRUNCATE ... CASCADE so FK order does not matter.
+SEEDED_TABLES = [
+    "credentials", "auth_sessions", "advisor_assignments",
+    "tool_calls", "outcome_links", "human_decisions", "ai_actions",
+    "criterion_scores", "rubric_criteria",
+    "policy_settings", "policy_precedence", "notifications",
+    "data_access_log", "deletion_requests", "caliper_outbox", "api_tokens",
+    "conversation_turns", "pending_credentials", "issued_credentials", "concept_reviews",
+    "events_log", "turns", "sessions",
+    "grades", "submissions", "attestations", "evidence",
+    "enrollments", "content_items",
+    "questions", "question_banks", "rubrics",
+    "messages", "message_templates",
+    "standards", "standards_frameworks",
+    "intervention_playbook",
+    "edges", "nodes", "persons",
+]
+
+_SKILL_COLUMNS = (
+    "id", "node_id", "kind", "title", "body_md", "media_url", "metadata",
+    "is_draft", "author_id", "created_at", "updated_at",
+)
+_SKILL_SELECT = (
+    "SELECT id, node_id, kind, title, body_md, media_url, metadata, is_draft, author_id, "
+    "created_at, updated_at FROM content_items WHERE kind = 'skill'"
+)
+_SKILL_INSERT = (
+    "INSERT INTO content_items (id, node_id, kind, title, body_md, media_url, metadata, "
+    "is_draft, author_id, created_at, updated_at) "
+    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"
+)
+
+
+class MissingDemoPasswordError(RuntimeError):
+    pass
+
+
+def require_demo_password() -> str:
+    """Return SEED_DEMO_PASSWORD; raises MissingDemoPasswordError if unset or empty."""
+    password = os.environ.get(DEMO_PASSWORD_ENV, "")
+    if not password:
+        raise MissingDemoPasswordError(
+            f"{DEMO_PASSWORD_ENV} is not set. Put it in .env (see .env.example) "
+            "before seeding; every seeded account logs in with it."
+        )
+    return password
 
 # ── Deterministic UUID generation ──────────────────────────────────────────
 
@@ -410,22 +468,74 @@ CLASS_YEARS = ["Freshman", "Freshman", "Sophomore", "Sophomore", "Junior", "Seni
 
 # ── Main seed function ─────────────────────────────────────────────────────
 
-async def seed(conn: asyncpg.Connection, rng: random.Random) -> dict[str, Any]:
-    """Seed all 4 courses with shared students. Returns a summary."""
-    summary: dict[str, Any] = {}
+async def _insert_edge(
+    conn: asyncpg.Connection, from_node: uuid.UUID, to_node: uuid.UUID, kind: str,
+) -> int:
+    """Insert an edge unless it already exists; returns 1 if inserted, else 0."""
+    status = await conn.execute(
+        """INSERT INTO edges (from_node, to_node, kind) VALUES ($1, $2, $3)
+           ON CONFLICT (from_node, to_node, kind) DO NOTHING""",
+        from_node, to_node, kind,
+    )
+    return 1 if status == "INSERT 0 1" else 0
 
-    # ── Truncate all tables ──
-    for table in [
-        "events_log", "turns", "sessions",
-        "grades", "submissions", "attestations", "evidence",
-        "enrollments", "content_items",
-        "questions", "question_banks", "rubrics",
-        "messages", "message_templates",
-        "standards", "standards_frameworks",
-        "intervention_playbook",
-        "edges", "nodes", "persons",
-    ]:
-        await conn.execute(f"TRUNCATE {table} CASCADE")
+
+async def seed(
+    conn: asyncpg.Connection, rng: random.Random, demo_password: str | None = None,
+) -> dict[str, Any]:
+    """Seed all 4 courses with shared students in one transaction. Returns a summary.
+
+    demo_password defaults to SEED_DEMO_PASSWORD; checked before any DB write.
+    """
+    if demo_password is None:
+        demo_password = require_demo_password()
+    elif not demo_password:
+        raise MissingDemoPasswordError("demo_password must not be empty")
+
+    async with conn.transaction():
+        skill_rows = await conn.fetch(_SKILL_SELECT)
+        await conn.execute(f"TRUNCATE {', '.join(SEEDED_TABLES)} CASCADE")
+        summary = await _seed_content(conn, rng)
+        summary.update(await _restore_skill_rows(conn, skill_rows))
+        summary["credentials"] = await _seed_credentials(conn, demo_password)
+    return summary
+
+
+async def _restore_skill_rows(
+    conn: asyncpg.Connection, rows: list[asyncpg.Record],
+) -> dict[str, int]:
+    """Re-insert snapshotted skill documents whose node still exists after seeding."""
+    node_ids = {r["id"] for r in await conn.fetch("SELECT id FROM nodes")}
+    person_ids = {r["id"] for r in await conn.fetch("SELECT id FROM persons")}
+    kept = [r for r in rows if r["node_id"] in node_ids]
+    if kept:
+        await conn.executemany(
+            _SKILL_INSERT,
+            [
+                tuple(
+                    (r[c] if r[c] in person_ids else None) if c == "author_id" else r[c]
+                    for c in _SKILL_COLUMNS
+                )
+                for r in kept
+            ],
+        )
+    return {"skills_preserved": len(kept), "skills_dropped": len(rows) - len(kept)}
+
+
+async def _seed_credentials(conn: asyncpg.Connection, demo_password: str) -> int:
+    """One credentials row per person: username = email, argon2id hash salted per person."""
+    hasher = PasswordHasher()
+    persons = await conn.fetch("SELECT id, email FROM persons ORDER BY email")
+    await conn.executemany(
+        """INSERT INTO credentials (person_id, username, password_hash, must_change)
+           VALUES ($1, $2, $3, false)""",
+        [(p["id"], p["email"], hasher.hash(demo_password)) for p in persons],
+    )
+    return len(persons)
+
+
+async def _seed_content(conn: asyncpg.Connection, rng: random.Random) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
 
     # ── Create course nodes ──
     # These are generated first so the UUIDs are deterministic and predictable.
@@ -437,7 +547,10 @@ async def seed(conn: asyncpg.Connection, rng: random.Random) -> dict[str, Any]:
             """INSERT INTO nodes (id, kind, title, description, metadata) VALUES
                ($1, 'course', $2, $3, $4::jsonb)""",
             cid, cdef["title"], cdef["description"],
-            json.dumps({"term": cdef["term"], "credits": cdef["credits"], "weeks": cdef["weeks"]}),
+            json.dumps({
+                "slug": cdef["slug"], "term": cdef["term"],
+                "credits": cdef["credits"], "weeks": cdef["weeks"],
+            }),
         )
     summary["course_ids"] = {slug: str(cid) for slug, cid in course_ids.items()}
 
@@ -453,9 +566,10 @@ async def seed(conn: asyncpg.Connection, rng: random.Random) -> dict[str, Any]:
             if username not in faculty_by_username:
                 fid = _uuid(rng)
                 faculty_by_username[username] = fid
+                roles = ["faculty", "program_lead"] if username in PROGRAM_LEADS else ["faculty"]
                 await conn.execute(
                     "INSERT INTO persons (id, roles, display_name, email) VALUES ($1, $2, $3, $4)",
-                    fid, ["faculty"], display_name, f"{username}@university.edu",
+                    fid, roles, display_name, f"{username}@university.edu",
                 )
             fid = faculty_by_username[username]
             faculty_per_course[slug].append(fid)
@@ -472,12 +586,7 @@ async def seed(conn: asyncpg.Connection, rng: random.Random) -> dict[str, Any]:
         "INSERT INTO persons (id, roles, display_name, email) VALUES ($1, $2, $3, $4)",
         advisor_id, ["advisor"], "Ms. Adaeze Okafor", "a.okafor@university.edu",
     )
-    # Enroll advisor in all courses
-    for cid in course_ids.values():
-        await conn.execute(
-            "INSERT INTO enrollments (person_id, course_node, role) VALUES ($1, $2, 'advisor')",
-            advisor_id, cid,
-        )
+    # Caseload comes from advisor_assignments (inserted after students), not enrollments.
     summary["advisor_id"] = str(advisor_id)
 
     # ── Create admin ──
@@ -486,11 +595,7 @@ async def seed(conn: asyncpg.Connection, rng: random.Random) -> dict[str, Any]:
         "INSERT INTO persons (id, roles, display_name, email) VALUES ($1, $2, $3, $4)",
         admin_id, ["admin"], "Dr. Richard Hayes", "r.hayes@university.edu",
     )
-    for cid in course_ids.values():
-        await conn.execute(
-            "INSERT INTO enrollments (person_id, course_node, role) VALUES ($1, $2, 'admin')",
-            admin_id, cid,
-        )
+    # Institution scope comes from the admin role; no enrollments.
     summary["admin_id"] = str(admin_id)
 
     # ── Create 50 students ──
@@ -522,6 +627,12 @@ async def seed(conn: asyncpg.Connection, rng: random.Random) -> dict[str, Any]:
         )
 
     summary["student_count"] = len(student_ids)
+
+    await conn.executemany(
+        "INSERT INTO advisor_assignments (advisor_id, student_id) VALUES ($1, $2)",
+        [(advisor_id, sid) for sid in student_ids],
+    )
+    summary["advisor_assignments"] = len(student_ids)
 
     # ── Deterministic enrollment: each student in 2-3 courses ──
     # Every student is in CS 101 (for demo continuity). Then 1-2 more random courses.
@@ -654,14 +765,9 @@ async def seed(conn: asyncpg.Connection, rng: random.Random) -> dict[str, Any]:
             curr_concepts = concepts_by_module[mi]
             for ci in range(min(3, len(curr_concepts))):
                 prev_idx = rng.randint(0, len(prev_concepts) - 1)
-                try:
-                    await conn.execute(
-                        "INSERT INTO edges (from_node, to_node, kind) VALUES ($1, $2, 'prerequisite_of')",
-                        prev_concepts[prev_idx], curr_concepts[ci],
-                    )
-                    total_edges += 1
-                except asyncpg.exceptions.UniqueViolationError:
-                    pass
+                total_edges += await _insert_edge(
+                    conn, prev_concepts[prev_idx], curr_concepts[ci], "prerequisite_of",
+                )
 
         # ── Assessment items ──
         assignment_ids: list[uuid.UUID] = []
@@ -827,26 +933,20 @@ async def seed(conn: asyncpg.Connection, rng: random.Random) -> dict[str, Any]:
                 for _ in range(num_attestations):
                     concept = rng.choice(all_concept_ids[:len(all_concept_ids) // 2])
                     level = rng.choice(["proficient", "mastery"])
-                    try:
-                        await conn.execute(
-                            """INSERT INTO attestations (person_id, node_id, level, issuer_id)
-                               VALUES ($1, $2, $3, $4)""",
-                            sid, concept, level, primary_faculty,
-                        )
-                    except asyncpg.exceptions.UniqueViolationError:
-                        pass
+                    await conn.execute(
+                        """INSERT INTO attestations (person_id, node_id, level, issuer_id)
+                           VALUES ($1, $2, $3, $4)""",
+                        sid, concept, level, primary_faculty,
+                    )
             elif tier == "medium":
                 num_attestations = rng.randint(1, 3)
                 for _ in range(num_attestations):
                     concept = rng.choice(all_concept_ids[:len(all_concept_ids) // 3])
-                    try:
-                        await conn.execute(
-                            """INSERT INTO attestations (person_id, node_id, level, issuer_id)
-                               VALUES ($1, $2, 'emerging', $3)""",
-                            sid, concept, primary_faculty,
-                        )
-                    except asyncpg.exceptions.UniqueViolationError:
-                        pass
+                    await conn.execute(
+                        """INSERT INTO attestations (person_id, node_id, level, issuer_id)
+                           VALUES ($1, $2, 'emerging', $3)""",
+                        sid, concept, primary_faculty,
+                    )
 
         # ── Content items for modules ──
         for mi, mod_id in enumerate(module_ids):
@@ -979,27 +1079,11 @@ async def seed(conn: asyncpg.Connection, rng: random.Random) -> dict[str, Any]:
     summary["draft_grades"] = draft_count
     summary["committed_grades"] = grade_count - draft_count
 
-    # ── Standards alignment edges ──
-    alignment_count = 0
-    bloom_standards = await conn.fetch(
-        "SELECT id, code FROM standards WHERE framework_id = $1",
-        bloom_id,
-    )
-    if bloom_standards:
-        # Align concepts to Bloom levels
-        for ci, concept_id in enumerate(all_concept_ids_global):
-            if rng.random() < 0.4:  # 40% of concepts aligned
-                std = rng.choice(bloom_standards)
-                try:
-                    await conn.execute(
-                        "INSERT INTO edges (from_node, to_node, kind) VALUES ($1, $2, 'aligned_with')",
-                        concept_id, std["id"],
-                    )
-                    alignment_count += 1
-                except Exception:
-                    pass  # skip duplicates
-
-    summary["alignment_edges"] = alignment_count
+    # Standards live in their own table, not nodes, so edges cannot point at them.
+    # The draws stay so every id generated after this point keeps its seed-42 value.
+    for _concept_id in all_concept_ids_global:
+        if rng.random() < 0.4:
+            rng.choice(range(6))
 
     # ── Microcredentials ──────────────────────────────────────────────────────
     MICROCREDENTIALS = {
@@ -1052,25 +1136,11 @@ async def seed(conn: asyncpg.Connection, rng: random.Random) -> dict[str, Any]:
                     mod_title, str(course_id),
                 )
                 if mod_row:
-                    try:
-                        await conn.execute(
-                            "INSERT INTO edges (from_node, to_node, kind) VALUES ($1, $2, 'contributes_to')",
-                            mod_row["id"], mc_id,
-                        )
-                        total_edges += 1
-                    except asyncpg.exceptions.UniqueViolationError:
-                        pass
+                    total_edges += await _insert_edge(conn, mod_row["id"], mc_id, "contributes_to")
 
         # prerequisite_of edges: sequential microcredentials within the course
         for i in range(1, len(mc_ids)):
-            try:
-                await conn.execute(
-                    "INSERT INTO edges (from_node, to_node, kind) VALUES ($1, $2, 'prerequisite_of')",
-                    mc_ids[i - 1], mc_ids[i],
-                )
-                total_edges += 1
-            except asyncpg.exceptions.UniqueViolationError:
-                pass
+            total_edges += await _insert_edge(conn, mc_ids[i - 1], mc_ids[i], "prerequisite_of")
 
         # For high-performing students: mastery attestations for all concepts
         # in the FIRST microcredential of each course they're enrolled in.
@@ -1118,14 +1188,11 @@ async def seed(conn: asyncpg.Connection, rng: random.Random) -> dict[str, Any]:
             )
             if existing_count >= 3:
                 for cid in first_mc_concept_ids:
-                    try:
-                        await conn.execute(
-                            """INSERT INTO attestations (person_id, node_id, level, issuer_id)
-                               VALUES ($1, $2, 'mastery', $3)""",
-                            sid, cid, primary_faculty_id,
-                        )
-                    except asyncpg.exceptions.UniqueViolationError:
-                        pass  # already attested at some level; skip
+                    await conn.execute(
+                        """INSERT INTO attestations (person_id, node_id, level, issuer_id)
+                           VALUES ($1, $2, 'mastery', $3)""",
+                        sid, cid, primary_faculty_id,
+                    )
 
     summary["total_microcredentials"] = total_microcredentials
 
@@ -1144,16 +1211,17 @@ async def seed(conn: asyncpg.Connection, rng: random.Random) -> dict[str, Any]:
 
 
 async def main(seed_value: int = 42) -> None:
+    demo_password = require_demo_password()
     rng = random.Random(seed_value)
     conn = await asyncpg.connect(settings.database_url)
     try:
-        summary = await seed(conn, rng)
+        summary = await seed(conn, rng, demo_password)
         print(f"\nSeed complete (seed={seed_value}):")
         print("=" * 60)
-        print("\nCourse IDs (for session.py _COURSE_SLUG_TO_UUID):")
+        print("\nCourse IDs (the engine resolves slugs from nodes.metadata.slug):")
         for slug, cid in summary["course_ids"].items():
             print(f'    "{slug}": "{cid}",')
-        print("\nFirst student per course (for session.py _DEMO_STUDENTS):")
+        print("\nFirst student per course:")
         for slug, (sid, name) in summary["first_student_per_course"].items():
             cid = summary["course_ids"][slug]
             print(f'    "{cid}": ("{sid}", "{name}"),')
@@ -1172,8 +1240,18 @@ async def main(seed_value: int = 42) -> None:
         print(f"  Submissions: {summary['total_submissions']}")
         print(f"  Grades: {summary['grade_count']} ({summary['committed_grades']} committed, {summary['draft_grades']} draft)")
         print(f"  Microcredentials: {summary['total_microcredentials']}")
-        print(f"  Alignment edges: {summary['alignment_edges']}")
         print(f"  Graph edges: {summary['total_edges']}")
+        print(f"  Advisor assignments: {summary['advisor_assignments']}")
+        print(f"  Credentials: {summary['credentials']}")
+        print(f"  Skill documents preserved: {summary['skills_preserved']}")
+        if summary["skills_dropped"]:
+            print(
+                f"  WARNING: {summary['skills_dropped']} skill documents dropped "
+                "(their concept nodes no longer exist under this seed)",
+                file=sys.stderr,
+            )
+        print("\nDemo accounts (password: $" + DEMO_PASSWORD_ENV + "):")
+        print(format_demo_accounts(await fetch_demo_accounts(conn)))
     finally:
         await conn.close()
 
@@ -1182,4 +1260,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Seed all 4 demo courses")
     parser.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
     args = parser.parse_args()
-    asyncio.run(main(args.seed))
+    try:
+        asyncio.run(main(args.seed))
+    except MissingDemoPasswordError as exc:
+        sys.exit(f"seed failed: {exc}")

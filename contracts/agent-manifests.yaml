@@ -3,8 +3,8 @@
 # and agents approved but not yet built (status: planned).
 # DO NOT EDIT without a T-C-* contract-change task.
 # Each agent has a local copy at src/agents/<name>/manifest.yaml that CI verifies matches.
-# mcp_tools must equal _AGENT_TOOLS in src/engine/agents/runner.py until T-E-106 deletes it;
-# tools are described in mcp-tools.md.
+# mcp_tools is the live allow-list: the runner offers exactly these tools and the tool
+# gateway refuses any other (spec.md §5.2 step 1); tools are described in mcp-tools.md.
 # planned_mcp_tools: approved for the agent but never offered to the model until moved into
 #   mcp_tools. Each is in mcp-tools.md "Planned (Round 2)" or already served.
 # status: planned agents are not routable and have no live mcp_tools.
@@ -66,7 +66,7 @@ agents:
     description: |
       Drafts course structures — outcomes, modules, standards alignment, syllabi.
       Always produces drafts for faculty approval.
-    persona_scope: [faculty, instructional_designer]
+    persona_scope: [faculty, instructional_designer, admin, program_lead]
     model: claude-sonnet-4-6
     requires_pii: []
     inputs:
@@ -143,7 +143,7 @@ agents:
     version: "0.1.0"
     description: |
       Generates and validates assessments — quiz/exam questions, rubrics, item analysis.
-    persona_scope: [faculty, instructional_designer]
+    persona_scope: [faculty, instructional_designer, admin, advisor, program_lead]
     model: claude-sonnet-4-6
     requires_pii: []
     inputs:
@@ -184,7 +184,7 @@ agents:
     description: |
       Drafts rubric-based scores and feedback for student submissions.
       Always drafts; never commits without explicit faculty approval.
-    persona_scope: [faculty]
+    persona_scope: [faculty, admin]
     model: claude-sonnet-4-6
     requires_pii: [display_name]            # needed for personalized feedback
     inputs:
@@ -213,7 +213,7 @@ agents:
     description: |
       Detects at-risk students with explanations and recommends interventions.
       Explains every risk score. Recommends — never acts.
-    persona_scope: [faculty, advisor, admin]
+    persona_scope: [faculty, advisor, admin, program_lead]
     model: claude-sonnet-4-6
     requires_pii: [display_name]
     inputs:
@@ -249,7 +249,7 @@ agents:
     description: |
       Academic planning — degree audit, course recommendations, prerequisites,
       pathway mapping. In AI-native deployment also serves as Learning Path Navigator.
-    persona_scope: [student, advisor, faculty]
+    persona_scope: [student, advisor, faculty, admin, program_lead]
     model: claude-sonnet-4-6
     requires_pii: [email, display_name]    # for personalized audit
     inputs:
@@ -282,7 +282,7 @@ agents:
     description: |
       WCAG compliance scanning and content adaptation — alt-text, captions,
       readability simplification, translation.
-    persona_scope: [faculty, instructional_designer, student, admin]
+    persona_scope: [faculty, instructional_designer, student, admin, advisor, program_lead]
     model: claude-sonnet-4-6
     requires_pii: []
     inputs:
@@ -310,7 +310,7 @@ agents:
     description: |
       Answers natural-language questions over learning analytics.
       Produces narratives and charts with caveats.
-    persona_scope: [faculty, admin, advisor]
+    persona_scope: [faculty, admin, advisor, program_lead]
     model: claude-sonnet-4-6
     requires_pii: []                       # aggregate data only
     inputs:
@@ -342,7 +342,7 @@ agents:
     description: |
       Drafts and sends messages — announcements, reminders, personalized outreach.
       Never sends without explicit human approval.
-    persona_scope: [faculty, advisor, admin]
+    persona_scope: [faculty, advisor, admin, program_lead]
     model: claude-haiku-4-5-20251001
     requires_pii: [display_name, email]
     inputs:
@@ -363,7 +363,6 @@ agents:
     mcp_tools:
       - roster.list_by_course
       - roster.get_student_context
-    planned_mcp_tools:                     # served today; wired with the gateway (T-E-106, T-E-107)
       - communications.draft_message
       - communications.send_message        # write-gated, in-app channels only (spec.md §5.3)
     composable_with: []

@@ -1,6 +1,6 @@
 import { EventSourceParserStream } from "eventsource-parser/stream";
 import { parseEvent, type EventEnvelope } from "./events";
-import { API_BASE } from "./api";
+import { apiFetch } from "./api";
 
 export interface SSEClientOptions {
   sessionId: string;
@@ -67,15 +67,21 @@ export function createSSEClient(options: SSEClientOptions): () => void {
       ...(sinceSequence > 1 && { since_sequence: String(sinceSequence) }),
     });
 
-    const url = `${API_BASE}/api/stream?${params}`;
-
     try {
       abortController = new AbortController();
-      const response = await fetch(url, {
+      // fetch-based rather than EventSource; apiFetch sends the session cookie
+      // (the equivalent of EventSource withCredentials) and handles 401.
+      const response = await apiFetch(`/api/stream?${params}`, {
         signal: abortController.signal,
         headers: { Accept: "text/event-stream" },
       });
 
+      if (response.status === 403) {
+        closed = true;
+        onError?.(new Error("You don't have access to this conversation."));
+        onClose?.();
+        return;
+      }
       if (!response.ok) {
         throw new Error(`SSE connection failed: ${response.status}`);
       }

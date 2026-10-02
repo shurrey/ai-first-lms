@@ -39,11 +39,43 @@ jobs:
 
   test-engine:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: lms
+          POSTGRES_PASSWORD: lms_dev
+          POSTGRES_DB: lms_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U lms -d lms_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # DB-backed engine tests skip unless this is set; unit tests use fakes and ignore it.
+      ENGINE_TEST_DATABASE_URL: postgresql://lms:lms_dev@localhost:5432/lms_test
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --locked --extra dev
+      # Migrations are checked against contracts/db-schema.sql by contract-invariants,
+      # so building the test DB with them gives the contract schema.
+      - name: Apply schema (alembic upgrade head)
+        run: uv run alembic upgrade head
+        env:
+          LMS_DATABASE_URL: postgresql://lms:lms_dev@localhost:5432/lms_test
       - run: uv run pytest src/engine -q
+
+  test-platform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked --extra dev
+      - name: Scenario executor unit tests
+        run: uv run pytest src/platform/smoke-tests -q
 
   test-agents:
     runs-on: ubuntu-latest
@@ -74,6 +106,15 @@ jobs:
       LMS_DATABASE_URL: postgresql://lms:lms_dev@localhost:5432/lms_db
     steps:
       - uses: actions/checkout@v4
+      # The seed refuses to run without it.
+      - name: Set SEED_DEMO_PASSWORD
+        # Repo secret when set (absent on fork PRs), otherwise a fresh value per run.
+        env:
+          SECRET_SEED_DEMO_PASSWORD: ${{ secrets.SEED_DEMO_PASSWORD }}
+        run: |
+          pw="${SECRET_SEED_DEMO_PASSWORD:-$(openssl rand -hex 24)}"
+          echo "::add-mask::$pw"
+          echo "SEED_DEMO_PASSWORD=$pw" >> "$GITHUB_ENV"
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --locked --extra dev
       # The session fixture seeds before any test runs, so the schema must exist first.
@@ -82,13 +123,28 @@ jobs:
         run: PGPASSWORD=lms_dev psql -v ON_ERROR_STOP=1 -h localhost -U lms -d lms_db -f contracts/db-schema.sql
       - run: uv run pytest src/data_mcp -q
 
-  playwright-smoke:
+  playwright-smoke-app:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each app's playwright.config.ts starts its own dev server (ultra 3110, chat 3120).
+        app: [ultra-frontend, frontend]
+    name: playwright-smoke-app (${{ matrix.app }})
     defaults:
       run:
-        working-directory: src/ultra-frontend
+        working-directory: src/${{ matrix.app }}
     steps:
       - uses: actions/checkout@v4
+      # Read by the login(page, username) fixture; smoke specs mock the API so any value works.
+      - name: Set SEED_DEMO_PASSWORD
+        # Repo secret when set (absent on fork PRs), otherwise a fresh value per run.
+        env:
+          SECRET_SEED_DEMO_PASSWORD: ${{ secrets.SEED_DEMO_PASSWORD }}
+        run: |
+          pw="${SECRET_SEED_DEMO_PASSWORD:-$(openssl rand -hex 24)}"
+          echo "::add-mask::$pw"
+          echo "SEED_DEMO_PASSWORD=$pw" >> "$GITHUB_ENV"
       - uses: pnpm/action-setup@v4
         with:
           version: 10.33.0
@@ -96,7 +152,7 @@ jobs:
         with:
           node-version: 20
           cache: pnpm
-          cache-dependency-path: src/ultra-frontend/pnpm-lock.yaml
+          cache-dependency-path: src/${{ matrix.app }}/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps chromium
       # Smoke specs mock the API routes, so no backend is started.
@@ -106,16 +162,39 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-report
+          name: playwright-report-${{ matrix.app }}
           path: |
-            src/ultra-frontend/playwright-report
-            src/ultra-frontend/test-results
+            src/${{ matrix.app }}/playwright-report
+            src/${{ matrix.app }}/test-results
           if-no-files-found: ignore
+
+  # Matrix jobs report as "playwright-smoke-app (<app>)"; this job keeps the stable
+  # required-check name and fails unless every app passed.
+  playwright-smoke:
+    runs-on: ubuntu-latest
+    needs: [playwright-smoke-app]
+    if: always()
+    steps:
+      - name: All smoke suites passed
+        run: |
+          if [ "${{ needs.playwright-smoke-app.result }}" != "success" ]; then
+            echo "::error::playwright-smoke-app result: ${{ needs.playwright-smoke-app.result }}"
+            exit 1
+          fi
 
   compose-config:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # SEED_DEMO_PASSWORD is a required variable; compose rejects the file without it.
+      - name: Set SEED_DEMO_PASSWORD
+        # Repo secret when set (absent on fork PRs), otherwise a fresh value per run.
+        env:
+          SECRET_SEED_DEMO_PASSWORD: ${{ secrets.SEED_DEMO_PASSWORD }}
+        run: |
+          pw="${SECRET_SEED_DEMO_PASSWORD:-$(openssl rand -hex 24)}"
+          echo "::add-mask::$pw"
+          echo "SEED_DEMO_PASSWORD=$pw" >> "$GITHUB_ENV"
       - name: Validate docker-compose.yaml
         run: docker compose config -q
       - name: Check smoke test scripts are executable

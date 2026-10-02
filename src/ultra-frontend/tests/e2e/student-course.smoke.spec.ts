@@ -1,15 +1,13 @@
 import { expect, test } from "@playwright/test";
-import { CS101_ID, mockEngine } from "./fake-api";
+import { CS101_ID, EMMA_ME, mockEngine, setSessionCookies } from "./fake-api";
 
-test("student course page renders the mastery map", async ({ page }) => {
-  const unhandled = await mockEngine(page);
+test("student course page renders the mastery map", async ({ page, context, baseURL }) => {
+  await setSessionCookies(context, baseURL!);
+  const engine = await mockEngine(page, { me: EMMA_ME });
 
   await page.goto(`/course/${CS101_ID}`);
 
-  // Persona is client state defaulting to faculty; switch through the sidebar like a user would.
-  await page.getByRole("button", { name: /Dr\. Maria Torres/ }).click();
-  await page.getByRole("button", { name: /Emma Smith/ }).click();
-
+  await expect(page.getByRole("button", { name: /Account menu: Emma Smith, Student/ })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Your Mastery Progress" })).toBeVisible();
   await expect(page.getByText("of 4 concepts")).toBeVisible();
   await expect(page.getByText("Variables and Assignment")).toBeVisible();
@@ -18,5 +16,5 @@ test("student course page renders the mastery map", async ({ page }) => {
   await expect(page.getByText("You learn fastest from worked examples.")).toBeVisible();
   await expect(page.locator(".animate-pulse")).toHaveCount(0);
 
-  expect(unhandled).toEqual([]);
+  expect(engine.unhandled).toEqual([]);
 });

@@ -1,7 +1,8 @@
 id: 7
 name: "Advising: next semester course recommendations"
-persona: student
-course_id: "cs-101"
+login_as: "emma.smith@student.edu"
+active_role: student
+course_id: "cs101"
 
 user_turns:
   - message: "What should I take next semester?"

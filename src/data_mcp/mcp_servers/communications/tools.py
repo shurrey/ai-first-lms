@@ -10,6 +10,9 @@ import asyncpg
 
 from data_mcp.mcp_base import ToolDef
 
+# Email delivery is out of scope this round (spec.md §0.4); only in-app channels send.
+SENDABLE_CHANNELS = ("inbox", "announcement")
+
 
 def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
     """Return all communications server tool definitions."""
@@ -57,13 +60,18 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
 
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT id, audience, is_draft FROM messages WHERE id = $1",
+                "SELECT id, channel, audience, is_draft FROM messages WHERE id = $1",
                 uuid.UUID(draft_id),
             )
             if not row:
                 return {"error": "Draft not found"}
             if not row["is_draft"]:
                 return {"error": "Message already sent"}
+            if row["channel"] not in SENDABLE_CHANNELS:
+                return {
+                    "error": f"Channel {row['channel']!r} cannot be sent; "
+                    "only inbox and announcement messages are delivered."
+                }
 
             sent_at = datetime.now(timezone.utc)
             await conn.execute(

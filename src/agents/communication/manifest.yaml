@@ -12,6 +12,7 @@ agent:
   - faculty
   - advisor
   - admin
+  - program_lead
   model: claude-haiku-4-5-20251001
   requires_pii:
   - display_name
@@ -55,7 +56,6 @@ agent:
   mcp_tools:
   - roster.list_by_course
   - roster.get_student_context
-  planned_mcp_tools:
   - communications.draft_message
   - communications.send_message
   composable_with: []

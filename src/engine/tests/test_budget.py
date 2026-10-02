@@ -13,9 +13,9 @@ def test_under_budget():
         max_wall_time_ms=120_000, max_agent_invocations=8,
     )
     tracker = BudgetTracker(config)
-    tracker.add_tokens(5000)
-    tracker.add_tool_call()
-    tracker.add_agent_invocation()
+    tracker.charge(tokens=5000)
+    tracker.charge(tool_calls=1)
+    tracker.charge(agent_invocations=1)
 
     result = tracker.check()
     assert result.exceeded is False
@@ -27,7 +27,7 @@ def test_token_limit_exceeded():
         max_wall_time_ms=120_000, max_agent_invocations=8,
     )
     tracker = BudgetTracker(config)
-    tracker.add_tokens(1500)
+    tracker.charge(tokens=1500)
 
     result = tracker.check()
     assert result.exceeded is True
@@ -40,9 +40,9 @@ def test_tool_call_limit_exceeded():
         max_wall_time_ms=120_000, max_agent_invocations=8,
     )
     tracker = BudgetTracker(config)
-    tracker.add_tool_call()
-    tracker.add_tool_call()
-    tracker.add_tool_call()
+    tracker.charge(tool_calls=1)
+    tracker.charge(tool_calls=1)
+    tracker.charge(tool_calls=1)
 
     result = tracker.check()
     assert result.exceeded is True
@@ -55,9 +55,9 @@ def test_agent_invocation_limit_exceeded():
         max_wall_time_ms=120_000, max_agent_invocations=2,
     )
     tracker = BudgetTracker(config)
-    tracker.add_agent_invocation()
-    tracker.add_agent_invocation()
-    tracker.add_agent_invocation()
+    tracker.charge(agent_invocations=1)
+    tracker.charge(agent_invocations=1)
+    tracker.charge(agent_invocations=1)
 
     result = tracker.check()
     assert result.exceeded is True
@@ -85,10 +85,10 @@ def test_summary():
         max_wall_time_ms=120_000, max_agent_invocations=8,
     )
     tracker = BudgetTracker(config)
-    tracker.add_tokens(3000)
-    tracker.add_tool_call()
-    tracker.add_tool_call()
-    tracker.add_agent_invocation()
+    tracker.charge(tokens=3000)
+    tracker.charge(tool_calls=1)
+    tracker.charge(tool_calls=1)
+    tracker.charge(agent_invocations=1)
 
     summary = tracker.summary()
     assert summary["tokens_used"] == 3000
@@ -101,6 +101,14 @@ def test_budget_code():
     config = BudgetConfig(max_tokens=1, max_tool_calls=100,
                           max_wall_time_ms=120_000, max_agent_invocations=8)
     tracker = BudgetTracker(config)
-    tracker.add_tokens(100)
+    tracker.charge(tokens=100)
     result = tracker.check()
     assert result.code == "budget_exceeded"
+
+
+def test_charge_returns_the_check_after_adding_usage():
+    tracker = BudgetTracker(BudgetConfig(max_tokens=100, max_tool_calls=1,
+                                         max_wall_time_ms=120_000, max_agent_invocations=1))
+
+    assert tracker.charge(tokens=100, tool_calls=1, agent_invocations=1).exceeded is False
+    assert tracker.charge(tokens=1).exceeded is True

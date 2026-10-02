@@ -1,8 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useSession } from "@/lib/session-context";
-import { API_BASE } from "@/lib/api";
+import { useAuth } from "@/lib/auth-context";
+import { apiJson } from "@/lib/api";
+import { useApiGet } from "@/lib/use-api";
 import type { BriefCardPayload } from "@/lib/events";
 import { sendPrompt, SectionLabel, Pill, StatRow } from "./shared";
 
@@ -28,50 +30,50 @@ interface StrugglingStudent {
 }
 
 export function FacultyPanel({ data }: { data: BriefCardPayload | null }) {
-  const { courseUuid, personId } = useSession();
-  const [pendingCreds, setPendingCreds] = useState<PendingCredential[]>([]);
+  const { courseUuid } = useSession();
+  const { me } = useAuth();
+  const canApprove = me.capabilities.badge_approve !== undefined;
+  const reviewerId = me.person.id;
+  const pendingQ = useApiGet<{ pending: PendingCredential[] }>(
+    canApprove && courseUuid && courseUuid !== "all"
+      ? `/api/pending-credentials/${encodeURIComponent(courseUuid)}`
+      : null
+  );
+  const [approvedIds, setApprovedIds] = useState<ReadonlySet<string>>(new Set());
   const [approving, setApproving] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (!courseUuid || courseUuid === "all") return;
-    fetch(`${API_BASE}/api/pending-credentials/${courseUuid}`)
-      .then((r) => r.json())
-      .then((d) => setPendingCreds(d.pending || []))
-      .catch(() => {});
-  }, [courseUuid]);
+  const [approveError, setApproveError] = useState<string | null>(null);
+  const pendingCreds = (pendingQ.data?.pending ?? []).filter((c) => !approvedIds.has(c.id));
+  const markApproved = (ids: string[]) =>
+    setApprovedIds((prev) => new Set([...prev, ...ids]));
 
   const handleApprove = async (pendingId: string) => {
-    if (!personId) return;
     setApproving(pendingId);
+    setApproveError(null);
     try {
-      await fetch(`${API_BASE}/api/approve-credential/${pendingId}`, {
+      await apiJson(`/api/approve-credential/${encodeURIComponent(pendingId)}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reviewer_id: personId }),
+        json: { reviewer_id: reviewerId },
       });
-      setPendingCreds((prev) => prev.filter((c) => c.id !== pendingId));
+      markApproved([pendingId]);
     } catch {
-      // ignore
+      setApproveError("Couldn't approve that badge. Please try again.");
     } finally {
       setApproving(null);
     }
   };
 
   const handleBulkApprove = async () => {
-    if (!personId || pendingCreds.length === 0) return;
+    if (pendingCreds.length === 0) return;
     setApproving("bulk");
+    setApproveError(null);
     try {
-      await fetch(`${API_BASE}/api/approve-credentials/bulk`, {
+      await apiJson("/api/approve-credentials/bulk", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          pending_ids: pendingCreds.map((c) => c.id),
-          reviewer_id: personId,
-        }),
+        json: { pending_ids: pendingCreds.map((c) => c.id), reviewer_id: reviewerId },
       });
-      setPendingCreds([]);
+      markApproved(pendingCreds.map((c) => c.id));
     } catch {
-      // ignore
+      setApproveError("Couldn't approve those badges. Please try again.");
     } finally {
       setApproving(null);
     }
@@ -128,7 +130,13 @@ export function FacultyPanel({ data }: { data: BriefCardPayload | null }) {
         </section>
       )}
 
-      {pendingCreds.length > 0 && (
+      {approveError && (
+        <p role="alert" className="text-xs text-destructive">
+          {approveError}
+        </p>
+      )}
+
+      {canApprove && pendingCreds.length > 0 && (
         <section>
           <div className="flex items-center justify-between mb-1.5">
             <SectionLabel>Pending Badges ({pendingCreds.length})</SectionLabel>

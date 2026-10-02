@@ -1,10 +1,15 @@
-"""Budget guardrail — per-turn caps on tokens, tool calls, and wall time (SPEC §4.5)."""
+"""Budget guardrail — per-turn caps on tokens, tool calls, and wall time (SPEC-v1 §4.5).
+
+The ToolGateway is the only caller that halts a turn on an exceeded cap (spec.md §5.2 step 6).
+"""
 
 from __future__ import annotations
 
 import logging
 import os
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -38,6 +43,55 @@ class BudgetExceeded:
     code: str = "budget_exceeded"
 
 
+class BudgetExceededError(Exception):  # noqa: N818
+    """Raised by the gateway when a charge takes the turn over a cap; the turn hard-stops."""
+
+    code = "budget_exceeded"
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason  # names the cap and the counts; no user content
+
+
+class ActiveClock:
+    """Monotonic elapsed time that excludes spans spent waiting on a person.
+
+    Pauses nest (parallel steps may each wait on an approval); time counts again only
+    once every pause has ended. Not thread-safe; one event loop only.
+    """
+
+    def __init__(self) -> None:
+        self._start = time.monotonic()
+        self._paused_total = 0.0
+        self._paused_at: float | None = None
+        self._depth = 0
+
+    @property
+    def paused(self) -> bool:
+        return self._depth > 0
+
+    @property
+    def elapsed_s(self) -> float:
+        now = time.monotonic()
+        paused = self._paused_total
+        if self._paused_at is not None:
+            paused += now - self._paused_at
+        return now - self._start - paused
+
+    @contextmanager
+    def pause(self) -> Iterator[None]:
+        if self._depth == 0:
+            self._paused_at = time.monotonic()
+        self._depth += 1
+        try:
+            yield
+        finally:
+            self._depth -= 1
+            if self._depth == 0 and self._paused_at is not None:
+                self._paused_total += time.monotonic() - self._paused_at
+                self._paused_at = None
+
+
 class BudgetTracker:
     """Tracks resource usage within a single turn and checks against caps."""
 
@@ -46,20 +100,20 @@ class BudgetTracker:
         self.tokens_used: int = 0
         self.tool_calls_made: int = 0
         self.agent_invocations: int = 0
-        self._start_time: float = time.monotonic()
+        self.clock = ActiveClock()  # wall time excludes time waiting for a human approval
 
-    def add_tokens(self, count: int) -> None:
-        self.tokens_used += count
-
-    def add_tool_call(self) -> None:
-        self.tool_calls_made += 1
-
-    def add_agent_invocation(self) -> None:
-        self.agent_invocations += 1
+    def charge(
+        self, *, tokens: int = 0, tool_calls: int = 0, agent_invocations: int = 0
+    ) -> BudgetExceeded:
+        """Add usage, then check every cap (wall time included)."""
+        self.tokens_used += tokens
+        self.tool_calls_made += tool_calls
+        self.agent_invocations += agent_invocations
+        return self.check()
 
     @property
     def wall_time_ms(self) -> float:
-        return (time.monotonic() - self._start_time) * 1000
+        return self.clock.elapsed_s * 1000
 
     def check(self) -> BudgetExceeded:
         """Check if any budget cap has been exceeded."""

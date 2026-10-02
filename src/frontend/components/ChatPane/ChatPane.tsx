@@ -10,11 +10,19 @@ import { MessageBubble, type ChatMessage } from "./MessageBubble";
 import { ChatInput } from "./ChatInput";
 import { ClarifyPrompt } from "./ClarifyPrompt";
 import { ErrorDisplay } from "./ErrorDisplay";
+import { ApprovalGate } from "@/components/ApprovalGate";
+import { CanvasRouter } from "@/components/Canvas/CanvasRouter";
 
 export function ChatPane() {
   const { sessionId } = useSession();
   const turnState = useTurn();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [decidedApprovalId, setDecidedApprovalId] = useState<string | null>(null);
+  const pendingApproval =
+    turnState.approval && turnState.approval.approval_id !== decidedApprovalId
+      && turnState.status === "streaming"
+      ? turnState.approval
+      : null;
 
   // Track which turn IDs we've already rendered messages for
   const renderedRef = useRef(new Set<string>());
@@ -170,6 +178,27 @@ export function ChatPane() {
           />
         )}
       </div></div>
+
+      {pendingApproval && (
+        <section aria-label="Approval needed" className="shrink-0 px-4 pb-2">
+          <div className="mx-auto max-w-2xl space-y-3">
+            <CanvasRouter
+              artifact={{
+                artifact_id: pendingApproval.approval_id,
+                type: pendingApproval.artifact_type,
+                data: pendingApproval.preview,
+              }}
+              status="awaiting_approval"
+            />
+            <ApprovalGate
+              approvalId={pendingApproval.approval_id}
+              action={pendingApproval.action}
+              preview={pendingApproval.preview}
+              onDecided={() => setDecidedApprovalId(pendingApproval.approval_id)}
+            />
+          </div>
+        </section>
+      )}
 
       {/* Clarification prompt */}
       {turnState.clarify && (

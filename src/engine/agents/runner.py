@@ -6,19 +6,32 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Coroutine
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Protocol
 
 import anthropic
 from opentelemetry import trace
 
-from engine.guardrails.budget import BudgetTracker
-from engine.guardrails.injection import INJECTION_GUARDRAIL_INSTRUCTION, wrap_tool_text
+from engine.guardrails.approval import ApprovalTimeoutError
+from engine.guardrails.budget import ActiveClock, BudgetExceededError
+from engine.guardrails.gateway import GatewayContext, ToolGateway
+from engine.guardrails.injection import (
+    INJECTION_GUARDRAIL_INSTRUCTION,
+    escape_delimiters,
+    wrap_user_content,
+)
+from engine.guardrails.registry import get_manifest_registry
 from engine.http import make_anthropic_client
 from engine.logging_config import get_logger
 from engine.telemetry import span_tool
 
 logger = logging.getLogger(__name__)
+
+# Set on a tool_calls record whose events already went to the live event sink, so
+# dispatch does not emit them a second time.
+EMITTED_LIVE = "emitted_live"
 log = get_logger(__name__)
 
 # Map agent names to their source directories (for loading system prompts)
@@ -39,6 +52,13 @@ _MCP_SERVERS: dict[str, str] = {
 
 # Max tool-use iterations to prevent infinite loops
 _MAX_TOOL_ROUNDS = 10
+# Backstop per agent run; time spent waiting on a human approval is not counted.
+_AGENT_TIMEOUT_S = 90.0
+
+APPROVAL_TIMEOUT_MESSAGE = (
+    "Nobody approved the pending action in time, so it was not carried out. "
+    "Ask again when you're ready to review it."
+)
 
 _TOOL_USE_ADDENDUM = """
 
@@ -196,71 +216,34 @@ def _mcp_tools_to_claude_tools(mcp_tool_names: list[str]) -> list[dict[str, Any]
     return tools
 
 
-# Map from agent name → list of MCP tools they can use (from manifests)
-_AGENT_TOOLS: dict[str, list[str]] = {
-    "tutor": [
-        "content.retrieve", "content.search", "content.get_skill",
-        "roster.get_student_context",
-        "assessments.list_recent_evidence",
-        "graph.mastery_map", "graph.neighbors", "graph.prerequisites",
-        "attestations.get_student_attestations", "attestations.attest",
-        "roster.get_learner_profile",
-        "roster.get_goals", "roster.set_goal",
-    ],
-    "course_architect": [
-        "standards.lookup", "content.library_search", "content.save_draft",
-        "content.get_skill", "content.save_skill", "content.list_skills",
-    ],
-    "content_generator": [
-        "content.retrieve", "content.search", "content.save_draft",
-        "content.get_skill", "content.save_skill", "content.list_skills",
-    ],
-    "assessment": [
-        "assessments.create_question", "assessments.search_bank",
-        "assessments.get_rubric", "assessments.list_recent_evidence",
-        "assessments.list_pending_credentials", "assessments.get_credential_evidence",
-        "assessments.approve_credential", "assessments.list_issued_credentials",
-        "roster.get_student", "roster.list_by_course",
-        "graph.mastery_map", "attestations.get_student_attestations",
-        "roster.list_student_sessions",
-    ],
-    "grading_assistant": [
-        "assessments.get_submission", "assessments.get_rubric",
-        "assessments.draft_grade", "assessments.commit_grade",
-    ],
-    "early_alert": [
-        "roster.get_student_context", "assessments.list_recent_evidence",
-        "roster.list_by_course",
-        "analytics.query", "analytics.trend", "analytics.cohort_compare",
-        "sis.get_transcript", "sis.catalog_search",
-        "graph.mastery_map", "attestations.get_student_attestations",
-    ],
-    "advising": [
-        "roster.get_student_context", "roster.get_student",
-        "sis.get_transcript", "sis.degree_audit", "sis.catalog_search",
-    ],
-    "accessibility": [
-        "content.retrieve", "content.search",
-    ],
-    "engagement_analyst": [
-        "roster.list_by_course", "assessments.list_recent_evidence",
-        "analytics.query", "analytics.trend", "analytics.cohort_compare",
-    ],
-    "communication": [
-        "roster.list_by_course", "roster.get_student_context",
-    ],
-    "learning_analyst": [
-        "roster.get_learner_profile", "roster.update_learner_profile",
-        "roster.get_recent_turns", "roster.list_student_sessions",
-        "roster.get_session_transcript",
-        "attestations.get_student_attestations",
-        "roster.update_student_insights", "roster.update_session_summary",
-        "roster.save_concept_review",
-    ],
-}
+def _agent_tool_names(agent_name: str) -> list[str]:
+    """The agent's live manifest `mcp_tools`; raises KeyError for an agent with no manifest."""
+    return list(get_manifest_registry().get_manifest(agent_name).mcp_tools)
+
+
+async def _execute_mcp(tool_name: str, arguments: dict[str, Any]) -> str:
+    """Gateway executor; resolves `_call_mcp_tool` at call time so tests can replace it."""
+    return await _call_mcp_tool(tool_name, arguments)
+
+
+def default_tool_gateway() -> ToolGateway:
+    """A gateway with no scope directory or provenance store; staff scope checks deny."""
+    return ToolGateway(_execute_mcp)
 
 
 _AGENT_META_KEYS = {"response_markdown", "narrative_md", "citations", "follow_ups", "suggested_nodes", "charts", "caveats", "query_used"}
+
+
+def _requester_note(requester: dict[str, str] | None) -> str:
+    """`requester: {display_name, active_role}` line for the context prefix; "" when absent.
+
+    The display name comes from the DB, so it is wrapped as user content.
+    """
+    if not requester:
+        return ""
+    name = wrap_user_content(requester.get("display_name", ""), "auth.requester")
+    role = escape_delimiters(requester.get("active_role", ""))
+    return f"\nrequester: {{display_name: {name}, active_role: {role}}}"
 
 
 def _parse_agent_output(text: str) -> dict[str, Any]:
@@ -348,10 +331,14 @@ class ClaudeAgentRunner:
     }
 
     def __init__(
-        self, model: str = "claude-sonnet-4-6", client: anthropic.AsyncAnthropic | None = None
+        self,
+        model: str = "claude-sonnet-4-6",
+        client: anthropic.AsyncAnthropic | None = None,
+        gateway: ToolGateway | None = None,
     ) -> None:
         self._client = client if client is not None else make_anthropic_client()
         self._model = model
+        self._gateway = gateway or default_tool_gateway()
         self._prompt_cache: dict[str, str] = {}
 
     def _load_system_prompt(self, agent_name: str) -> str:
@@ -373,28 +360,42 @@ class ClaudeAgentRunner:
         self, agent_name: str, inputs: dict[str, Any]
     ) -> dict[str, Any]:
         on_event = inputs.pop("_on_event", None)
-        budget: BudgetTracker | None = inputs.pop("_budget", None)
+        gateway: ToolGateway = inputs.pop("_gateway", None) or self._gateway
+        tool_ctx: GatewayContext = inputs.pop("_tool_context", None) or GatewayContext(
+            auth=None, session_id=inputs.get("session_id", ""),
+        )
+        agent_clock = ActiveClock()
+        tool_ctx = replace(tool_ctx, agent_clock=agent_clock)
         logger.info("ClaudeAgentRunner: invoking %s with tools", agent_name)
         start = time.monotonic()
+        try:
+            gateway.charge(tool_ctx, agent_name, agent_invocations=1)
+        except BudgetExceededError:
+            return _budget_exceeded_result(0.0, 0, [])
 
         await _ensure_tool_schemas()
         base_prompt = self._load_system_prompt(agent_name)
         system_prompt = base_prompt + _TOOL_USE_ADDENDUM + INJECTION_GUARDRAIL_INSTRUCTION
-        message = inputs.get("message", "")
+        message = gateway.redact_context(agent_name, inputs.get("message", ""))
         persona = inputs.get("persona", "student")
         person_id = inputs.get("person_id", "")
         course_id = inputs.get("course_id", "")
         session_id = inputs.get("session_id", "")
-        conversation = inputs.get("conversation", [])
+        conversation = [
+            {**turn, "content": gateway.redact_context(agent_name, turn.get("content", ""))}
+            for turn in inputs.get("conversation", [])
+        ]
 
         # Build context prefix — tell the agent who they are and who they're NOT
         persona_note = ""
-        if persona in ("advisor", "admin", "faculty"):
+        if persona in ("advisor", "admin", "faculty", "program_lead"):
             persona_note = (
                 f"\nIMPORTANT: Person ID {person_id} is YOUR account (the {persona}), NOT a student. "
                 f"Do NOT look up evidence or transcripts for this ID — it will return {persona} data, not student data. "
                 f"When asked about a specific student, find their ID first via roster tools, then use THEIR ID."
             )
+
+        requester_note = _requester_note(inputs.get("requester"))
 
         if course_id == "all":
             context_prefix = (
@@ -406,15 +407,16 @@ class ClaudeAgentRunner:
                 f"- Use sis.catalog_search() to discover available courses\n"
                 f"- Use roster.list_by_course with specific course UUIDs (discover them first)\n"
                 f"- Use assessments.list_recent_evidence(person_id) for a specific student"
+                f"{requester_note}"
             )
         else:
             context_prefix = (
                 f"[Persona: {persona} | Your ID (do not use for student lookups): {person_id} | Course ID: {course_id}]"
                 f"{persona_note}"
+                f"{requester_note}"
             )
 
-        # Get this agent's allowed tools
-        mcp_tool_names = _AGENT_TOOLS.get(agent_name, [])
+        mcp_tool_names = _agent_tool_names(agent_name)
         claude_tools = _mcp_tools_to_claude_tools(mcp_tool_names)
 
         # Tool name mapping: Claude uses underscores, MCP uses dots
@@ -438,19 +440,18 @@ class ClaudeAgentRunner:
             messages.append({"role": "user", "content": message})
         else:
             messages.append({"role": "user", "content": f"{context_prefix}\n\n{message}"})
-        total_input_tokens = 0
-        total_output_tokens = 0
         tool_call_records: list[dict[str, Any]] = []
 
         try:
-            return await asyncio.wait_for(
+            return await _with_backstop(
                 self._tool_loop(
                     agent_name, system_prompt, messages, claude_tools, tool_name_map,
-                    tool_call_records, start, on_event, session_id, budget,
+                    tool_call_records, start, gateway, tool_ctx, on_event, session_id,
                 ),
-                timeout=90.0,
+                agent_clock,
+                _AGENT_TIMEOUT_S,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             elapsed_ms = (time.monotonic() - start) * 1000
             logger.warning("Agent %s timed out after %.0fms", agent_name, elapsed_ms)
             return {
@@ -480,19 +481,71 @@ class ClaudeAgentRunner:
         tool_name_map: dict[str, str],
         tool_call_records: list[dict[str, Any]],
         start: float,
+        gateway: ToolGateway,
+        tool_ctx: GatewayContext,
         on_event: Any = None,
         session_id: str = "",
-        budget: BudgetTracker | None = None,
     ) -> dict[str, Any]:
-        total_input_tokens = 0
-        total_output_tokens = 0
-        budget_reason = ""
+        usage = [0, 0]
+        final_text: str | None
+        try:
+            final_text = await self._tool_rounds(
+                agent_name, system_prompt, messages, claude_tools, tool_name_map,
+                tool_call_records, gateway, tool_ctx, on_event, session_id, usage,
+            )
+        except BudgetExceededError:
+            final_text = None
+        except ApprovalTimeoutError:
+            log.warning("approval_timed_out", agent=agent_name, turn_id=tool_ctx.turn_id)
+            return {
+                "output": {"error": "approval_timeout"},
+                "cost_usd": 0.0,
+                "tokens": usage[0] + usage[1],
+                "success": False,
+                "tool_calls": tool_call_records,
+                "halt": {"code": "timeout", "message": APPROVAL_TIMEOUT_MESSAGE},
+            }
+        total_input_tokens, total_output_tokens = usage
 
+        elapsed_ms = (time.monotonic() - start) * 1000
+        total_tokens = total_input_tokens + total_output_tokens
+        cost_usd = (total_input_tokens * 3.0 / 1_000_000) + (total_output_tokens * 15.0 / 1_000_000)
+
+        logger.info(
+            "Agent %s done in %.0fms (%d tokens, %d tool calls, $%.4f)",
+            agent_name, elapsed_ms, total_tokens, len(tool_call_records), cost_usd,
+        )
+
+        if final_text is None:
+            return _budget_exceeded_result(cost_usd, total_tokens, tool_call_records)
+
+        return {
+            "output": _parse_agent_output(final_text),
+            "cost_usd": round(cost_usd, 6),
+            "tokens": total_tokens,
+            "success": True,
+            "tool_calls": tool_call_records,
+        }
+
+    async def _tool_rounds(
+        self,
+        agent_name: str,
+        system_prompt: str,
+        messages: list[dict[str, Any]],
+        claude_tools: list[dict[str, Any]],
+        tool_name_map: dict[str, str],
+        tool_call_records: list[dict[str, Any]],
+        gateway: ToolGateway,
+        tool_ctx: GatewayContext,
+        on_event: Any,
+        session_id: str,
+        usage: list[int],
+    ) -> str:
+        """Model/tool rounds until a final text; `usage` accumulates [input, output] tokens.
+
+        Raises BudgetExceededError from the gateway, which ends the turn.
+        """
         for _round in range(_MAX_TOOL_ROUNDS):
-                if budget is not None and (exceeded := budget.check()).exceeded:
-                    budget_reason = exceeded.reason
-                    break
-
                 response = await self._client.messages.create(
                     model=self._model,
                     system=system_prompt,
@@ -501,16 +554,15 @@ class ClaudeAgentRunner:
                     max_tokens=2048,
                 )
 
-                total_input_tokens += response.usage.input_tokens
-                total_output_tokens += response.usage.output_tokens
-                if budget is not None:
-                    budget.add_tokens(response.usage.input_tokens + response.usage.output_tokens)
+                usage[0] += response.usage.input_tokens
+                usage[1] += response.usage.output_tokens
+                gateway.charge(
+                    tool_ctx, agent_name,
+                    tokens=response.usage.input_tokens + response.usage.output_tokens,
+                )
 
-                # If Claude is done (no tool use), extract final text
                 if response.stop_reason == "end_turn":
-                    text_parts = [b.text for b in response.content if b.type == "text"]
-                    final_text = "\n".join(text_parts)
-                    break
+                    return "\n".join(b.text for b in response.content if b.type == "text")
 
                 # Handle tool use
                 if response.stop_reason == "tool_use":
@@ -533,17 +585,15 @@ class ClaudeAgentRunner:
                                     "step_id": "", "agent": agent_name,
                                     "text": record["result_summary"],
                                 }})
+                                record[EMITTED_LIVE] = True
 
                     # Execute each tool call
                     tool_results = []
                     for block in response.content:
                         if block.type == "tool_use":
-                            if budget is not None:
-                                budget.add_tool_call()
-                                if (exceeded := budget.check()).exceeded:
-                                    budget_reason = exceeded.reason
-                                    break
-                            mcp_name = tool_name_map.get(block.name, block.name)
+                            # Server prefixes contain no "_", so the first one is the dot.
+                            mcp_name = (tool_name_map.get(block.name)
+                                        or block.name.replace("_", ".", 1))
                             tool_args = dict(block.input)
 
                             # Auto-inject session_id for attestation calls (mastery timing enforcement)
@@ -553,85 +603,95 @@ class ClaudeAgentRunner:
                                     "Auto-injected session_id=%s into attestations.attest call", session_id
                                 )
 
-                            tool_start = time.monotonic()
                             span = span_tool(mcp_name, agent_name)
                             with trace.use_span(span, end_on_exit=True):
-                                result_text = await _call_mcp_tool(mcp_name, tool_args)
-                                success = "error" not in result_text.lower()[:50]
+                                result = await gateway.invoke(
+                                    tool_ctx, agent_name, mcp_name, tool_args,
+                                )
+                                success = result.success
                                 span.set_attribute("success", success)
-                            tool_ms = (time.monotonic() - tool_start) * 1000
+                                span.set_attribute("outcome", result.outcome)
+                            tool_args = result.args
+                            tool_ms = result.latency_ms
                             log.info(
                                 "tool_call",
                                 tool=mcp_name,
                                 agent=agent_name,
                                 latency_ms=round(tool_ms, 1),
                                 success=success,
+                                outcome=result.outcome,
                             )
 
                             record = {
                                 "tool": mcp_name,
                                 "arguments": tool_args,
-                                "result_summary": result_text[:200],
+                                "result_summary": result.summary,
                                 "latency_ms": round(tool_ms, 1),
                                 "success": success,
+                                "outcome": result.outcome,
                             }
+                            if result.guardrail is not None:
+                                record["guardrail"] = result.guardrail
+                            if result.approval is not None:
+                                record["approval"] = result.approval
                             tool_call_records.append(record)
                             if on_event:
                                 await on_event({"event": "agent_tool_call", "payload": {
                                     "step_id": "", "agent": agent_name,
                                     "tool": mcp_name,
                                     "arguments": tool_args,
-                                    "result_summary": result_text[:200],
+                                    "result_summary": result.summary,
                                     "latency_ms": round(tool_ms, 1),
                                     "success": record["success"],
                                 }})
+                                if result.guardrail is not None:
+                                    await on_event({"event": "guardrail",
+                                                    "payload": dict(result.guardrail)})
+                                record[EMITTED_LIVE] = True
 
                             tool_results.append({
                                 "type": "tool_result",
                                 "tool_use_id": block.id,
-                                "content": wrap_tool_text(mcp_name, result_text),
+                                "content": result.text,
                             })
 
-                    if budget_reason:
-                        break
                     messages.append({"role": "user", "content": tool_results})
                     continue
 
                 # Unexpected stop reason — extract what we have
                 text_parts = [b.text for b in response.content if b.type == "text"]
-                final_text = "\n".join(text_parts) if text_parts else "Agent produced no text response."
-                break
-        else:
-            # Exhausted tool rounds
-            final_text = "Agent exceeded maximum tool-use rounds."
+                return "\n".join(text_parts) if text_parts else "Agent produced no text response."
+        return "Agent exceeded maximum tool-use rounds."
 
-        elapsed_ms = (time.monotonic() - start) * 1000
-        total_tokens = total_input_tokens + total_output_tokens
-        cost_usd = (total_input_tokens * 3.0 / 1_000_000) + (total_output_tokens * 15.0 / 1_000_000)
 
-        logger.info(
-            "Agent %s done in %.0fms (%d tokens, %d tool calls, $%.4f)",
-            agent_name, elapsed_ms, total_tokens, len(tool_call_records), cost_usd,
-        )
+async def _with_backstop(
+    coro: Coroutine[Any, Any, dict[str, Any]], clock: ActiveClock, timeout_s: float
+) -> dict[str, Any]:
+    """Like asyncio.wait_for, but only time counted by `clock` (not paused) uses up
+    `timeout_s`. Raises TimeoutError after cancelling the work."""
+    task = asyncio.ensure_future(coro)
+    try:
+        while True:
+            remaining = timeout_s - clock.elapsed_s
+            if remaining <= 0 and not clock.paused:
+                raise TimeoutError
+            done, _ = await asyncio.wait({task}, timeout=remaining if remaining > 0 else 1.0)
+            if done:
+                return task.result()
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
-        if budget_reason:
-            log.warning("budget_exceeded", agent=agent_name, reason=budget_reason,
-                        **(budget.summary() if budget else {}))
-            return {
-                "output": {"error": "budget_exceeded"},
-                "cost_usd": round(cost_usd, 6),
-                "tokens": total_tokens,
-                "success": False,
-                "tool_calls": tool_call_records,
-                "budget_exceeded": True,
-            }
 
-        output = _parse_agent_output(final_text)
-
-        return {
-            "output": output,
-            "cost_usd": round(cost_usd, 6),
-            "tokens": total_tokens,
-            "success": True,
-            "tool_calls": tool_call_records,
-        }
+def _budget_exceeded_result(
+    cost_usd: float, tokens: int, tool_calls: list[dict[str, Any]]
+) -> dict[str, Any]:
+    return {
+        "output": {"error": "budget_exceeded"},
+        "cost_usd": round(cost_usd, 6),
+        "tokens": tokens,
+        "success": False,
+        "tool_calls": tool_calls,
+        "budget_exceeded": True,
+    }

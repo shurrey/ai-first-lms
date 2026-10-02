@@ -1,7 +1,8 @@
 id: 2
 name: "Quiz generation: 10-question photosynthesis quiz"
-persona: faculty
-course_id: "cs-101"
+login_as: "m.torres@university.edu"
+active_role: faculty
+course_id: "cs101"
 
 user_turns:
   - message: "Build me a 10-question quiz on photosynthesis."

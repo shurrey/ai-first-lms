@@ -1,8 +1,9 @@
 "use client";
 
 import { use, useEffect, useState } from "react";
-import { usePersona } from "@/lib/persona-context";
-import { API_BASE } from "@/lib/api";
+import { useAuth } from "@/lib/auth-context";
+import { apiFetch } from "@/lib/api";
+import { NoAccess } from "@/components/NoAccess";
 import { BarChart3, TrendingUp, Award, MessageSquare } from "lucide-react";
 
 interface StudentAnalytics {
@@ -19,35 +20,39 @@ interface StudentAnalytics {
 
 export default function AnalyticsPage({ params }: { params: Promise<{ courseId: string }> }) {
   const { courseId } = use(params);
-  const { persona, personId, ensureSession } = usePersona();
+  const { activeRole, capabilities, personId } = useAuth();
 
-  if (persona === "student") {
-    return <StudentAnalyticsView courseId={courseId} personId={personId} ensureSession={ensureSession} />;
+  if (activeRole === "student") {
+    return <StudentAnalyticsView courseId={courseId} personId={personId} />;
   }
-  return <FacultyAnalyticsView courseId={courseId} ensureSession={ensureSession} />;
+  if (!capabilities.roster || !capabilities.mastery_matrix) return <NoAccess />;
+  return <FacultyAnalyticsView courseId={courseId} />;
 }
 
-function StudentAnalyticsView({ courseId, personId, ensureSession }: { courseId: string; personId: string | null; ensureSession: (c: string) => Promise<any> }) {
+function StudentAnalyticsView({ courseId, personId }: { courseId: string; personId: string | null }) {
   const [data, setData] = useState<any>(null);
   const [sessions, setSessions] = useState<any[]>([]);
   const [insights, setInsights] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    ensureSession(courseId).then(async () => {
-      if (!personId) return;
+    if (!personId) return;
+    (async () => {
       const [masteryRes, sessionsRes] = await Promise.all([
-        fetch(`${API_BASE}/api/mastery/${personId}/${courseId}`),
-        fetch(`${API_BASE}/api/student/${personId}/sessions?course_id=${courseId}`),
+        apiFetch(`/api/mastery/${personId}/${courseId}`),
+        apiFetch(`/api/student/${personId}/sessions?course_id=${courseId}`),
       ]);
       const mastery = await masteryRes.json();
       const sess = await sessionsRes.json();
       setData(mastery);
       setSessions(sess.sessions || []);
-      fetch(`${API_BASE}/api/student-insights/${personId}`)
+      apiFetch(`/api/student-insights/${personId}`)
         .then((r) => r.json())
         .then((d) => setInsights(d.insights || []))
         .catch(() => {});
+      setLoading(false);
+    })().catch((err: unknown) => {
+      console.error("Failed to load analytics", err);
       setLoading(false);
     });
   }, [courseId, personId]);
@@ -128,13 +133,13 @@ function StudentAnalyticsView({ courseId, personId, ensureSession }: { courseId:
   );
 }
 
-function FacultyAnalyticsView({ courseId, ensureSession }: { courseId: string; ensureSession: (c: string) => Promise<any> }) {
+function FacultyAnalyticsView({ courseId }: { courseId: string }) {
   const [students, setStudents] = useState<StudentAnalytics[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    ensureSession(courseId).then(async () => {
-      const rosterRes = await fetch(`${API_BASE}/api/roster/${courseId}`);
+    (async () => {
+      const rosterRes = await apiFetch(`/api/roster/${courseId}`);
       const roster = await rosterRes.json();
 
       const analyticsData: StudentAnalytics[] = [];
@@ -145,7 +150,7 @@ function FacultyAnalyticsView({ courseId, ensureSession }: { courseId: string; e
         const batch = allStudents.slice(i, i + 10);
         await Promise.all(batch.map(async (s: any) => {
           try {
-            const res = await fetch(`${API_BASE}/api/mastery/${s.id}/${courseId}`);
+            const res = await apiFetch(`/api/mastery/${s.id}/${courseId}`);
             const data = await res.json();
             const sum = data.summary || {};
             analyticsData.push({
@@ -165,6 +170,9 @@ function FacultyAnalyticsView({ courseId, ensureSession }: { courseId: string; e
 
       analyticsData.sort((a, b) => a.name.localeCompare(b.name));
       setStudents(analyticsData);
+      setLoading(false);
+    })().catch((err: unknown) => {
+      console.error("Failed to load course analytics", err);
       setLoading(false);
     });
   }, [courseId]);

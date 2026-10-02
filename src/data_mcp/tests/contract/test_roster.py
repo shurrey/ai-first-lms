@@ -97,3 +97,37 @@ async def test_roster_list_by_course_role_filter(server, seeded_ids) -> None:
     })
     assert "persons" in result
     assert len(result["persons"]) == 2  # Dr. Torres and Prof. Lee
+
+
+async def test_roster_list_by_course_includes_assigned_advisor(pool, server, seeded_ids) -> None:
+    async with pool.acquire() as conn:
+        advisor_id = await conn.fetchval(
+            "SELECT id FROM persons WHERE roles @> '{advisor}' LIMIT 1"
+        )
+        students = await conn.fetch(
+            "SELECT person_id FROM enrollments WHERE course_node = $1 AND role = 'student' LIMIT 2",
+            uuid.UUID(seeded_ids["course_id"]),
+        )
+        await conn.executemany(
+            "INSERT INTO advisor_assignments (advisor_id, student_id) VALUES ($1, $2) "
+            "ON CONFLICT DO NOTHING",
+            [(advisor_id, s["person_id"]) for s in students],
+        )
+    try:
+        advisors = await _call(server, "roster.list_by_course", {
+            "course_id": seeded_ids["course_id"], "role": "advisor",
+        })
+        everyone = await _call(
+            server, "roster.list_by_course", {"course_id": seeded_ids["course_id"]}
+        )
+        faculty = await _call(server, "roster.list_by_course", {
+            "course_id": seeded_ids["course_id"], "role": "faculty",
+        })
+    finally:
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM advisor_assignments WHERE advisor_id = $1", advisor_id)
+
+    assert [(p["id"], p["role"]) for p in advisors["persons"]] == [(str(advisor_id), "advisor")]
+    assert sum(1 for p in everyone["persons"] if p["role"] == "advisor") == 1
+    assert all(p["role"] == "faculty" for p in faculty["persons"])
+

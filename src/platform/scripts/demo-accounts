@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Re-print the seeded demo accounts (name, username, roles, courses/advisees) from the DB.
+# Passwords are never read or printed; every account uses SEED_DEMO_PASSWORD from .env.
+#
+# Usage: src/platform/scripts/demo-accounts [--all]
+#   Reads LMS_DATABASE_URL; defaults to the compose stack's lms_db on localhost:5432.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+cd "$ROOT"
+exec uv run python -m data_mcp.seed.demo_accounts "$@"

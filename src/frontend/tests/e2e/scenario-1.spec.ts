@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
-import { setupMockAPI, selectPersonaAndCourse } from "./fixtures/setup";
+import { setupMockAPI, selectCourse, expectToolCall } from "./fixtures/setup";
+import { EMMA } from "./fixtures/fake-api";
 import { scenario1Events } from "./fixtures/mock-events";
 
 const SESSION_ID = "s1-session";
@@ -10,18 +11,19 @@ test.describe("Scenario 1: Student asks about recursion", () => {
     page,
   }) => {
     await setupMockAPI(page, {
+      me: EMMA,
       sessionId: SESSION_ID,
       turnId: TURN_ID,
       sseEvents: scenario1Events(SESSION_ID, TURN_ID),
     });
 
     await page.goto("/");
-    await selectPersonaAndCourse(page, "student");
+    await selectCourse(page);
 
     // Type and send message
-    const input = page.locator('input[placeholder="Type a message..."]');
+    const input = page.getByPlaceholder(/Type a message/);
     await input.fill("Can you help me understand recursion?");
-    await page.locator('button:text("Send")').click();
+    await page.getByRole("button", { name: "Send" }).click();
 
     // User message should appear
     await expect(
@@ -33,15 +35,7 @@ test.describe("Scenario 1: Student asks about recursion", () => {
       page.locator("strong", { hasText: "Recursion" })
     ).toBeVisible({ timeout: 5000 });
 
-    // Activity pane should show tutor agent (use the exact agent name span)
-    await expect(
-      page.locator("aside").getByText("tutor", { exact: true })
-    ).toBeVisible();
-
     // Tool call should be visible (transparency principle)
-    await expect(page.locator("code", { hasText: "content.retrieve" })).toBeVisible();
-
-    // Should show completion status
-    await expect(page.locator("aside").getByText("Complete")).toBeVisible();
+    await expectToolCall(page, "content.retrieve");
   });
 });

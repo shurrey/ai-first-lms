@@ -118,24 +118,25 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
         course_id = uuid.UUID(args["course_id"])
         role = args.get("role")
         async with pool.acquire() as conn:
-            if role:
-                rows = await conn.fetch(
-                    """SELECT p.id, p.display_name, e.role
-                       FROM enrollments e
-                       JOIN persons p ON p.id = e.person_id
-                       WHERE e.course_node = $1 AND e.role = $2
-                       ORDER BY p.display_name""",
-                    course_id, role,
-                )
-            else:
-                rows = await conn.fetch(
-                    """SELECT p.id, p.display_name, e.role
-                       FROM enrollments e
-                       JOIN persons p ON p.id = e.person_id
-                       WHERE e.course_node = $1
-                       ORDER BY p.display_name""",
-                    course_id,
-                )
+            # Advisors are not enrolled; they appear with role 'advisor' when
+            # assigned (advisor_assignments) to a student enrolled in the course.
+            rows = await conn.fetch(
+                """SELECT p.id, p.display_name, e.role
+                     FROM enrollments e
+                     JOIN persons p ON p.id = e.person_id
+                    WHERE e.course_node = $1
+                      AND ($2::text IS NULL OR e.role = $2)
+                   UNION
+                   SELECT p.id, p.display_name, 'advisor'
+                     FROM advisor_assignments a
+                     JOIN enrollments e
+                       ON e.person_id = a.student_id
+                      AND e.course_node = $1 AND e.role = 'student'
+                     JOIN persons p ON p.id = a.advisor_id
+                    WHERE ($2::text IS NULL OR $2 = 'advisor')
+                   ORDER BY display_name""",
+                course_id, role or None,
+            )
             return {
                 "persons": [
                     {"id": str(r["id"]), "display_name": r["display_name"], "role": r["role"]}

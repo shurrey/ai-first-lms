@@ -31,6 +31,7 @@ dependencies = [
     "psycopg2-binary>=2.9.9",
     # MCP SSE transport (uses starlette internally)
     "starlette>=0.37",
+    "argon2-cffi>=23.1",
 ]
 
 [project.optional-dependencies]

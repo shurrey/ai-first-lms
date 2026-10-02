@@ -1,7 +1,8 @@
 id: 8
 name: "Syllabus drafting: Intro to Data Ethics"
-persona: faculty
-course_id: "cs-101"
+login_as: "m.torres@university.edu"
+active_role: faculty
+course_id: "cs101"
 
 user_turns:
   - message: "Help me draft a syllabus for Intro to Data Ethics."

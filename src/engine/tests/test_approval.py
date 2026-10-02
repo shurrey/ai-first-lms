@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
-from engine.guardrails.approval import ApprovalDecision, ApprovalGate
+from engine.guardrails.approval import (
+    ApprovalDecision,
+    ApprovalGate,
+    ApprovalTimeoutError,
+    artifact_type_for,
+)
+from engine.guardrails.tool_roles import load_tool_roles
 
 
 @pytest.fixture
@@ -12,20 +20,58 @@ def gate():
     return ApprovalGate()
 
 
-def test_requires_approval_for_grading(gate):
-    assert gate.requires_approval("grading_assistant") is True
+@pytest.mark.parametrize("tool", [
+    "assessments.commit_grade",
+    "assessments.approve_credential",
+    "assessments.create_question",
+    "communications.send_message",
+])
+def test_contract_marks_served_write_tools_as_requiring_approval(tool):
+    assert load_tool_roles()[tool].requires_approval is True
 
 
-def test_requires_approval_for_send_tool(gate):
-    assert gate.requires_approval("communication", "messages.send") is True
+@pytest.mark.parametrize("tool", ["assessments.draft_grade", "content.retrieve"])
+def test_contract_leaves_other_tools_ungated(tool):
+    assert load_tool_roles()[tool].requires_approval is False
 
 
-def test_no_approval_for_tutor(gate):
-    assert gate.requires_approval("tutor") is False
+def test_artifact_types_follow_the_events_contract():
+    assert artifact_type_for("assessments.commit_grade") == "grade_commit"
+    assert artifact_type_for("assessments.approve_credential") == "credential"
+    assert artifact_type_for("assessments.create_question") == "quiz"
+    assert artifact_type_for("communications.send_message") == "message"
+    assert artifact_type_for("something.else") == "other"
 
 
-def test_no_approval_for_read_tool(gate):
-    assert gate.requires_approval("tutor", "content.retrieve") is False
+async def test_wait_returns_the_resolution(gate):
+    req = gate.create_request(step_id="s1", agent="grading_assistant", action="Commit grade",
+                              preview={}, artifact_type="grade_commit",
+                              tool_name="assessments.commit_grade",
+                              tool_arguments={"grade_id": "g1"})
+    waiter = asyncio.create_task(gate.wait(req.approval_id, timeout_s=5))
+    await asyncio.sleep(0)
+    gate.resolve(ApprovalDecision(req.approval_id, "edit", {"grade_id": "g2"}))
+
+    resolution = await waiter
+    assert resolution.decision.decision == "edit"
+    assert resolution.tool_arguments == {"grade_id": "g2"}
+
+
+async def test_a_decision_before_wait_is_not_lost(gate):
+    req = gate.create_request(step_id="s1", agent="a", action="x", preview={},
+                              artifact_type="other")
+    gate.resolve(ApprovalDecision(req.approval_id, "reject"))
+
+    resolution = await gate.wait(req.approval_id, timeout_s=1)
+    assert resolution.decision.decision == "reject"
+
+
+async def test_wait_times_out_and_drops_the_request(gate):
+    req = gate.create_request(step_id="s1", agent="a", action="x", preview={},
+                              artifact_type="other")
+    with pytest.raises(ApprovalTimeoutError):
+        await gate.wait(req.approval_id, timeout_s=0.01)
+    assert gate.get_pending(req.approval_id) is None
 
 
 def test_create_and_approve(gate):
@@ -116,3 +162,14 @@ def test_get_pending(gate):
     )
     assert gate.get_pending(req.approval_id) is not None
     assert gate.get_pending("nonexistent") is None
+
+
+def test_original_arguments_do_not_share_nested_values(gate):
+    args = {"audience": {"person_ids": ["p1"]}}
+    req = gate.create_request(step_id="s1", agent="a", action="x", preview={},
+                              artifact_type="message", tool_arguments=args)
+
+    args["audience"]["person_ids"].append("p2")
+    req.tool_arguments["audience"]["person_ids"].append("p3")
+
+    assert req.original_arguments == {"audience": {"person_ids": ["p1"]}}

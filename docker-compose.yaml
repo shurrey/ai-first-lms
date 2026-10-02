@@ -226,6 +226,16 @@ services:
       MAX_TOOL_CALLS_PER_TURN: ${MAX_TOOL_CALLS_PER_TURN:-40}
       MAX_WALL_TIME_PER_TURN_MS: ${MAX_WALL_TIME_PER_TURN_MS:-120000}
       MAX_AGENT_INVOCATIONS_PER_TURN: ${MAX_AGENT_INVOCATIONS_PER_TURN:-8}
+      # Sign-in (spec §4.4). COOKIE_SECURE must stay false for plain http://localhost.
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-12}
+      LOGIN_MAX_ATTEMPTS: ${LOGIN_MAX_ATTEMPTS:-5}
+      LOGIN_LOCKOUT_MINUTES: ${LOGIN_LOCKOUT_MINUTES:-5}
+      LOGIN_FAILURE_FLOOR_MS: ${LOGIN_FAILURE_FLOOR_MS:-250}
+      # How long an agent's approval_request waits for POST /api/approval.
+      APPROVAL_TIMEOUT_MINUTES: ${APPROVAL_TIMEOUT_MINUTES:-30}
+      ENGINE_API_DOCS: ${ENGINE_API_DOCS:-false}
+      PII_PSEUDONYM_SALT: ${PII_PSEUDONYM_SALT:-}
     ports:
       - "${ORCHESTRATOR_PORT:-8000}:8000"
     volumes:
@@ -299,6 +309,8 @@ services:
     environment:
       LMS_DATABASE_URL: postgresql://${POSTGRES_USER:-lms}:${POSTGRES_PASSWORD:-lms_dev}@postgres:5432/${POSTGRES_DB:-lms_db}
       TLS_INSECURE_SKIP_VERIFY: ${TLS_INSECURE_SKIP_VERIFY:-false}
+      # Password for every seeded account. Compose refuses to start any service while it is unset.
+      SEED_DEMO_PASSWORD: ${SEED_DEMO_PASSWORD:?set SEED_DEMO_PASSWORD in .env (see .env.example)}
     depends_on:
       postgres:
         condition: service_healthy

@@ -53,9 +53,11 @@ def test_advisor_can_use_early_alert(matrix):
     assert check.allowed is True
 
 
-def test_advisor_cannot_use_assessment(matrix):
-    check = matrix.check_agent("advisor", "assessment")
-    assert check.allowed is False
+def test_advisor_reaches_assessment_but_cannot_approve_credentials(matrix):
+    from engine.guardrails.tool_roles import load_tool_roles
+
+    assert matrix.check_agent("advisor", "assessment").allowed is True
+    assert "advisor" not in load_tool_roles()["assessments.approve_credential"].allowed_roles
 
 
 def test_unknown_persona_denied(matrix):

@@ -1,8 +1,10 @@
 "use client";
 
 import { use, useEffect, useState } from "react";
-import { usePersona } from "@/lib/persona-context";
-import { API_BASE } from "@/lib/api";
+import { useAuth } from "@/lib/auth-context";
+import { apiFetch } from "@/lib/api";
+import { credentialsView } from "@/components/CourseTabs";
+import { NoAccess } from "@/components/NoAccess";
 import { Award, CheckCircle, Clock, Eye, Shield } from "lucide-react";
 
 interface PendingCredential {
@@ -39,17 +41,13 @@ interface Evidence {
 
 export default function CredentialsPage({ params }: { params: Promise<{ courseId: string }> }) {
   const { courseId } = use(params);
-  const { persona, personId, ensureSession } = usePersona();
+  const { activeRole, capabilities, personId } = useAuth();
+  const view = credentialsView(activeRole, capabilities);
 
-  useEffect(() => { ensureSession(courseId); }, [courseId]);
-
-  if (persona === "student") {
-    return <StudentCredentials personId={personId} />;
-  }
-  if (persona === "admin") {
-    return <AdminSettings />;
-  }
-  return <FacultyCredentials courseId={courseId} personId={personId} />;
+  if (view === "own") return <StudentCredentials personId={personId} />;
+  if (view === "settings") return <AdminSettings />;
+  if (view === "approve") return <FacultyCredentials courseId={courseId} personId={personId} />;
+  return <NoAccess />;
 }
 
 function StudentCredentials({ personId }: { personId: string | null }) {
@@ -58,7 +56,7 @@ function StudentCredentials({ personId }: { personId: string | null }) {
 
   useEffect(() => {
     if (!personId) return;
-    fetch(`${API_BASE}/api/credentials/${personId}`)
+    apiFetch(`/api/credentials/${personId}`)
       .then((r) => r.json())
       .then((d) => { setCredentials(d.credentials || []); setLoading(false); })
       .catch(() => setLoading(false));
@@ -107,14 +105,14 @@ function FacultyCredentials({ courseId, personId }: { courseId: string; personId
   const [approving, setApproving] = useState<string | null>(null);
 
   useEffect(() => {
-    fetch(`${API_BASE}/api/pending-credentials/${courseId}`)
+    apiFetch(`/api/pending-credentials/${courseId}`)
       .then((r) => r.json())
       .then((d) => { setPending(d.pending || []); setLoading(false); })
       .catch(() => setLoading(false));
   }, [courseId]);
 
   const handleReview = (pendingId: string) => {
-    fetch(`${API_BASE}/api/credential-evidence/${pendingId}`)
+    apiFetch(`/api/credential-evidence/${pendingId}`)
       .then((r) => r.json())
       .then((d) => setEvidence(d))
       .catch(() => {});
@@ -124,7 +122,7 @@ function FacultyCredentials({ courseId, personId }: { courseId: string; personId
     if (!personId) return;
     setApproving(pendingId);
     try {
-      await fetch(`${API_BASE}/api/approve-credential/${pendingId}`, {
+      await apiFetch(`/api/approve-credential/${pendingId}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ reviewer_id: personId }),
@@ -139,7 +137,7 @@ function FacultyCredentials({ courseId, personId }: { courseId: string; personId
     if (!personId) return;
     setApproving("bulk");
     try {
-      await fetch(`${API_BASE}/api/approve-credentials/bulk`, {
+      await apiFetch(`/api/approve-credentials/bulk`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ pending_ids: pending.map((c) => c.id), reviewer_id: personId }),
@@ -237,7 +235,7 @@ function AdminSettings() {
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
-    fetch(`${API_BASE}/api/settings?key=badge_provider`)
+    apiFetch(`/api/settings?key=badge_provider`)
       .then((r) => r.json())
       .then((d) => { if (d.value) setSettings({ ...settings, ...d.value }); setLoading(false); })
       .catch(() => setLoading(false));
@@ -245,7 +243,7 @@ function AdminSettings() {
 
   const handleSave = async () => {
     setSaving(true);
-    await fetch(`${API_BASE}/api/settings`, {
+    await apiFetch(`/api/settings`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ key: "badge_provider", value: settings }),

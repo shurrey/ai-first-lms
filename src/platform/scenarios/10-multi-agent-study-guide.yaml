@@ -1,7 +1,8 @@
 id: 10
 name: "Targeted study guide for struggling students"
-persona: faculty
-course_id: "cs-101"
+login_as: "m.torres@university.edu"
+active_role: faculty
+course_id: "cs101"
 
 user_turns:
   - message: "For the students struggling with Chapter 5 in my course, create a tailored study guide and send it with a supportive note."

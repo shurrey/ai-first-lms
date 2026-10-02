@@ -1,7 +1,8 @@
 id: 3
 name: "Grading: rubric-based scoring with approval"
-persona: faculty
-course_id: "cs-101"
+login_as: "m.torres@university.edu"
+active_role: faculty
+course_id: "cs101"
 
 user_turns:
   - message: "Grade submissions for Essay 3 with my rubric."
