@@ -4,6 +4,8 @@ import { use, useEffect, useState } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { apiFetch } from "@/lib/api";
 import { useAiPanel } from "@/lib/ai-panel-context";
+import { AiGeneratedLabel } from "@/components/AiGeneratedLabel";
+import { useInsightsActionId } from "@/lib/provenance";
 import { ChevronDown, ChevronRight, Award, BookOpen, Sparkles } from "lucide-react";
 
 interface Concept {
@@ -50,10 +52,12 @@ const LEVEL_STYLES: Record<string, { bg: string; text: string; dot: string; labe
 
 export default function ContentPage({ params }: { params: Promise<{ courseId: string }> }) {
   const { courseId } = use(params);
-  const { activeRole, personId } = useAuth();
+  const { activeRole, personId, capabilities } = useAuth();
   const [data, setData] = useState<MasteryData | null>(null);
   const [loading, setLoading] = useState(true);
   const [insights, setInsights] = useState<string[]>([]);
+  const insightsActionId = useInsightsActionId(
+    personId, activeRole === "student" && insights.length > 0 && !!capabilities.ai_actions_log);
   const [goals, setGoals] = useState<Array<{ description: string; target_date: string | null; status: string }>>([]);
 
   useEffect(() => {
@@ -245,7 +249,7 @@ export default function ContentPage({ params }: { params: Promise<{ courseId: st
         {/* Insights */}
         <div className="border-t border-gray-200 pt-4">
           <h3 className="text-xs font-semibold text-gray-500 uppercase mb-2">
-            {activeRole === "student" ? "Your Learning Insights" : "AI Insights"}
+            {activeRole === "student" ? "Your Learning Insights" : "Insights"}
           </h3>
           {activeRole === "student" && insights.length > 0 ? (
             <div className="space-y-1.5">
@@ -255,6 +259,7 @@ export default function ContentPage({ params }: { params: Promise<{ courseId: st
                   {insight}
                 </p>
               ))}
+              <AiGeneratedLabel aiActionId={insightsActionId} />
             </div>
           ) : (
             <p className="text-xs text-gray-600">

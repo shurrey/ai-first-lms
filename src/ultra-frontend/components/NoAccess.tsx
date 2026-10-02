@@ -12,8 +12,8 @@ export function NoAccess({ message }: { message?: string }) {
   const { me } = useAuth();
   const fallback =
     me.roles.length > 1
-      ? "Your current role can't open this page. If you think it should, switch role from the account menu or contact your administrator."
-      : "Your account can't open this page. If you think it should, contact your administrator.";
+      ? "Your current role can't open this page. If that looks wrong, switch role from the account menu or contact your administrator."
+      : "Your account can't open this page. If that looks wrong, contact your administrator.";
 
   return (
     <section aria-labelledby="no-access-heading" className="flex h-full items-start justify-center p-10">

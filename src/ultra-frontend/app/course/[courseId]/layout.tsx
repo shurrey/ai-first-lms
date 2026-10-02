@@ -3,7 +3,7 @@
 import { use } from "react";
 import { usePathname } from "next/navigation";
 import { CourseNav } from "@/components/CourseNav";
-import { CourseTabs } from "@/components/CourseTabs";
+import { CourseTabs, aiReviewAllowed } from "@/components/CourseTabs";
 import { CourseBanner } from "@/components/CourseBanner";
 import { AiFab } from "@/components/AiFab";
 import { AiPanel } from "@/components/AiPanel";
@@ -69,8 +69,11 @@ function CourseLayoutInner({
   const { capabilities } = useAuth();
   const pathname = usePathname();
 
-  // Only the badge-settings tab works without a concrete course; everything else is the overview.
-  const scopeShowsChild = isScope && pathname === `/course/${courseId}/credentials` && !!capabilities.system_settings;
+  // Only badge settings and the AI Review rollup work without a concrete course; everything else is the overview.
+  const scopeShowsChild = isScope && (
+    (pathname === `/course/${courseId}/credentials` && !!capabilities.system_settings) ||
+    (pathname === `/course/${courseId}/ai-review` && aiReviewAllowed(capabilities, null, true))
+  );
 
   return (
     <div className="flex h-full flex-col">

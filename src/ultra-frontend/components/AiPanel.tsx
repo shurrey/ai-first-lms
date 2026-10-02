@@ -6,14 +6,18 @@ import remarkGfm from "remark-gfm";
 import { ROLE_LABELS, useAuth } from "@/lib/auth-context";
 import { useAiPanel } from "@/lib/ai-panel-context";
 import { apiFetch } from "@/lib/api";
+import { AiGeneratedLabel } from "@/components/AiGeneratedLabel";
 
-interface Message { role: "user" | "assistant"; content: string; }
+/** `generated` marks answers produced by a turn; `ran` lists the agents and tools that produced them. */
+interface Message { role: "user" | "assistant"; content: string; generated?: boolean; ran?: string[]; }
+
+const SPEAKER_LABEL = "Tutor (AI)";
 
 export function AiPanel({ onClose, courseId, courseTitle }: { onClose: () => void; courseId: string; courseTitle: string }) {
   const { activeRole, ensureSession } = useAuth();
   const { initialPrompt, clearPrompt } = useAiPanel();
   const [messages, setMessages] = useState<Message[]>([
-    { role: "assistant", content: `Hi! I'm your AI assistant for **${courseTitle}**. How can I help?` },
+    { role: "assistant", content: `Ask a question about **${courseTitle}**. Answers are generated from the course materials.` },
   ]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -56,6 +60,7 @@ export function AiPanel({ onClose, courseId, courseTitle }: { onClose: () => voi
       // Poll SSE stream for response
       let finalAnswer = "";
       let tokens = "";
+      let ran: string[] = [];
       const maxWait = 90000;
       const start = Date.now();
 
@@ -63,29 +68,46 @@ export function AiPanel({ onClose, courseId, courseTitle }: { onClose: () => voi
         const res = await apiFetch(stream_url);
         const text = await res.text();
         const lines = text.split("\n");
+        // Each poll replays the turn's stream from the start.
+        tokens = "";
+        const ranSet = new Set<string>();
 
         for (const line of lines) {
           if (!line.startsWith("data: ")) continue;
+          let event: { event?: string; payload?: Record<string, unknown> };
           try {
-            const event = JSON.parse(line.slice(6));
-            if (event.event === "agent_token") {
-              tokens += event.payload?.token ?? "";
-              setStreamText(tokens);
-            }
-            if (event.event === "final") {
-              finalAnswer = event.payload?.answer_markdown ?? tokens;
-            }
-          } catch { /* skip */ }
+            event = JSON.parse(line.slice(6));
+          } catch {
+            console.warn("Skipping malformed SSE line", line);
+            continue;
+          }
+          const payload = event.payload ?? {};
+          if (event.event === "agent_start" && typeof payload.agent === "string") ranSet.add(`Agent: ${payload.agent}`);
+          if (event.event === "agent_tool_call" && typeof payload.tool === "string") ranSet.add(`Tool: ${payload.tool}`);
+          if (event.event === "agent_token" && payload.channel !== "thought" && typeof payload.delta === "string") {
+            tokens += payload.delta;
+          }
+          if (event.event === "final") {
+            finalAnswer = typeof payload.answer_markdown === "string" ? payload.answer_markdown : tokens;
+          }
         }
+        ran = [...ranSet];
+        setStreamText(tokens);
 
         if (finalAnswer) break;
         await new Promise((r) => setTimeout(r, 800));
       }
 
-      const answer = finalAnswer || tokens || "I wasn't able to generate a response. Please try again.";
-      setMessages((prev) => [...prev, { role: "assistant", content: answer }]);
+      const answer = finalAnswer || tokens;
+      setMessages((prev) => [
+        ...prev,
+        answer
+          ? { role: "assistant", content: answer, generated: true, ran }
+          : { role: "assistant", content: "No answer was generated. Please try again." },
+      ]);
       setStreamText("");
-    } catch {
+    } catch (err: unknown) {
+      console.error("AI panel turn failed", err);
       setMessages((prev) => [...prev, { role: "assistant", content: "Connection error. Please try again." }]);
     } finally {
       setLoading(false);
@@ -107,13 +129,13 @@ export function AiPanel({ onClose, courseId, courseTitle }: { onClose: () => voi
   };
 
   return (
-    <div className="fixed right-0 top-0 z-50 flex h-full w-[420px] flex-col border-l border-gray-200 bg-white shadow-2xl">
+    <aside aria-label="AI assistant" className="fixed right-0 top-0 z-50 flex h-full w-[420px] flex-col border-l border-gray-200 bg-white shadow-2xl">
       {/* Header */}
       <div className="flex items-center justify-between border-b border-gray-200 px-4 py-3">
         <div className="flex items-center gap-2">
           <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-[#6366f1] text-white"><Sparkles className="h-4 w-4" /></div>
           <div>
-            <span className="text-sm font-semibold">AI Assistant</span>
+            <h2 className="inline text-sm font-semibold">AI assistant</h2>
             <span className="ml-2 text-[10px] text-gray-600">{ROLE_LABELS[activeRole]}</span>
           </div>
         </div>
@@ -123,8 +145,10 @@ export function AiPanel({ onClose, courseId, courseTitle }: { onClose: () => voi
       {/* Messages */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-3">
         {messages.map((msg, i) => (
-          <div key={i} className={`rounded-lg px-3 py-2 text-sm ${msg.role === "user" ? "ml-8 bg-[#6366f1] text-white" : "mr-4 border border-gray-200 bg-gray-50"}`}>
+          <div key={i} className={`rounded-lg px-3 py-2 text-sm ${msg.role === "user" ? "ml-8 bg-[#4f46e5] text-white" : "mr-4 border border-gray-200 bg-gray-50"}`}>
             {msg.role === "assistant" ? (
+              <>
+              <p className="mb-1 text-[10px] font-semibold text-gray-600">{SPEAKER_LABEL}</p>
               <div className="prose prose-sm max-w-none">
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm]}
@@ -148,19 +172,24 @@ export function AiPanel({ onClose, courseId, courseTitle }: { onClose: () => voi
                   }}
                 >{msg.content}</ReactMarkdown>
               </div>
-            ) : msg.content}
+              {msg.generated && <AiGeneratedLabel ran={msg.ran} />}
+              </>
+            ) : (
+              <><span className="sr-only">You: </span>{msg.content}</>
+            )}
           </div>
         ))}
         {streamText && (
           <div className="mr-4 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm">
+            <p className="mb-1 text-[10px] font-semibold text-gray-600">{SPEAKER_LABEL}</p>
             <div className="prose prose-sm max-w-none">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamText}</ReactMarkdown>
             </div>
           </div>
         )}
         {loading && !streamText && (
-          <div className="mr-4 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-400 animate-pulse">
-            Thinking...
+          <div role="status" className="mr-4 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-600 animate-pulse">
+            Working…
           </div>
         )}
       </div>
@@ -182,7 +211,7 @@ export function AiPanel({ onClose, courseId, courseTitle }: { onClose: () => voi
           </button>
         </div>
       </div>
-    </div>
+    </aside>
   );
 }
 
