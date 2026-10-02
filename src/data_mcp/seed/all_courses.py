@@ -23,6 +23,7 @@ import asyncpg
 from argon2 import PasswordHasher
 
 from data_mcp.seed.demo_accounts import fetch_demo_accounts, format_demo_accounts
+from data_mcp.seed.provenance import seed_provenance
 from data_mcp.settings import settings
 
 DEMO_PASSWORD_ENV = "SEED_DEMO_PASSWORD"
@@ -496,6 +497,11 @@ async def seed(
         skill_rows = await conn.fetch(_SKILL_SELECT)
         await conn.execute(f"TRUNCATE {', '.join(SEEDED_TABLES)} CASCADE")
         summary = await _seed_content(conn, rng)
+        # Drawn after all content so adding provenance leaves every earlier id unchanged.
+        summary["provenance"] = await seed_provenance(
+            conn, random.Random(rng.getrandbits(64)), summary["course_ids"],
+            {c["slug"]: f"{c['faculty'][0][1]}@university.edu" for c in COURSES},
+        )
         summary.update(await _restore_skill_rows(conn, skill_rows))
         summary["credentials"] = await _seed_credentials(conn, demo_password)
     return summary
@@ -1075,6 +1081,17 @@ async def _seed_content(conn: asyncpg.Connection, rng: random.Random) -> dict[st
             if is_draft:
                 draft_count += 1
 
+    # Spec §12.5: practice is private. Only submissions with a committed grade become 'course'.
+    # Draft-graded submissions, ungraded quiz attempts and engagement events stay at the
+    # column default 'private'. Attestations live in their own table and are course-visible.
+    status = await conn.execute(
+        """UPDATE evidence ev SET visibility = 'course'
+           FROM submissions s JOIN grades g ON g.submission_id = s.id
+           WHERE ev.kind = 'artifact_submission' AND NOT g.is_draft
+             AND ev.person_id = s.person_id AND ev.node_id = s.assignment_node"""
+    )
+    summary["course_visible_evidence"] = int(status.split()[-1])
+
     summary["grade_count"] = grade_count
     summary["draft_grades"] = draft_count
     summary["committed_grades"] = grade_count - draft_count
@@ -1237,12 +1254,18 @@ async def main(seed_value: int = 42) -> None:
         print(f"  Assignments: {summary['total_assignments']}")
         print(f"  Questions: {summary['total_questions']}")
         print(f"  Evidence records: {summary['total_evidence']}")
+        print(f"  Course-visible evidence: {summary['course_visible_evidence']}")
         print(f"  Submissions: {summary['total_submissions']}")
         print(f"  Grades: {summary['grade_count']} ({summary['committed_grades']} committed, {summary['draft_grades']} draft)")
         print(f"  Microcredentials: {summary['total_microcredentials']}")
         print(f"  Graph edges: {summary['total_edges']}")
         print(f"  Advisor assignments: {summary['advisor_assignments']}")
         print(f"  Credentials: {summary['credentials']}")
+        prov = summary["provenance"]
+        print(
+            f"  Provenance: {prov['ai_actions']} AI actions, "
+            f"{prov['human_decisions']} decisions, {prov['outcome_links']} outcome links"
+        )
         print(f"  Skill documents preserved: {summary['skills_preserved']}")
         if summary["skills_dropped"]:
             print(

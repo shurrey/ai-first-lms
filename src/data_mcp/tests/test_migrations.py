@@ -116,11 +116,11 @@ def test_schema_enums_exist() -> None:
     asyncio.run(_check())
 
 
-def _fetch(sql: str) -> list[asyncpg.Record]:
+def _fetch(sql: str, *args: object) -> list[asyncpg.Record]:
     async def _run() -> list[asyncpg.Record]:
         conn = await asyncpg.connect(DB_URL)
         try:
-            return await conn.fetch(sql)
+            return await conn.fetch(sql, *args)
         finally:
             await conn.close()
 
@@ -208,6 +208,70 @@ def test_indexes_added_by_003_exist() -> None:
         "uq_deletion_requests_pending", "idx_caliper_outbox_unsent", "idx_api_tokens_person",
     }
     assert expected <= indexes, f"Missing indexes: {expected - indexes}"
+
+
+def test_provenance_tables_match_contract() -> None:
+    expected = {
+        "tool_calls": {
+            "id": ("bigint", "NO"), "turn_id": ("uuid", "NO"), "agent": ("text", "NO"),
+            "tool": ("text", "NO"), "args": ("jsonb", "NO"), "outcome": ("text", "NO"),
+            "latency_ms": ("integer", "YES"),
+            "created_at": ("timestamp with time zone", "NO"),
+        },
+        "ai_actions": {
+            "id": ("uuid", "NO"), "session_id": ("uuid", "YES"), "turn_id": ("uuid", "YES"),
+            "agent": ("text", "NO"), "action_type": ("text", "NO"),
+            "subject_person": ("uuid", "YES"), "course_node": ("uuid", "YES"),
+            "target_type": ("text", "YES"), "target_id": ("uuid", "YES"),
+            "sources": ("jsonb", "NO"), "policies": ("jsonb", "NO"), "model": ("text", "YES"),
+            "prompt_sha256": ("text", "YES"), "output": ("jsonb", "NO"),
+            "created_at": ("timestamp with time zone", "NO"),
+        },
+        "human_decisions": {
+            "id": ("uuid", "NO"), "ai_action_id": ("uuid", "NO"), "decided_by": ("uuid", "NO"),
+            "decision": ("text", "NO"), "diff": ("jsonb", "YES"), "reason": ("text", "YES"),
+            "decided_at": ("timestamp with time zone", "NO"),
+        },
+        "outcome_links": {
+            "ai_action_id": ("uuid", "NO"), "evidence_id": ("uuid", "YES"),
+            "attestation_id": ("uuid", "YES"), "delta": ("jsonb", "YES"),
+            "observed_at": ("timestamp with time zone", "NO"),
+        },
+    }
+    rows = _fetch(
+        "SELECT table_name, column_name, data_type, is_nullable FROM information_schema.columns "
+        "WHERE table_schema = 'public' AND table_name = ANY($1::text[])",
+        list(expected),
+    )
+    actual: dict[str, dict[str, tuple[str, str]]] = {}
+    for r in rows:
+        actual.setdefault(r["table_name"], {})[r["column_name"]] = (
+            r["data_type"], r["is_nullable"],
+        )
+    assert actual == expected
+
+    fks = _fetch(
+        """SELECT cl.relname AS tbl, a.attname AS col, ref.relname AS ref,
+                  c.confdeltype::text AS del
+           FROM pg_constraint c
+           JOIN pg_class cl ON cl.oid = c.conrelid
+           JOIN pg_class ref ON ref.oid = c.confrelid
+           JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1]
+           WHERE c.contype = 'f' AND cl.relname = ANY($1::text[])""",
+        list(expected),
+    )
+    assert {(r["tbl"], r["col"], r["ref"], r["del"]) for r in fks} == {
+        ("tool_calls", "turn_id", "turns", "c"),
+        ("ai_actions", "session_id", "sessions", "a"),
+        ("ai_actions", "turn_id", "turns", "a"),
+        ("ai_actions", "subject_person", "persons", "a"),
+        ("ai_actions", "course_node", "nodes", "a"),
+        ("human_decisions", "ai_action_id", "ai_actions", "c"),
+        ("human_decisions", "decided_by", "persons", "a"),
+        ("outcome_links", "ai_action_id", "ai_actions", "c"),
+        ("outcome_links", "evidence_id", "evidence", "a"),
+        ("outcome_links", "attestation_id", "attestations", "a"),
+    }
 
 
 def test_citext_extension_installed() -> None:
