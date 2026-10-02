@@ -1,36 +1,22 @@
-import { test, expect, type Page } from "@playwright/test";
-import { setupMockAPI, selectCourse, expectToolCall } from "./fixtures/setup";
-import { TORRES } from "./fixtures/fake-api";
-import { scenario3Events } from "./fixtures/mock-events";
+import { test, expect } from "@playwright/test";
+import { login, requireLiveBackend } from "./fixtures/live-auth";
+import { expectActiveRole, loadScenario, runTurn, startCourseSession, toolCallsRun } from "./fixtures/live-scenario";
 
-const SESSION_ID = "s3-session";
-const TURN_ID = "s3-turn";
-
-async function sendGradingRequest(page: Page) {
-  await setupMockAPI(page, {
-    me: TORRES,
-    sessionId: SESSION_ID,
-    turnId: TURN_ID,
-    sseEvents: scenario3Events(SESSION_ID, TURN_ID),
-  });
-  await page.goto("/");
-  await selectCourse(page);
-  await page.getByPlaceholder(/Type a message/).fill("Grade submissions for Essay 3 with my rubric.");
-  await page.getByRole("button", { name: "Send" }).click();
-}
+const scenario = loadScenario(3);
 
 test.describe("Scenario 3: Faculty grades with rubric", () => {
-  test("shows the rubric tool call", async ({ page }) => {
-    await sendGradingRequest(page);
-    await expectToolCall(page, "assessments.rubrics");
-  });
+  test.beforeEach(() => requireLiveBackend());
 
-  test("shows rubric canvas and approval gate", async ({ page }) => {
-    await sendGradingRequest(page);
-    await expect(page.getByText("Commit grades for 23 students")).toBeVisible({ timeout: 5000 });
-    await expect(page.getByRole("button", { name: "Approve" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Edit" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Reject" })).toBeVisible();
-    await expect(page.getByText("Awaiting Approval")).toBeVisible();
+  test("grades wait behind an approval gate, then commit", async ({ page }) => {
+    // Mirrors the scenario YAML's xfail, so the spec flips when the YAML does.
+    test.fail(!!scenario.xfail, scenario.xfail ?? "");
+    await login(page, scenario.loginAs);
+    await expectActiveRole(page, scenario.activeRole);
+    await startCourseSession(page, scenario.courseSlug);
+
+    const { approvedActions } = await runTurn(page, scenario.message, scenario.approvals);
+
+    expect(approvedActions).toHaveLength(scenario.approvals);
+    expect(await toolCallsRun(page)).toContainEqual(expect.stringMatching(/^assessments\./));
   });
 });

@@ -10,7 +10,8 @@ interface RubricCriterion {
 
 interface RubricData {
   title?: string;
-  criteria: RubricCriterion[];
+  // Absent when an agent returns a draft without rubric levels; the canvas then shows none.
+  criteria?: RubricCriterion[];
   total_points?: number;
 }
 
@@ -20,6 +21,7 @@ interface RubricCanvasProps {
 }
 
 export function RubricCanvas({ data, status }: RubricCanvasProps) {
+  const criteria = Array.isArray(data.criteria) ? data.criteria : [];
   return (
     <CanvasShell title={data.title ?? "Rubric"} status={status}>
       <div className="overflow-x-auto">
@@ -29,7 +31,7 @@ export function RubricCanvas({ data, status }: RubricCanvasProps) {
               <th className="px-2 py-1.5 text-left font-medium text-muted-foreground">
                 Criterion
               </th>
-              {data.criteria[0]?.levels.map((level, i) => (
+              {criteria[0]?.levels?.map((level, i) => (
                 <th
                   key={i}
                   className="px-2 py-1.5 text-center font-medium text-muted-foreground"
@@ -40,10 +42,10 @@ export function RubricCanvas({ data, status }: RubricCanvasProps) {
             </tr>
           </thead>
           <tbody>
-            {data.criteria.map((criterion, ci) => (
+            {criteria.map((criterion, ci) => (
               <tr key={ci} className="border-b border-border/50">
                 <td className="px-2 py-1.5 font-medium">{criterion.name}</td>
-                {criterion.levels.map((level, li) => (
+                {(criterion.levels ?? []).map((level, li) => (
                   <td
                     key={li}
                     className={`px-2 py-1.5 text-center ${

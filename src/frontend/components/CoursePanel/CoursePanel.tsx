@@ -10,6 +10,7 @@ import { AdvisorPanel } from "./AdvisorPanel";
 import { AdminPanel } from "./AdminPanel";
 import { RosterTab } from "./RosterTab";
 import { SettingsTab } from "./SettingsTab";
+import { AiReviewButton } from "./AiReviewDialog";
 
 type TabId = "overview" | "roster" | "settings";
 
@@ -65,6 +66,12 @@ export function CoursePanel() {
       <div className="flex-1 overflow-y-auto p-4">
         {tab === "overview" && (
           <>
+            {me.capabilities.ai_review !== undefined && (
+              <AiReviewButton
+                courseId={courseUuid !== null && courseUuid !== "all" ? courseUuid : null}
+                role={role}
+              />
+            )}
             {role === "student" && <StudentPanel data={briefCardData} />}
             {role === "faculty" && <FacultyPanel data={briefCardData} />}
             {role === "advisor" && <AdvisorPanel data={briefCardData} />}

@@ -6,6 +6,9 @@ import { MermaidBlock } from "./MermaidBlock";
 import { CodeSandbox } from "./CodeSandbox";
 import { VisualBlock } from "./VisualBlock";
 import { sendPrompt } from "@/components/CoursePanel/shared";
+import { CanvasRouter } from "@/components/Canvas/CanvasRouter";
+import { AiGeneratedLabel } from "@/components/common/AiGeneratedLabel";
+import { artifactAiActionId, type TurnSources } from "@/lib/provenance";
 
 export interface ChatMessage {
   id: string;
@@ -13,6 +16,9 @@ export interface ChatMessage {
   content: string;
   timestamp: string;
   followUps?: string[];
+  artifacts?: Array<{ artifact_id: string; type: string; data: Record<string, unknown> }>;
+  /** Present on generated answers; drives the "AI-generated · sources" label. */
+  provenance?: { aiActionIds: string[]; sources: TurnSources };
 }
 
 export function MessageBubble({ message }: { message: ChatMessage }) {
@@ -82,6 +88,24 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
                 {message.content}
               </ReactMarkdown>
             </div>
+            {message.provenance && (
+              <AiGeneratedLabel
+                aiActionIds={message.provenance.aiActionIds}
+                sources={message.provenance.sources}
+              />
+            )}
+            {message.artifacts?.map((artifact) => {
+              const id = artifactAiActionId(artifact.data);
+              return (
+                <div key={artifact.artifact_id} className="mt-3">
+                  <CanvasRouter artifact={artifact} status="generated" />
+                  <AiGeneratedLabel
+                    aiActionIds={id ? [id] : message.provenance?.aiActionIds}
+                    sources={message.provenance?.sources}
+                  />
+                </div>
+              );
+            })}
             {message.followUps && message.followUps.length > 0 && (
               <div className="mt-3 flex flex-wrap gap-1.5 border-t border-border/50 pt-2">
                 {message.followUps.map((fu, i) => (

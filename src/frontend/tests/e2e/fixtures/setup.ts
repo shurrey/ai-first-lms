@@ -1,4 +1,4 @@
-import { expect, type Page } from "@playwright/test";
+import type { Page } from "@playwright/test";
 import { api, fulfill, mockAuth, mockCreateSession, type FakeMe } from "./fake-api";
 
 /**
@@ -58,13 +58,4 @@ export async function selectCourse(page: Page, optionIndex: number = 1) {
   const created = page.waitForResponse((r) => r.url() === api("/api/session") && r.request().method() === "POST");
   await courseSelect.selectOption(value);
   await created;
-}
-
-/** Tool calls stream inline, then collapse into the chat's "Thinking" drawer once the turn ends. */
-export async function expectToolCall(page: Page, tool: string) {
-  const step = page.getByText(tool, { exact: true }).first();
-  const drawer = page.getByRole("button", { name: /Thinking/ }).last();
-  await expect(step.or(drawer)).toBeVisible({ timeout: 10000 });
-  if (!(await step.isVisible())) await drawer.click();
-  await expect(step).toBeVisible();
 }

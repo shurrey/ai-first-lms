@@ -1,6 +1,7 @@
 "use client";
 
 export type ArtifactStatus =
+  | "generated"
   | "draft"
   | "awaiting_approval"
   | "approved"
@@ -13,7 +14,8 @@ interface CanvasShellProps {
 }
 
 const STATUS_BADGE: Record<ArtifactStatus, { label: string; className: string }> = {
-  draft: { label: "Draft", className: "bg-muted text-muted-foreground" },
+  generated: { label: "Generated", className: "bg-muted text-foreground" },
+  draft: { label: "Draft", className: "bg-muted text-foreground" },
   awaiting_approval: {
     label: "Awaiting Approval",
     className: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200",
@@ -32,7 +34,7 @@ export function CanvasShell({ title, status, children }: CanvasShellProps) {
   const badge = STATUS_BADGE[status];
 
   return (
-    <div className="rounded-lg border border-border bg-card">
+    <div className="rounded-lg border border-border bg-card" data-testid="canvas-shell">
       <div className="flex items-center justify-between border-b border-border px-4 py-2">
         <h3 className="text-sm font-semibold">{title}</h3>
         <span

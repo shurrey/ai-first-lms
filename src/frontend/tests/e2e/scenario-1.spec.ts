@@ -1,41 +1,19 @@
 import { test, expect } from "@playwright/test";
-import { setupMockAPI, selectCourse, expectToolCall } from "./fixtures/setup";
-import { EMMA } from "./fixtures/fake-api";
-import { scenario1Events } from "./fixtures/mock-events";
+import { login, requireLiveBackend } from "./fixtures/live-auth";
+import { expectActiveRole, loadScenario, runTurn, startCourseSession, toolCallsRun } from "./fixtures/live-scenario";
 
-const SESSION_ID = "s1-session";
-const TURN_ID = "s1-turn";
+const scenario = loadScenario(1);
 
 test.describe("Scenario 1: Student asks about recursion", () => {
-  test("shows tutor response with reasoning and tool call in activity", async ({
-    page,
-  }) => {
-    await setupMockAPI(page, {
-      me: EMMA,
-      sessionId: SESSION_ID,
-      turnId: TURN_ID,
-      sseEvents: scenario1Events(SESSION_ID, TURN_ID),
-    });
+  test.beforeEach(() => requireLiveBackend());
 
-    await page.goto("/");
-    await selectCourse(page);
+  test("the tutor answers with provenance and shows the tools it ran", async ({ page }) => {
+    await login(page, scenario.loginAs);
+    await expectActiveRole(page, scenario.activeRole);
+    await startCourseSession(page, scenario.courseSlug);
 
-    // Type and send message
-    const input = page.getByPlaceholder(/Type a message/);
-    await input.fill("Can you help me understand recursion?");
-    await page.getByRole("button", { name: "Send" }).click();
+    await runTurn(page, scenario.message, scenario.approvals);
 
-    // User message should appear
-    await expect(
-      page.getByText("Can you help me understand recursion?")
-    ).toBeVisible();
-
-    // Wait for the final response containing the bold "Recursion"
-    await expect(
-      page.locator("strong", { hasText: "Recursion" })
-    ).toBeVisible({ timeout: 5000 });
-
-    // Tool call should be visible (transparency principle)
-    await expectToolCall(page, "content.retrieve");
+    expect(await toolCallsRun(page)).not.toHaveLength(0);
   });
 });

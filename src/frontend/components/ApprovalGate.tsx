@@ -14,6 +14,10 @@ interface ApprovalGateProps {
   onDecided?: (decision: ApprovalDecision) => void;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 export function ApprovalGate({
   approvalId,
   action,
@@ -25,8 +29,10 @@ export function ApprovalGate({
   const [rejectNote, setRejectNote] = useState("");
   const [showRejectForm, setShowRejectForm] = useState(false);
   const [showEditor, setShowEditor] = useState(false);
+  // The preview is {tool, arguments, artifact?}; the gateway accepts only edited tool arguments.
+  const editable = isRecord(preview.arguments) ? preview.arguments : preview;
   const [editedJson, setEditedJson] = useState(
-    JSON.stringify(preview, null, 2)
+    JSON.stringify(editable, null, 2)
   );
 
   const mutation = useMutation({

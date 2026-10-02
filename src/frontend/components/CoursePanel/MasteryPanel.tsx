@@ -195,7 +195,7 @@ export function MasteryPanel({ data }: { data: MasteryData | null }) {
       <section>
         <SectionLabel>Quick Actions</SectionLabel>
         <div className="flex flex-wrap gap-1.5">
-          <Pill onClick={() => sendPrompt("What should I work on next to earn my next microcredential?")}>🎯 What's next?</Pill>
+          <Pill onClick={() => sendPrompt("What should I work on next to earn my next microcredential?")}>🎯 What&apos;s next?</Pill>
           <Pill onClick={() => sendPrompt("Show me my full mastery map")}>📊 Mastery map</Pill>
           <Pill onClick={() => sendPrompt("Quiz me on a concept I'm working on")}>📝 Quiz me</Pill>
           <Pill onClick={() => sendPrompt("What microcredentials have I earned?")}>🏅 My credentials</Pill>
