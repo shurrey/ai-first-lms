@@ -1,0 +1,87 @@
+cases:
+  - id: learning-analyst-shallow-summary
+    inputs:
+      session_id: "sess-recursion-01"
+      person_id: "student-emma"
+      course_id: "cs101"
+      deep: false
+    fixture:
+      transcript: "Student works through factorial recursion with hints; identifies the base case unaided by the end."
+    expected:
+      output_schema_version: v1
+      assertions:
+        - output_is_json: true
+        - session_summary_sentences: {min: 2, max: 3}
+        - review_flag: false
+        - concepts_reviewed_contains: {id: "recursion", outcome: recalled}
+
+  - id: learning-analyst-profile-tagged-with-course
+    inputs:
+      session_id: "sess-loops-02"
+      person_id: "student-emma"
+      course_id: "cs101"
+    fixture:
+      transcript: "Student asks for a code example before each explanation and solves loop exercises quickly after one."
+    expected:
+      output_schema_version: v1
+      assertions:
+        - profile_additions_tagged_with_course: "[CS 101]"
+        - profile_additions_is_append_only: true
+
+  - id: learning-analyst-flags-repeated-struggle
+    inputs:
+      session_id: "sess-pointers-03"
+      person_id: "student-emma"
+      course_id: "cs101"
+    fixture:
+      transcript: "Student is stuck on the same pointer question for four exchanges and says 'I give up, this is pointless'."
+    expected:
+      output_schema_version: v1
+      assertions:
+        - review_flag: true
+        - review_reason_mentions: ["stuck", "frustration"]
+        - concepts_reviewed_contains: {id: "pointers", outcome: struggled}
+
+  - id: learning-analyst-student-insights-exclude-flags
+    inputs:
+      session_id: "sess-pointers-03"
+      person_id: "student-emma"
+      course_id: "cs101"
+    fixture:
+      transcript: "Student is stuck on the same pointer question for four exchanges and says 'I give up, this is pointless'."
+    expected:
+      output_schema_version: v1
+      assertions:
+        - student_insights_exclude: ["review", "flag", "struggle tolerance", "other students"]
+        - student_insights_tone: growth_oriented
+
+  - id: learning-analyst-respects-dispute
+    # Expected to fail until T-E-124 adds dispute handling to the analyst prompt.
+    pending: T-E-124
+    inputs:
+      session_id: "sess-loops-04"
+      person_id: "student-emma"
+      course_id: "cs101"
+    fixture:
+      learner_profile: "[CS 101] prefers code examples before theory"
+      disputed_statements: ["[CS 101] gives up quickly on debugging tasks"]
+      transcript: "Student pauses on an off-by-one bug, then asks for a hint and fixes it."
+    expected:
+      output_schema_version: v1
+      assertions:
+        - profile_additions_exclude: ["gives up quickly on debugging"]
+
+  - id: learning-analyst-deep-review-longitudinal
+    inputs:
+      session_id: "sess-loops-05"
+      person_id: "student-emma"
+      course_id: "cs101"
+      deep: true
+    fixture:
+      prior_sessions: 5
+      transcript: "Fifth session this week; concepts per session rose from 1 to 3."
+    expected:
+      output_schema_version: v1
+      assertions:
+        - profile_additions_has_section: "## Longitudinal Patterns"
+        - mentions_progression_trend: accelerating
