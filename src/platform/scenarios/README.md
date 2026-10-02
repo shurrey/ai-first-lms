@@ -8,8 +8,9 @@ The `scripts/demo` CLI and CI integration tests consume these files.
 ```yaml
 id: 1                              # unique numeric ID
 name: "Human-readable name"
-persona: student                   # student | faculty | advisor | admin
-course_id: "cs-101"                # course context for the session
+login_as: "emma.smith@student.edu" # seeded username (the person's email)
+active_role: student               # optional; student | faculty | program_lead | advisor | admin
+course_id: "cs101"                 # course node slug or UUID
 
 user_turns:
   - message: "The user's message text"
@@ -27,15 +28,18 @@ expected:
   max_wall_time_ms: 30000          # fail if wall time exceeds this
 ```
 
+Unknown top-level keys (including the removed `persona`) are rejected.
+
 ## Fields
 
 ### Top-level
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `id` | int | yes | Unique scenario number (1-11) |
+| `id` | int | yes | Unique scenario number |
 | `name` | string | yes | Human-readable scenario name |
-| `persona` | string | yes | Persona for the session |
-| `course_id` | string | yes | Course context |
+| `login_as` | string | yes | Seeded username to sign in as (see `src/platform/scripts/demo-accounts`) |
+| `active_role` | string | no | Role to switch to after login if the session's default role differs |
+| `course_id` | string | yes | Course node slug (`cs101`, `math201`, ...) or UUID |
 | `user_turns` | list | yes | Sequence of user messages |
 | `expected` | object | yes | Validation criteria |
 
@@ -61,15 +65,20 @@ expected:
 
 ## Executor behavior
 
-1. Create a session: `POST /api/session { persona, course_id }`
-2. For each user turn:
+1. Sign in: `POST /api/auth/login { username: login_as, password: $SEED_DEMO_PASSWORD }`.
+   The client keeps the `lms_session` cookie and sends `X-CSRF-Token` (the `lms_csrf`
+   cookie value) on every non-GET request. If `active_role` is set and differs from the
+   login's `active_role`, `POST /api/auth/role { role }`.
+2. Create a session: `POST /api/session { course_id }`
+3. For each user turn:
    a. Post the message: `POST /api/converse { session_id, message }`
    b. Read the SSE stream: `GET /api/stream?session_id=...&turn_id=...`
    c. On each `approval_request` event, respond with the next scripted approval
    d. Continue until `final` or `error` event
-3. Validate against `expected`:
+4. Sign out: `POST /api/auth/logout`
+5. Validate against `expected`:
    - Check final event type matches
    - Check artifact types are present
    - Check agent invocation count
    - Check wall time
-4. Return pass/fail with details
+6. Return pass/fail with details

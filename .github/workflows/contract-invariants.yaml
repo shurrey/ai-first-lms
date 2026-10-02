@@ -36,3 +36,5 @@ jobs:
       # creates and drops its own scratch databases (the role needs CREATEDB).
       - name: Run contract invariant checks
         run: uv run python src/platform/ci/scripts/check_contracts.py
+      - name: Test the checker and workflow rules
+        run: uv run pytest src/platform/ci/tests -q

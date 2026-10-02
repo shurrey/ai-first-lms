@@ -1,7 +1,8 @@
 id: 11
 name: "AI-native: build a writing improvement path"
-persona: student
-course_id: "cs-101"
+login_as: "emma.smith@student.edu"
+active_role: student
+course_id: "cs101"
 
 user_turns:
   - message: "I want to get better at writing. Help me build a path."

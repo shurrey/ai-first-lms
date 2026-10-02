@@ -1,7 +1,8 @@
 id: 4
 name: "Early alert: at-risk students with explanations"
-persona: faculty
-course_id: "cs-101"
+login_as: "m.torres@university.edu"
+active_role: faculty
+course_id: "cs101"
 
 user_turns:
   - message: "Who in my class is at risk and why?"

@@ -1,7 +1,8 @@
 id: 1
 name: "Socratic tutoring: understanding recursion"
-persona: student
-course_id: "cs-101"
+login_as: "emma.smith@student.edu"
+active_role: student
+course_id: "cs101"
 
 user_turns:
   - message: "Can you help me understand recursion?"

@@ -1,7 +1,8 @@
 id: 9
 name: "Engagement trends: CS 101 this month"
-persona: faculty
-course_id: "cs-101"
+login_as: "m.torres@university.edu"
+active_role: faculty
+course_id: "cs101"
 
 user_turns:
   - message: "Show me engagement trends in CS 101 this month."

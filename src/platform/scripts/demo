@@ -3,9 +3,12 @@
 
 Usage:
   scripts/demo <id>          Run a single scenario
-  scripts/demo all           Run all 11 scenarios
+  scripts/demo all           Run every scenario
   scripts/demo <id> --check  Run and validate (exit 1 on failure)
   scripts/demo all --check   Run all and validate
+
+Each scenario signs in as its `login_as` user with $SEED_DEMO_PASSWORD
+(not read from .env; run `set -a; . ./.env; set +a` first).
 """
 from __future__ import annotations
 
@@ -39,7 +42,7 @@ def main() -> int:
     import argparse
 
     parser = argparse.ArgumentParser(description="AI-First LMS Demo Runner")
-    parser.add_argument("target", help="Scenario ID (1-11) or 'all'")
+    parser.add_argument("target", help="Scenario ID or 'all'")
     parser.add_argument("--check", action="store_true", help="Validate and exit 1 on failure")
     parser.add_argument("--url", default=DEFAULT_BASE_URL, help="Orchestrator base URL")
     args = parser.parse_args()

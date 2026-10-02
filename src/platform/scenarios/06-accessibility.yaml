@@ -1,7 +1,8 @@
 id: 6
 name: "Accessibility: WCAG compliance check"
-persona: faculty
-course_id: "cs-101"
+login_as: "m.torres@university.edu"
+active_role: faculty
+course_id: "cs101"
 
 user_turns:
   - message: "Is my Intro to Biology course WCAG compliant?"
