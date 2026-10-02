@@ -1,0 +1,16 @@
+# Legitimate uses of terms from docs/language.md that language_lint.py would otherwise flag.
+# Prefer rewording; add an entry only when rewording would change the meaning.
+#   path:          repo-relative path, fnmatch glob allowed
+#   term:          the avoided term, as written in docs/language.md
+#   reason:        why this use does not describe the software (required)
+#   line_contains: optional; limits the entry to lines containing this text
+# Example:
+#   - path: src/agents/tutor/system_prompt.md
+#     term: friend
+#     line_contains: "to a friend who"
+#     reason: Teach-back exercise; the friend is a person.
+entries:
+  - path: src/engine/podcast.py
+    term: knows
+    line_contains: what the student already knows
+    reason: Describes the student, not the software.

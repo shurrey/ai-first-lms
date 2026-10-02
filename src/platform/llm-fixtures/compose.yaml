@@ -1,0 +1,15 @@
+# Overlay on docker-compose.yaml that serves the orchestrator's model calls from recordings/.
+# Paths resolve against the repo root (the first -f file). Used by ./run-live-e2e.
+services:
+  orchestrator:
+    environment:
+      LLM_FIXTURE_MODE: ${LLM_FIXTURE_MODE:-replay}
+      # The engine refuses record or replay without this (src/engine/llm_fixture.py).
+      LLM_FIXTURE_ALLOW: "1"
+      LLM_FIXTURE_DIR: /app/llm-fixtures
+      # A replayed turn takes seconds, so a turn the recording cut off on wall time would run
+      # on and miss. Recording with a wide cap keeps both runs on the same path; the scenario
+      # caps and spec §4.5 still apply to live runs.
+      MAX_WALL_TIME_PER_TURN_MS: "600000"
+    volumes:
+      - ./src/platform/llm-fixtures/recordings:/app/llm-fixtures

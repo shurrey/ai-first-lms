@@ -1,5 +1,6 @@
 # Runs on every push and PR to main. Job ids are the required status-check names
-# (see docs/setup.md "Make CI a required check on main").
+# (see docs/setup.md "Make CI a required check on main"). A manual run also runs
+# e2e-live-replay, which never runs on push or PR.
 name: CI
 
 on:
@@ -7,9 +8,15 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      fixtures_run_id:
+        description: Run id of a same-day Record LLM Fixtures run whose llm-fixtures artifact e2e-live-replay replays
+        required: true
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # Keyed on the event too, so a push to main and a manual replay run never cancel each other.
+  group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -36,6 +43,18 @@ jobs:
             echo "::error::verify=False found; use the shared HTTP client helper instead"
             exit 1
           fi
+
+  language-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked --extra dev
+      # Terms come from docs/language.md; exceptions from src/platform/ci/language_allowlist.yaml.
+      - name: Banned terms in agent prompts and UI copy (spec §14.2)
+        run: uv run python src/platform/ci/language_lint.py --format github
+      - name: Linter unit tests
+        run: uv run pytest src/platform/ci/tests/test_language_lint.py -q
 
   test-engine:
     runs-on: ubuntu-latest
@@ -181,6 +200,71 @@ jobs:
             echo "::error::playwright-smoke-app result: ${{ needs.playwright-smoke-app.result }}"
             exit 1
           fi
+
+  # Full stack with the orchestrator answering from recorded LLM fixtures (no API key), then the
+  # live Chat UI scenario specs and scripts/demo all --check. See src/platform/llm-fixtures/README.md.
+  # Manual only: a recording replays only on the day it was made (T-P-106), so fixtures are not
+  # committed and come from a same-day Record LLM Fixtures run. Run it on push/PR once T-P-106 lands.
+  e2e-live-replay:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Scenario 10 and others fail on the live runner (T-E-134).
+    continue-on-error: true
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the recorded fixtures
+        uses: actions/download-artifact@v4
+        with:
+          name: llm-fixtures
+          path: src/platform/llm-fixtures/recordings
+          run-id: ${{ inputs.fixtures_run_id }}
+          github-token: ${{ github.token }}
+      # Seeds every account; the live specs and scripts/demo sign in with it.
+      - name: Set SEED_DEMO_PASSWORD
+        # Repo secret when set (absent on fork PRs), otherwise a fresh value per run.
+        env:
+          SECRET_SEED_DEMO_PASSWORD: ${{ secrets.SEED_DEMO_PASSWORD }}
+        run: |
+          pw="${SECRET_SEED_DEMO_PASSWORD:-$(openssl rand -hex 24)}"
+          echo "::add-mask::$pw"
+          echo "SEED_DEMO_PASSWORD=$pw" >> "$GITHUB_ENV"
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked --extra dev
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: src/frontend/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: src/frontend
+      - run: pnpm exec playwright install --with-deps chromium
+        working-directory: src/frontend
+      - name: Replay fixtures through the live specs and scripts/demo
+        run: src/platform/llm-fixtures/run-live-e2e replay
+        env:
+          KEEP_STACK: "1"
+      - name: Collect logs on failure
+        if: failure()
+        run: docker compose -p lms-llm-fixtures -f docker-compose.yaml -f src/platform/llm-fixtures/compose.yaml logs --tail=300
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-e2e-live
+          path: |
+            src/frontend/playwright-report
+            src/frontend/test-results
+          if-no-files-found: ignore
+      - name: Tear down
+        if: always()
+        run: docker compose -p lms-llm-fixtures -f docker-compose.yaml -f src/platform/llm-fixtures/compose.yaml down -v
 
   compose-config:
     runs-on: ubuntu-latest

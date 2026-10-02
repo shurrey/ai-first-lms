@@ -41,3 +41,9 @@ def test_a_job_using_the_demo_password_generates_it(path):
         if "SEED_DEMO_PASSWORD" in text or "compose" in text:
             runs = [s.get("run", "") for s in job.get("steps", [])]
             assert any("SEED_DEMO_PASSWORD=" in r and "GITHUB_ENV" in r for r in runs), name
+
+
+def test_ci_concurrency_keeps_manual_runs_apart_from_push_runs():
+    ci = yaml.safe_load((WORKFLOWS[0].parent / "ci.yaml").read_text())
+    group = ci["concurrency"]["group"]
+    assert "github.event_name" in group and "github.ref" in group
