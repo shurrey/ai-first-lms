@@ -12,7 +12,8 @@ CREATE EXTENSION IF NOT EXISTS vector;
 -- ============================================================================
 
 CREATE TYPE node_kind AS ENUM (
-  'concept', 'skill', 'artifact', 'assessment_item', 'resource', 'outcome', 'course', 'module', 'microcredential'
+  'concept', 'skill', 'artifact', 'assessment_item', 'resource', 'outcome', 'course', 'module', 'microcredential',
+  'program', 'program_outcome'  -- Round 2 (spec.md §8.2)
 );
 
 CREATE TABLE nodes (
@@ -32,7 +33,8 @@ CREATE INDEX idx_nodes_tags ON nodes USING gin(tags);
 CREATE INDEX idx_nodes_embedding ON nodes USING hnsw (embedding vector_cosine_ops);
 
 CREATE TYPE edge_kind AS ENUM (
-  'prerequisite_of', 'part_of', 'evidence_of', 'aligned_with', 'variant_of', 'contributes_to'
+  'prerequisite_of', 'part_of', 'evidence_of', 'aligned_with', 'variant_of', 'contributes_to',
+  'supports'  -- Round 2 (spec.md §8.2): outcome -supports-> program_outcome
 );
 
 CREATE TABLE edges (
@@ -80,7 +82,8 @@ CREATE TABLE enrollments (
 -- ============================================================================
 
 CREATE TYPE evidence_kind AS ENUM (
-  'attempt', 'completion', 'mastery_check', 'artifact_submission', 'dialogue_turn', 'engagement_event'
+  'attempt', 'completion', 'mastery_check', 'artifact_submission', 'dialogue_turn', 'engagement_event',
+  'reflection'  -- Round 2 (spec.md §10.1)
 );
 
 CREATE TABLE evidence (
@@ -400,3 +403,315 @@ CREATE TABLE concept_reviews (
 );
 
 CREATE INDEX idx_concept_reviews_lookup ON concept_reviews (person_id, concept_id, reviewed_at DESC);
+
+-- ============================================================================
+-- Round 2 (spec.md §4.2): authentication
+-- ============================================================================
+
+-- NOTE: persons.roles is text[], so the new 'program_lead' role value needs no DDL.
+-- NOTE: "defaults to persons.email" and "one of persons.roles" are application
+-- rules; Postgres cannot default or check a column from another table.
+
+CREATE EXTENSION IF NOT EXISTS citext;
+
+CREATE TABLE credentials (
+  person_id       uuid PRIMARY KEY REFERENCES persons(id) ON DELETE CASCADE,
+  username        citext UNIQUE NOT NULL,          -- defaults to persons.email
+  password_hash   text NOT NULL,                   -- argon2id
+  must_change     boolean NOT NULL DEFAULT false,
+  failed_attempts int NOT NULL DEFAULT 0,
+  locked_until    timestamptz,
+  last_login_at   timestamptz,
+  created_at      timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE auth_sessions (
+  id            uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+  token_hash    bytea UNIQUE NOT NULL,             -- sha256 of 32-byte random token
+  person_id     uuid NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+  active_role   text NOT NULL,                     -- one of persons.roles
+  csrf_token    text NOT NULL,
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  last_seen_at  timestamptz NOT NULL DEFAULT now(),
+  expires_at    timestamptz NOT NULL,
+  revoked_at    timestamptz,
+  user_agent    text
+);
+
+CREATE INDEX idx_auth_sessions_person ON auth_sessions (person_id);
+
+CREATE TABLE advisor_assignments (                 -- replaces "advisor enrolled in all courses"
+  advisor_id uuid NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+  student_id uuid NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+  PRIMARY KEY (advisor_id, student_id)
+);
+
+CREATE INDEX idx_advisor_assignments_student ON advisor_assignments (student_id);
+
+-- ============================================================================
+-- Round 2 (spec.md §6.3): provenance and measurement
+-- ============================================================================
+
+-- NOTE: outcome_links has no primary key in the spec; kept as written.
+
+CREATE TABLE tool_calls (
+  id          bigserial PRIMARY KEY,
+  turn_id     uuid NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+  agent       text NOT NULL,
+  tool        text NOT NULL,
+  args        jsonb NOT NULL,          -- after identity overwrite, PII-redacted
+  outcome     text NOT NULL,           -- ok | denied_permission | denied_scope | denied_policy | gated | error
+  latency_ms  int,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_tool_calls_turn ON tool_calls (turn_id, created_at);
+
+CREATE TABLE ai_actions (              -- anything the software produced that a person could see or act on
+  id            uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+  session_id    uuid REFERENCES sessions(id),
+  turn_id       uuid REFERENCES turns(id),
+  agent         text NOT NULL,
+  action_type   text NOT NULL,         -- generation | grade_draft | criterion_feedback | practice_item |
+                                       -- recommendation | attestation | profile_update | nudge | alert
+  subject_person uuid REFERENCES persons(id),   -- learner the action is about (nullable)
+  course_node   uuid REFERENCES nodes(id),
+  target_type   text, target_id uuid,           -- e.g. grades/<id>, content_items/<id>
+  sources       jsonb NOT NULL DEFAULT '[]',    -- [{type:'content_item'|'node'|'submission'|'rubric'|'policy', id, version}]
+  policies      jsonb NOT NULL DEFAULT '[]',    -- [{key, value, scope_type, scope_id, version}]
+  model         text, prompt_sha256 text,
+  output        jsonb NOT NULL,
+  created_at    timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_ai_actions_course ON ai_actions (course_node, created_at DESC);
+CREATE INDEX idx_ai_actions_subject ON ai_actions (subject_person, created_at DESC);
+CREATE INDEX idx_ai_actions_created ON ai_actions (created_at);
+CREATE INDEX idx_ai_actions_turn ON ai_actions (turn_id);
+
+CREATE TABLE human_decisions (
+  id           uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+  ai_action_id uuid NOT NULL REFERENCES ai_actions(id) ON DELETE CASCADE,
+  decided_by   uuid NOT NULL REFERENCES persons(id),
+  decision     text NOT NULL,          -- accepted | edited | rejected | overridden | dismissed | disputed (§12.2) | snoozed (§9.2)
+  diff         jsonb,                  -- structured diff: per-criterion score deltas, text diff stats
+  reason       text,
+  decided_at   timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_human_decisions_action ON human_decisions (ai_action_id);
+
+CREATE TABLE outcome_links (           -- what happened to the learning afterward
+  ai_action_id  uuid NOT NULL REFERENCES ai_actions(id) ON DELETE CASCADE,
+  evidence_id   uuid REFERENCES evidence(id),
+  attestation_id uuid REFERENCES attestations(id),
+  delta         jsonb,                 -- e.g. {criterion:'thesis', before:2, after:3}
+  observed_at   timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_outcome_links_action ON outcome_links (ai_action_id);
+
+-- ============================================================================
+-- Round 2 (spec.md §7.2): formative assessment
+-- ============================================================================
+
+ALTER TABLE submissions
+  ADD COLUMN version        int  NOT NULL DEFAULT 1,
+  ADD COLUMN parent_id      uuid REFERENCES submissions(id),
+  ADD COLUMN status         text NOT NULL DEFAULT 'final',   -- draft | final
+  ADD COLUMN course_node    uuid REFERENCES nodes(id);
+
+CREATE INDEX idx_submissions_parent ON submissions (parent_id);
+CREATE INDEX idx_submissions_course_person ON submissions (course_node, person_id);
+
+CREATE TABLE rubric_criteria (
+  id          uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+  rubric_id   uuid NOT NULL REFERENCES rubrics(id) ON DELETE CASCADE,
+  key         text NOT NULL,                 -- 'thesis', 'evidence', 'writing_mechanics'
+  description text NOT NULL,
+  levels      jsonb NOT NULL,                -- [{score:1,label:'Beginning',descriptor:'…'}, …]
+  outcome_nodes uuid[] NOT NULL DEFAULT '{}',-- alignment to outcome/concept nodes (§7.6, §11)
+  UNIQUE (rubric_id, key)
+);
+
+CREATE TABLE criterion_scores (
+  id             uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+  submission_id  uuid NOT NULL REFERENCES submissions(id) ON DELETE CASCADE,
+  criterion_id   uuid NOT NULL REFERENCES rubric_criteria(id),
+  ai_score       int, ai_rationale text, ai_evidence_spans jsonb,  -- quoted spans from the submission
+  final_score    int,                                              -- instructor-confirmed (summative only)
+  ai_action_id   uuid REFERENCES ai_actions(id),
+  released_at    timestamptz,                                      -- when the student could see feedback
+  UNIQUE (submission_id, criterion_id)
+);
+
+CREATE INDEX idx_criterion_scores_criterion ON criterion_scores (criterion_id);
+
+-- ============================================================================
+-- Round 2 (spec.md §8.2-8.3): programs and policy precedence
+-- ============================================================================
+
+-- Node kinds 'program', 'program_outcome' and edge kind 'supports' are added to
+-- the enums above. course -part_of-> program reuses the existing 'part_of' edge.
+-- NOTE: UNIQUE (key, scope_type, scope_id, version) does not stop duplicates when
+-- scope_id is NULL (vendor_default, institution); kept as the spec wrote it.
+-- NOTE: no policy_precedence row is created here; the seed inserts the singleton.
+
+CREATE TABLE policy_settings (
+  id           uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+  key          text NOT NULL,                     -- from the policy registry
+  scope_type   text NOT NULL,                     -- vendor_default | institution | program | course | learner
+  scope_id     uuid,                              -- null for vendor_default/institution
+  value        jsonb NOT NULL,
+  locked       boolean NOT NULL DEFAULT false,    -- if true, lower-precedence scopes cannot override
+  rationale    text,                              -- why (shown in explainer)
+  version      int NOT NULL DEFAULT 1,
+  set_by       uuid REFERENCES persons(id),
+  effective_from timestamptz NOT NULL DEFAULT now(),
+  superseded_at  timestamptz,
+  UNIQUE (key, scope_type, scope_id, version)
+);
+
+CREATE INDEX idx_policy_settings_current
+  ON policy_settings (key, scope_type, scope_id) WHERE superseded_at IS NULL;
+
+CREATE TABLE policy_precedence (                  -- set by institution admin
+  id          int PRIMARY KEY DEFAULT 1,
+  order_list  text[] NOT NULL DEFAULT '{institution,program,course,learner,vendor_default}',
+  per_key     jsonb NOT NULL DEFAULT '{}',        -- optional per-key order overrides
+  set_by      uuid REFERENCES persons(id),
+  updated_at  timestamptz NOT NULL DEFAULT now(),
+  CHECK (id = 1)
+);
+
+-- ============================================================================
+-- Round 2 (spec.md §10.2): spaced repetition
+-- ============================================================================
+
+-- NOTE: the spec gives no NOT NULL, so these columns are nullable. concept_reviews
+-- holds one row per review; the SM-2 state for a concept is on the latest row.
+
+ALTER TABLE concept_reviews
+  ADD COLUMN ease          real DEFAULT 2.5,
+  ADD COLUMN interval_days real DEFAULT 1,
+  ADD COLUMN due_at        timestamptz,
+  ADD COLUMN reps          int DEFAULT 0,
+  ADD COLUMN lapses        int DEFAULT 0;
+
+CREATE INDEX idx_concept_reviews_due ON concept_reviews (person_id, due_at);
+
+-- ============================================================================
+-- Round 2 (spec.md §10.4): in-app notifications
+-- ============================================================================
+
+CREATE TABLE notifications (
+  id           uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+  person_id    uuid NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+  kind         text NOT NULL,              -- review_due, deadline, stalled, alert, ...
+  title        text NOT NULL,
+  body         text,
+  link         text,
+  ai_action_id uuid REFERENCES ai_actions(id),
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  read_at      timestamptz,
+  dismissed_at timestamptz
+);
+
+CREATE INDEX idx_notifications_person_unread
+  ON notifications (person_id, created_at DESC) WHERE read_at IS NULL AND dismissed_at IS NULL;
+
+-- ============================================================================
+-- Round 2 (spec.md §11.2, §12.5, §11.4): evidence lineage and credential revocation
+-- ============================================================================
+
+-- NOTE: visibility defaults to 'private' because §12.5 says only attestations,
+-- committed grades and final-submission criterion scores are 'course'. Existing
+-- rows become private until backfilled.
+-- NOTE: practice, flashcard, failed-challenge and draft evidence keep their
+-- existing kinds (§12.5 distinguishes them by visibility, not kind). Only
+-- 'reflection' (§10.1) is a new evidence_kind.
+
+ALTER TABLE evidence
+  ADD COLUMN criterion_score_id uuid REFERENCES criterion_scores(id),
+  ADD COLUMN visibility text NOT NULL DEFAULT 'private'
+    CONSTRAINT evidence_visibility_check CHECK (visibility IN ('private', 'course', 'program'));
+
+CREATE INDEX idx_evidence_criterion_score ON evidence (criterion_score_id);
+
+ALTER TABLE issued_credentials
+  ADD COLUMN revoked_at        timestamptz,
+  ADD COLUMN revocation_reason text;
+
+-- ============================================================================
+-- Round 2 (spec.md §12.2-12.3): learner data rights
+-- ============================================================================
+
+-- NOTE: deletion_requests columns are derived from §12.2 prose (student
+-- requests, admin approves, purge runs); the requester is always the subject.
+
+CREATE TABLE data_access_log (
+  id          bigserial PRIMARY KEY,
+  actor_id    uuid NOT NULL REFERENCES persons(id),
+  subject_id  uuid NOT NULL REFERENCES persons(id),
+  resource    text NOT NULL,              -- transcript | profile | analyst_summary | submission
+  resource_id uuid,                       -- null when the resource is the person (profile)
+  purpose     text,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_data_access_log_subject ON data_access_log (subject_id, created_at DESC);
+
+CREATE TABLE deletion_requests (
+  id           uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+  person_id    uuid NOT NULL REFERENCES persons(id),
+  reason       text,
+  status       text NOT NULL DEFAULT 'pending',  -- pending, approved, rejected
+  requested_at timestamptz NOT NULL DEFAULT now(),
+  reviewed_by  uuid REFERENCES persons(id),
+  reviewed_at  timestamptz,
+  completed_at timestamptz                       -- when the purge finished
+);
+
+CREATE INDEX idx_deletion_requests_status ON deletion_requests (status, requested_at);
+CREATE UNIQUE INDEX uq_deletion_requests_pending
+  ON deletion_requests (person_id) WHERE status = 'pending';
+
+-- ============================================================================
+-- Round 2 (spec.md §15.1 #2): Caliper outbox
+-- ============================================================================
+
+-- NOTE: columns are derived from §15.1 #2 (events written here, optional HTTP
+-- sender drains them); format covers the xAPI-behind-a-flag option.
+
+CREATE TABLE caliper_outbox (
+  id          bigserial PRIMARY KEY,
+  event_id    uuid NOT NULL UNIQUE DEFAULT uuid_generate_v4(),  -- Caliper event id (urn:uuid)
+  format      text NOT NULL DEFAULT 'caliper_1_2',              -- caliper_1_2 | xapi_1_0_3
+  event_type  text NOT NULL,                                    -- SessionEvent, AssessmentItemEvent, GradeEvent, ...
+  actor_id    uuid REFERENCES persons(id),
+  payload     jsonb NOT NULL,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  sent_at     timestamptz,
+  attempts    int NOT NULL DEFAULT 0,
+  last_error  text
+);
+
+CREATE INDEX idx_caliper_outbox_unsent ON caliper_outbox (created_at) WHERE sent_at IS NULL;
+
+-- ============================================================================
+-- Round 2 (spec.md §15.1 #7, P2): external MCP gateway tokens
+-- ============================================================================
+
+CREATE TABLE api_tokens (
+  id           uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+  person_id    uuid NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+  name         text NOT NULL,
+  token_hash   bytea UNIQUE NOT NULL,              -- sha256 of the token; the token itself is never stored
+  scopes       text[] NOT NULL DEFAULT '{}',
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  last_used_at timestamptz,
+  expires_at   timestamptz,
+  revoked_at   timestamptz
+);
+
+CREATE INDEX idx_api_tokens_person ON api_tokens (person_id);
