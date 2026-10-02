@@ -144,6 +144,24 @@ async def test_send_message_cannot_send_twice(server, seeded_ids) -> None:
     assert "error" in second
 
 
+async def test_send_message_refuses_email_channel(server, seeded_ids) -> None:
+    if not seeded_ids["faculty_id"]:
+        pytest.skip("No seeded faculty")
+    draft = await _call(server, "communications.draft_message", {
+        "author_id": seeded_ids["faculty_id"],
+        "channel": "email",
+        "audience": {},
+        "body_md": "Not deliverable this round.",
+    })
+
+    send = {"draft_id": draft["draft_id"]}
+    result = await _call(server, "communications.send_message", send)
+
+    assert "error" in result
+    retry = await _call(server, "communications.send_message", send)
+    assert "already sent" not in retry["error"]
+
+
 async def test_send_message_draft_not_found(server) -> None:
     result = await _call(server, "communications.send_message", {
         "draft_id": str(uuid.uuid4()),

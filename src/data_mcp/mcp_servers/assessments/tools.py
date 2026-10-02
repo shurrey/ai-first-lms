@@ -784,7 +784,7 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
             input_schema={"type": "object", "properties": {
                 "pending_id": {"type": "string"}, "reviewer_id": {"type": "string"},
             }, "required": ["pending_id", "reviewer_id"]},
-            handler=approve_credential, mutates=True, requires_approval=False,
+            handler=approve_credential, mutates=True, requires_approval=True,
         ),
         ToolDef(
             name="assessments.list_issued_credentials",
