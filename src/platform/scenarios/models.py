@@ -12,6 +12,11 @@ PersonRole = Literal["student", "faculty", "program_lead", "advisor", "admin"]
 class ApprovalAction(BaseModel):
     decision: str = Field(..., pattern=r"^(approve|reject|edit)$")
     edits: dict | None = None
+    commit_comment: str | None = Field(
+        default=None,
+        description="For a grade_commit request: the scripted instructor confirms the drafted "
+        "score on each required criterion and adds this closing comment, sent as an edit.",
+    )
 
 
 class UserTurn(BaseModel):

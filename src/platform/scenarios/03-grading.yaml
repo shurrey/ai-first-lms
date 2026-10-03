@@ -6,11 +6,14 @@ course_id: "cs101"
 
 user_turns:
   - message: "Grade submissions for Essay 3 with my rubric."
+    # One gated assessments.commit_grade per drafted submission. A commit needs the
+    # instructor's scores and closing comment: the script confirms the drafted scores.
     approvals:
       - decision: approve
-    # One gated assessments.commit_grade per drafted submission.
+        commit_comment: "Reviewed against the rubric; scores confirmed."
     default_approval:
       decision: approve
+      commit_comment: "Reviewed against the rubric; scores confirmed."
 
 expected:
   final_event: final

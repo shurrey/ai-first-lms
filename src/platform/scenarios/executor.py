@@ -266,14 +266,17 @@ class ScenarioExecutor:
                 "rejected it"
             )
             approval = ApprovalAction(decision="reject")
+        decision, edits = approval.decision, approval.edits
+        if approval.commit_comment and payload.get("artifact_type") == "grade_commit":
+            decision, edits = "edit", _scripted_commit(payload, approval.commit_comment)
         client.post(
             "/api/approval",
             json={
                 "session_id": session_id,
                 "turn_id": turn_id,
                 "approval_id": payload.get("approval_id"),
-                "decision": approval.decision,
-                "edited_payload": approval.edits,
+                "decision": decision,
+                "edited_payload": edits,
             },
             headers=self._csrf_headers(client),
         ).raise_for_status()
@@ -338,6 +341,19 @@ def _validate(scenario: Scenario, log: _TurnLog) -> ScenarioResult:
         events=log.events,
         errors=errors,
     )
+
+
+def _scripted_commit(payload: dict[str, Any], comment: str) -> dict[str, Any]:
+    """The grade_commit edit (contracts/events.md): the drafted score on every required
+    criterion, as the scripted instructor's own, plus the closing comment."""
+    preview = payload.get("preview") or {}
+    artifact = preview.get("artifact") or {}
+    grade = artifact.get("grade") or {}
+    draft = grade.get("scores") if isinstance(grade.get("scores"), dict) else {}
+    required = (artifact.get("requires") or {}).get("final_scores") or list(draft)
+    grade_id = grade.get("grade_id") or (preview.get("arguments") or {}).get("grade_id")
+    return {"grade_id": grade_id, "final_scores": {k: draft.get(k) for k in required},
+            "holistic_md": comment}
 
 
 def _approval_for(turn: UserTurn, index: int) -> ApprovalAction | None:
