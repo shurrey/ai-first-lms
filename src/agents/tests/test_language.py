@@ -72,7 +72,10 @@ def test_no_avoided_terms(path: Path):
 @pytest.mark.parametrize("path", PROMPTS, ids=lambda p: p.parent.name)
 def test_prompt_introduces_agent_as_software_tool(path: Path):
     line_3 = path.read_text().splitlines()[2]
-    assert re.match(r"You are the [A-Z][\w ]+, a [\w-]*\s?software tool in an AI-native learning platform", line_3)
+    assert re.match(
+        r"You are the [A-Z][\w ]+, a [\w-]*\s?software tool in an AI-native learning platform",
+        line_3,
+    )
 
 
 def test_tutor_prompt_line_3_matches_spec():

@@ -90,7 +90,9 @@ def test_eval_cases_assert_scenario_artifact(agent: str, kind: str):
         assert case["inputs"].get("message")
 
 
-@pytest.mark.parametrize("agent", sorted(p.parent.name for p in AGENTS_DIR.glob("*/system_prompt.md")))
+@pytest.mark.parametrize(
+    "agent", sorted(p.parent.name for p in AGENTS_DIR.glob("*/system_prompt.md"))
+)
 def test_prompt_tool_tables_name_only_granted_tools(agent: str):
     manifest = _contract_agents()[agent]
     granted = set(manifest.get("mcp_tools", [])) | set(manifest.get("planned_mcp_tools") or [])
