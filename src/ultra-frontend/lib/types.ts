@@ -174,6 +174,8 @@ export interface MeasurementSummary {
   learning_delta_by_decision: { accepted: DeltaStat; edited: DeltaStat; rejected: DeltaStat };
   most_edited_criteria: { criterion_id: string; criterion_key: string; edit_count: number; edit_rate: number }[];
   offloading?: { hint_dependency_ratio?: number | null; solution_check_trips?: number };
+  /** Practice sets counted only; their items and answers stay private to each learner. */
+  practice?: { generated: number; started: number; dismissed: number };
 }
 
 export interface CourseRef {
@@ -185,4 +187,119 @@ export interface CourseRef {
 export interface MeasurementRollup extends MeasurementSummary {
   per_course: { course: CourseRef; totals: DecisionRates }[];
   compliance: { mismatches_count: number };
+}
+
+// ---- formative assessment (contracts/api.openapi.yaml, tag "assessment") ----
+
+export type SubmissionStatus = "draft" | "final";
+
+/** `none` is a final, which gets a grade draft instead of formative feedback. */
+export type FeedbackStatus = "pending" | "awaiting_release" | "released" | "suppressed" | "failed" | "none";
+
+export interface Submission {
+  id: string;
+  person_id: string;
+  assignment_id: string;
+  course_id?: string | null;
+  version: number;
+  parent_id?: string | null;
+  status: SubmissionStatus;
+  body_md?: string | null;
+  attachments?: Record<string, unknown>[];
+  submitted_at: string;
+  feedback_status?: FeedbackStatus;
+  /** Null when the assignment node has no title. */
+  assignment_title?: string | null;
+}
+
+export interface EvidenceSpan {
+  quote: string;
+  start?: number | null;
+  end?: number | null;
+}
+
+export interface CriterionFeedback {
+  criterion_id: string;
+  criterion_key: string;
+  description: string;
+  /** Null to the student on drafts when feedback.show_scores_on_drafts=false. */
+  ai_score: number | null;
+  level_label?: string | null;
+  ai_rationale?: string | null;
+  evidence_spans: EvidenceSpan[];
+  next_step?: string | null;
+  final_score?: number | null;
+  ai_action_id?: string | null;
+  released_at?: string | null;
+}
+
+export interface SubmissionFeedback {
+  submission_id: string;
+  assignment_id?: string;
+  person_id?: string;
+  student_name?: string | null;
+  status: FeedbackStatus;
+  release_mode: "auto" | "instructor_release";
+  criteria: CriterionFeedback[];
+  practice_set_ai_action_id?: string | null;
+}
+
+export interface SubmissionHistory {
+  assignment_id: string;
+  person_id: string;
+  versions: {
+    submission: Submission;
+    /** Only criteria whose feedback the caller may see; delta is null on the first version. */
+    criteria: { criterion_id: string; criterion_key: string; score: number | null; delta: number | null }[];
+  }[];
+}
+
+export interface Page<T> {
+  items: T[];
+  next_cursor?: string | null;
+}
+
+export type TrajectoryFlag = "improving" | "plateaued" | "regressed" | "ready_for_summative";
+
+export interface CriterionTrajectory {
+  criterion_id: string;
+  points: { submission_id: string; version: number; status: SubmissionStatus; score: number | null; submitted_at: string }[];
+  latest_delta?: number | null;
+  flag: TrajectoryFlag | null;
+}
+
+export interface Improvement {
+  course_id: string;
+  criteria: { criterion_id: string; criterion_key: string; description: string; target_score?: number | null }[];
+  /** Empty for aggregate-only callers (program_lead, admin). */
+  students: { student_id: string; display_name: string; trajectories: CriterionTrajectory[] }[];
+  aggregate?: { criterion_id: string; n_students: number; mean_delta?: number | null; flag_counts: Record<string, number> }[];
+}
+
+// ---- data access log ----
+
+export type AccessLogResource = "transcript" | "profile" | "analyst_summary" | "submission";
+
+export interface AccessLogEntry {
+  id: string;
+  actor: { id: string; display_name: string };
+  subject_id: string;
+  resource: AccessLogResource;
+  resource_id: string | null;
+  purpose: string | null;
+  created_at: string;
+}
+
+export interface AccessLogPage {
+  entries: AccessLogEntry[];
+  next_before: string | null;
+}
+
+export interface PendingCredential {
+  id: string;
+  person_id: string;
+  student_name: string;
+  microcredential_id: string;
+  credential_title: string;
+  created_at: string;
 }

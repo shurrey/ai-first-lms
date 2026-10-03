@@ -45,6 +45,9 @@ test("faculty AI Review tab renders the course measures from a contract-shaped p
   await expect(mostEdited.getByRole("row").nth(1)).toContainText("thesis");
 
   await expect(page.locator("dt", { hasText: "Hint-dependency ratio" }).locator("..")).toContainText("0.25 hints per attempt");
+  const practice = page.getByRole("region", { name: "Practice sets" });
+  await expect(practice.locator("dt", { hasText: "Started" }).locator("..")).toContainText("3");
+  await expect(practice).toContainText("Counts only.");
 
   await expect(page.getByRole("img", { name: /grader · grade draft: 6 accepted, 4 edited, 1 rejected/ })).toBeVisible();
 
@@ -113,7 +116,7 @@ test("AI Review export falls back to a local filename when Content-Disposition i
 test("AI Review tab is hidden without the capability", async ({ page }) => {
   await mockEngine(page, { me: EMMA_ME });
   await page.goto(`/course/${CS101_ID}`);
-  await expect(tabs(page)).toHaveText(["Content", "Attestations", "Sessions", "Badges", "Analytics"]);
+  await expect(tabs(page)).toHaveText(["Content", "Assignments", "Attestations", "Sessions", "Badges", "Analytics"]);
 
   await page.goto(`/course/${CS101_ID}/ai-review`);
   await expect(page.getByRole("heading", { name: "You don't have access to this" })).toBeVisible();

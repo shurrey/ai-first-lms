@@ -5,8 +5,10 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ROLE_LABELS, useAuth } from "@/lib/auth-context";
 import { useAiPanel } from "@/lib/ai-panel-context";
-import { apiFetch } from "@/lib/api";
+import { ApiError, apiFetch, apiJson } from "@/lib/api";
+import { ApprovalCard, type ApprovalDecision, type PendingApproval } from "@/components/ApprovalCard";
 import { AiGeneratedLabel } from "@/components/AiGeneratedLabel";
+import { parseAlignmentProposal, type AlignmentProposal } from "@/lib/alignment";
 
 /** `generated` marks answers produced by a turn; `ran` lists the agents and tools that produced them. */
 interface Message { role: "user" | "assistant"; content: string; generated?: boolean; ran?: string[]; }
@@ -15,7 +17,7 @@ const SPEAKER_LABEL = "Tutor (AI)";
 
 export function AiPanel({ onClose, courseId, courseTitle }: { onClose: () => void; courseId: string; courseTitle: string }) {
   const { activeRole, ensureSession } = useAuth();
-  const { initialPrompt, clearPrompt } = useAiPanel();
+  const { queuedPrompts, takePrompt, markTurnCompleted, publishProposal } = useAiPanel();
   const [messages, setMessages] = useState<Message[]>([
     { role: "assistant", content: `Ask a question about **${courseTitle}**. Answers are generated from the course materials.` },
   ]);
@@ -23,7 +25,13 @@ export function AiPanel({ onClose, courseId, courseTitle }: { onClose: () => voi
   const [loading, setLoading] = useState(false);
   const [streamText, setStreamText] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
-  const autoSentRef = useRef(false);
+  // Set synchronously so a re-run effect can't start a second turn before `loading` updates.
+  const turnActiveRef = useRef(false);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const [approval, setApproval] = useState<PendingApproval | null>(null);
+  const [approvalBusy, setApprovalBusy] = useState(false);
+  const [approvalError, setApprovalError] = useState<string | null>(null);
+  const decideRef = useRef<((d: ApprovalDecision) => void) | null>(null);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -31,16 +39,8 @@ export function AiPanel({ onClose, courseId, courseTitle }: { onClose: () => voi
     }
   }, [messages, streamText]);
 
-  // Auto-send initial prompt when panel opens with one
-  useEffect(() => {
-    if (initialPrompt && !autoSentRef.current && !loading) {
-      autoSentRef.current = true;
-      clearPrompt();
-      sendMessage(initialPrompt);
-    }
-  }, [initialPrompt, loading]);
-
   const sendMessage = useCallback(async (msg: string) => {
+    turnActiveRef.current = true;
     setMessages((prev) => [...prev, { role: "user", content: msg }]);
     setLoading(true);
     setStreamText("");
@@ -61,8 +61,10 @@ export function AiPanel({ onClose, courseId, courseTitle }: { onClose: () => voi
       let finalAnswer = "";
       let tokens = "";
       let ran: string[] = [];
+      let proposals: AlignmentProposal[] = [];
       const maxWait = 90000;
-      const start = Date.now();
+      let start = Date.now();
+      const decided = new Set<string>();
 
       while (Date.now() - start < maxWait) {
         const res = await apiFetch(stream_url);
@@ -71,6 +73,7 @@ export function AiPanel({ onClose, courseId, courseTitle }: { onClose: () => voi
         // Each poll replays the turn's stream from the start.
         tokens = "";
         const ranSet = new Set<string>();
+        let pending: PendingApproval | null = null;
 
         for (const line of lines) {
           if (!line.startsWith("data: ")) continue;
@@ -87,18 +90,55 @@ export function AiPanel({ onClose, courseId, courseTitle }: { onClose: () => voi
           if (event.event === "agent_token" && payload.channel !== "thought" && typeof payload.delta === "string") {
             tokens += payload.delta;
           }
+          if (event.event === "approval_request" && typeof payload.approval_id === "string") {
+            pending = payload as unknown as PendingApproval;
+          }
           if (event.event === "final") {
             finalAnswer = typeof payload.answer_markdown === "string" ? payload.answer_markdown : tokens;
+            const artifacts = Array.isArray(payload.artifacts) ? payload.artifacts : [];
+            proposals = artifacts.flatMap((a) => parseAlignmentProposal(a) ?? []);
           }
         }
         ran = [...ranSet];
         setStreamText(tokens);
 
         if (finalAnswer) break;
+        if (pending && !decided.has(pending.approval_id)) {
+          // The turn is paused server-side until POST /api/approval; the wait for the person is not timed.
+          const current = pending;
+          setApproval(current);
+          // A refused decision (422: an incomplete grade commit) leaves the approval pending
+          // server-side, so the card stays up for another try.
+          for (;;) {
+            const decision = await new Promise<ApprovalDecision>((resolve) => { decideRef.current = resolve; });
+            setApprovalBusy(true);
+            try {
+              await apiJson("/api/approval", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ session_id: sid, turn_id, approval_id: current.approval_id, ...decision }),
+              });
+              break;
+            } catch (err: unknown) {
+              if (!(err instanceof ApiError) || err.status !== 422) throw err;
+              setApprovalError(`Not accepted: ${err.message}`);
+            } finally {
+              setApprovalBusy(false);
+            }
+          }
+          decided.add(current.approval_id);
+          setApproval(null);
+          setApprovalError(null);
+          decideRef.current = null;
+          inputRef.current?.focus();
+          start = Date.now();
+          continue;
+        }
         await new Promise((r) => setTimeout(r, 800));
       }
 
       const answer = finalAnswer || tokens;
+      proposals.forEach(publishProposal);
       setMessages((prev) => [
         ...prev,
         answer
@@ -110,12 +150,22 @@ export function AiPanel({ onClose, courseId, courseTitle }: { onClose: () => voi
       console.error("AI panel turn failed", err);
       setMessages((prev) => [...prev, { role: "assistant", content: "Connection error. Please try again." }]);
     } finally {
+      turnActiveRef.current = false;
       setLoading(false);
+      markTurnCompleted();
     }
-  }, [courseId, ensureSession]);
+  }, [courseId, ensureSession, markTurnCompleted, publishProposal]);
+
+  // Prompts that arrive while a turn runs (including one paused for approval) wait for it to end.
+  const nextPrompt = queuedPrompts[0];
+  useEffect(() => {
+    if (!nextPrompt || loading || turnActiveRef.current) return;
+    takePrompt();
+    sendMessage(nextPrompt);
+  }, [nextPrompt, queuedPrompts.length, loading, takePrompt, sendMessage]);
 
   const handleSend = useCallback(() => {
-    if (!input.trim() || loading) return;
+    if (!input.trim() || loading || turnActiveRef.current) return;
     const msg = input.trim();
     setInput("");
     sendMessage(msg);
@@ -187,7 +237,10 @@ export function AiPanel({ onClose, courseId, courseTitle }: { onClose: () => voi
             </div>
           </div>
         )}
-        {loading && !streamText && (
+        {approval && (
+          <ApprovalCard approval={approval} busy={approvalBusy} error={approvalError} onDecide={(d) => decideRef.current?.(d)} />
+        )}
+        {loading && !streamText && !approval && (
           <div role="status" className="mr-4 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-600 animate-pulse">
             Working…
           </div>
@@ -198,6 +251,7 @@ export function AiPanel({ onClose, courseId, courseTitle }: { onClose: () => voi
       <div className="border-t border-gray-200 p-3">
         <div className="flex gap-2 items-end">
           <textarea
+            ref={inputRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
