@@ -18,7 +18,7 @@ from engine.agents.artifacts import (
     split_artifact_blocks,
     tool_artifacts,
 )
-from engine.agents.post import ToolOutput
+from engine.agents.post import ToolOutput, apply_post_processors
 from engine.agents.runner import ClaudeAgentRunner
 from engine.graph.dispatch import dispatch, set_agent_runner
 from engine.graph.synthesize import synthesize
@@ -224,6 +224,71 @@ def test_tool_artifacts_win_over_keys_and_blocks_of_the_same_type():
     assert [a["data"]["body"] for a in collected] == ["from tool"]
 
 
+TOOL_BUILT = [
+    ("grading_assistant", "rubric_grades",
+     ToolOutput("assessments.draft_grade", {"submission_id": "s-1", "scores": {"Thesis": 10}},
+                {"grade_id": "g-1"})),
+    ("communication", "message",
+     ToolOutput("communications.draft_message", {"body_md": "Hello"}, {"draft_id": "d-1"})),
+    ("assessment", "quiz",
+     ToolOutput("assessments.create_question", {"stem": "Why?"}, {"question_id": "q-1"})),
+    ("course_architect", "content_draft",
+     ToolOutput("content.save_draft", {"title": "T", "body_md": "B"}, {"draft_id": "d-1"})),
+    ("advising", "degree_audit",
+     ToolOutput("sis.degree_audit", {"student_id": "p-1"}, {"program": "BS", "requirements": []})),
+    ("accessibility", "wcag_report",
+     ToolOutput("standards.check_wcag", {"content_id": "c-1"},
+                {"findings": [{"criterion": "1.1.1", "status": "fail", "details": "No alt"}]})),
+]
+
+
+@pytest.mark.parametrize("agent, kind, call", TOOL_BUILT)
+def test_instruction_lets_the_agent_skip_a_block_the_tool_already_builds(agent, kind, call):
+    output = apply_post_processors(agent, {"response_markdown": "Done."}, [call])
+
+    collected = collect_artifacts(agent, output, [call], blocks=[])
+
+    assert [a["type"] for a in collected] == [kind]
+    assert f"`{call.tool}` calls when one succeeded; then skip" in artifact_instruction(agent)
+
+
+def test_instruction_requires_the_block_where_no_tool_builds_the_artifact():
+    text = artifact_instruction("early_alert")
+
+    assert "`risk_list`" in text
+    assert "built by the system" not in text
+
+
+def test_a_valid_block_of_a_type_the_agent_may_not_emit_is_dropped(caplog):
+    quiz = {"title": "Q", "questions": [{"question": "Why?"}]}
+
+    reply, blocks = split_artifact_blocks(
+        "tutor", f"Answer.\n\n```artifact quiz\n{json.dumps(quiz)}\n```")
+
+    assert reply == "Answer."
+    assert blocks == []
+    assert "Dropped artifact block of type 'quiz'" in caplog.text
+
+
+def test_a_block_written_on_one_line_is_taken():
+    quiz = {"title": "Q", "questions": [{"question": "Why?"}]}
+
+    reply, blocks = split_artifact_blocks(
+        "assessment", f"Answer.\n\n```artifact quiz {json.dumps(quiz)}```\n")
+
+    assert reply == "Answer."
+    assert blocks == [{"type": "quiz", "data": quiz}]
+
+
+def test_output_keys_win_over_blocks_of_the_same_type():
+    output = {"send_ready_payload": {"body": "from key"}}
+    blocks = [{"type": "message", "data": {"body": "from block"}}]
+
+    collected = collect_artifacts("communication", output, [], blocks)
+
+    assert [a["data"]["body"] for a in collected] == ["from key"]
+
+
 def test_instruction_lists_only_the_agents_types():
     text = artifact_instruction("early_alert")
     assert "`risk_list`" in text and "`quiz`" not in text
@@ -375,3 +440,119 @@ async def test_dispatch_keeps_artifacts_out_of_the_agent_result_event():
     assert result["artifacts"] == [{"type": "chart", "data": {"x_key": "x"}}]
     event = next(e for e in state["events_emitted"] if e["event"] == "agent_result")
     assert "artifacts" not in event["payload"]
+
+
+# --- block validation (ARTIFACTS.md) -----------------------------------------------------------
+
+
+@pytest.mark.parametrize(("agent", "kind", "data"), [
+    ("assessment", "quiz", {"title": "Quiz", "questions": []}),
+    ("assessment", "quiz", {"questions": [{"stem": "no question key"}]}),
+    ("early_alert", "risk_list", {"title": "At risk"}),
+    ("early_alert", "risk_list", {"students": [{"risk_score": 0.9}]}),
+    ("accessibility", "wcag_report", {"summary": {"errors": 1}}),
+    ("communication", "message", {"subject": "Hi", "body": "  "}),
+    ("advising", "learning_path", {"nodes": [{"id": "n1"}]}),
+    ("engagement_analyst", "chart", {"data": [{"x": 1}], "x_key": "x", "y_keys": []}),
+    ("grading_assistant", "rubric_grades", {"criteria": []}),
+    ("advising", "degree_audit", {"requirements": []}),
+])
+def test_block_missing_required_fields_is_dropped(
+    agent: str, kind: str, data: dict[str, Any], caplog: pytest.LogCaptureFixture,
+):
+    text = f"Answer.\n```artifact {kind}\n{json.dumps(data)}\n```"
+
+    reply, blocks = split_artifact_blocks(agent, text)
+
+    assert reply == "Answer."
+    assert blocks == []
+    assert "missing required fields" in caplog.text
+
+
+def test_minimal_valid_block_of_every_type_is_kept():
+    minimal = {
+        "quiz": {"questions": [{"question": "What is ATP?"}]},
+        "risk_list": {"students": []},
+        "wcag_report": {"issues": [{"rule": "1.1.1"}]},
+        "content_draft": {"body_md": "# Syllabus"},
+        "message": {"body": "Hello"},
+        "learning_path": {"nodes": [{"id": "n1", "label": "Recursion"}]},
+        "rubric_grades": {"criteria": [{"name": "Thesis"}]},
+        "chart": {"data": [], "x_key": "week", "y_keys": ["logins"]},
+        "degree_audit": {"program": "BS CS", "requirements": []},
+    }
+    owner = {t: a for a, types in AGENT_ARTIFACT_TYPES.items() for t in types}
+
+    for kind, data in minimal.items():
+        _, blocks = split_artifact_blocks(owner[kind], f"x\n```artifact:{kind}\n{json.dumps(data)}\n```")
+        assert [b["type"] for b in blocks] == [kind], kind
+
+
+def test_content_draft_block_without_body_uses_the_reply():
+    text = ("# Intro to Data Ethics\n\nWeek 1: Foundations.\n\n"
+            '```artifact content_draft\n{"title": "Intro to Data Ethics", "kind": "syllabus"}\n```')
+
+    reply, [block] = split_artifact_blocks("course_architect", text)
+
+    assert reply == "# Intro to Data Ethics\n\nWeek 1: Foundations."
+    assert block == {"type": "content_draft", "data": {
+        "title": "Intro to Data Ethics", "kind": "syllabus", "body_md": reply}}
+
+
+def test_block_cut_off_by_the_token_cap_is_removed_from_the_reply(
+    caplog: pytest.LogCaptureFixture,
+):
+    text = 'Ten questions follow.\n\n```artifact quiz\n{"title": "Photosynthesis", "questions": [{"que'
+
+    reply, blocks = split_artifact_blocks("assessment", text)
+
+    assert reply == "Ten questions follow."
+    assert blocks == []
+    assert "unterminated" in caplog.text
+
+
+def test_instruction_explains_the_content_draft_body_shortcut_only_where_it_applies():
+    assert "leave out `body_md`" in artifact_instruction("course_architect")
+    assert "leave out `body_md`" not in artifact_instruction("assessment")
+
+
+def test_code_fence_inside_a_json_string_does_not_close_the_block():
+    quiz = {"title": "Loops", "questions": [
+        {"question": "What does this print?\n```python\nprint(1)\n```", "type": "short_answer"}]}
+    text = "Here is your quiz.\n\n```artifact quiz\n" + json.dumps(quiz) + "\n```"
+
+    reply, blocks = split_artifact_blocks("assessment", text)
+
+    assert reply == "Here is your quiz."
+    assert blocks == [{"type": "quiz", "data": quiz}]
+
+
+def test_block_with_crlf_line_endings_is_parsed_and_removed():
+    text = ("Two students need attention.\r\n\r\n```artifact risk_list\r\n"
+            '{"students": [{"name": "Ana", "risk_score": 0.8, "factors": []}]}\r\n```\r\n')
+
+    reply, [block] = split_artifact_blocks("early_alert", text)
+
+    assert reply == "Two students need attention."
+    assert block["type"] == "risk_list"
+
+
+def test_closing_fence_on_the_same_line_as_the_object_is_accepted():
+    text = 'Answer.\n```artifact risk_list\n{"students": [{"name": "Ana", "risk_score": 0.8}]}```'
+
+    reply, [block] = split_artifact_blocks("early_alert", text)
+
+    assert reply == "Answer."
+    assert block["data"]["students"][0]["name"] == "Ana"
+
+
+def test_cut_off_block_with_a_code_fence_in_a_string_is_removed(
+    caplog: pytest.LogCaptureFixture,
+):
+    text = 'Quiz.\n\n```artifact quiz\n{"questions": [{"question": "x\\n```python\\nprint(1)\\n```'
+
+    reply, blocks = split_artifact_blocks("assessment", text)
+
+    assert reply == "Quiz."
+    assert blocks == []
+    assert "unterminated" in caplog.text

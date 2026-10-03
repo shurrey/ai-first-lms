@@ -22,8 +22,10 @@ from typing import Any
 import asyncpg
 from argon2 import PasswordHasher
 
+from data_mcp.embeddings.pipeline import embed_missing_nodes
 from data_mcp.seed.demo_accounts import fetch_demo_accounts, format_demo_accounts
 from data_mcp.seed.provenance import seed_provenance
+from data_mcp.seed.scenario_data import module_body, seed_scenario_data
 from data_mcp.settings import settings
 
 DEMO_PASSWORD_ENV = "SEED_DEMO_PASSWORD"
@@ -502,6 +504,11 @@ async def seed(
             conn, random.Random(rng.getrandbits(64)), summary["course_ids"],
             {c["slug"]: f"{c['faculty'][0][1]}@university.edu" for c in COURSES},
         )
+        summary["scenario_data"] = await seed_scenario_data(
+            conn, random.Random(rng.getrandbits(64)), summary["course_ids"],
+        )
+        # content.search's semantic fallback skips nodes without an embedding.
+        summary["embedded_nodes"] = await embed_missing_nodes(conn)
         summary.update(await _restore_skill_rows(conn, skill_rows))
         summary["credentials"] = await _seed_credentials(conn, demo_password)
     return summary
@@ -963,7 +970,10 @@ async def _seed_content(conn: asyncpg.Connection, rng: random.Random) -> dict[st
                        VALUES ($1, $2, $3, $4, $5, $6)""",
                     citem_id, mod_id, content_type,
                     f"{cdef['modules'][mi]} - {content_type.replace('_', ' ').title()}",
-                    f"# {cdef['modules'][mi]}\n\nContent for {content_type} about {cdef['modules'][mi]}...",
+                    module_body(
+                        slug, mi, cdef["modules"][mi], content_type,
+                        _CONCEPT_MAP.get(cdef["modules"][mi], [cdef["modules"][mi].lower()]),
+                    ),
                     primary_faculty,
                 )
 
@@ -1265,6 +1275,12 @@ async def main(seed_value: int = 42) -> None:
         print(
             f"  Provenance: {prov['ai_actions']} AI actions, "
             f"{prov['human_decisions']} decisions, {prov['outcome_links']} outcome links"
+        )
+        scenario = summary["scenario_data"]
+        print(
+            f"  Scenario data: {scenario['essay3_submissions']} Essay 3 submissions "
+            f"(rubric {scenario['essay3_rubric_id']}), "
+            f"{scenario['october_engagement_events']} later engagement events"
         )
         print(f"  Skill documents preserved: {summary['skills_preserved']}")
         if summary["skills_dropped"]:

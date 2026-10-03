@@ -51,29 +51,23 @@ def embed_text(text: str) -> list[float]:
     return vec
 
 
-async def embed_all_nodes(pool: asyncpg.Pool, batch_size: int = 100) -> int:
-    """Embed all nodes that don't have embeddings yet.
-
-    Returns the number of nodes embedded.
-    """
-    count = 0
+async def embed_all_nodes(pool: asyncpg.Pool) -> int:
+    """Embed all nodes that don't have embeddings yet; returns how many were embedded."""
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """SELECT id, title, COALESCE(description, '') AS description
-               FROM nodes WHERE embedding IS NULL"""
-        )
-        for i in range(0, len(rows), batch_size):
-            batch = rows[i : i + batch_size]
-            for row in batch:
-                text = f"{row['title']} {row['description']}"
-                vec = embed_text(text)
-                await conn.execute(
-                    "UPDATE nodes SET embedding = $1 WHERE id = $2",
-                    str(vec), row["id"],
-                )
-                count += 1
+        return await embed_missing_nodes(conn)
 
-    return count
+
+async def embed_missing_nodes(conn: asyncpg.Connection) -> int:
+    """`embed_all_nodes` on one connection (so it can join a caller's transaction)."""
+    rows = await conn.fetch(
+        """SELECT id, title, COALESCE(description, '') AS description
+           FROM nodes WHERE embedding IS NULL"""
+    )
+    await conn.executemany(
+        "UPDATE nodes SET embedding = $1 WHERE id = $2",
+        [(str(embed_text(f"{r['title']} {r['description']}")), r["id"]) for r in rows],
+    )
+    return len(rows)
 
 
 async def search_similar(

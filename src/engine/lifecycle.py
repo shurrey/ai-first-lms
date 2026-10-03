@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 import logging
 import random
+from datetime import timedelta
+
+from common import clock
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +28,7 @@ async def get_retrieval_practice_injection(
     if not concepts:
         return None
 
-    from datetime import datetime, timezone, timedelta
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    cutoff = (clock.now() - timedelta(hours=24)).isoformat()
     candidates = [c for c in concepts if not c.get("last_reviewed") or c["last_reviewed"] < cutoff]
 
     if not candidates:

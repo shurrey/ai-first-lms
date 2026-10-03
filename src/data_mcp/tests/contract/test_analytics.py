@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 
 import asyncpg
 import pytest
@@ -164,6 +165,61 @@ async def test_query_metadata_shape(server) -> None:
     meta = result.get("metadata", {})
     assert "metric" in meta
     assert meta["metric"] == "evidence_count"
+
+
+@pytest_asyncio.fixture(loop_scope="module")
+async def evidence_around_as_of(pool, monkeypatch):
+    """One engagement event before LMS_AS_OF=2026-10-15 and one after it, for a fresh person."""
+    person, node = uuid.uuid4(), uuid.uuid4()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO persons (id, roles, display_name, email)"
+            " VALUES ($1, '{student}', 'As-of Test', $2)",
+            person, f"asof-{person}@student.edu",
+        )
+        await conn.execute(
+            "INSERT INTO nodes (id, kind, title) VALUES ($1, 'concept', 'as-of test')", node,
+        )
+        for day in ("2026-10-01", "2026-10-20"):
+            await conn.execute(
+                """INSERT INTO evidence (person_id, node_id, kind, source, observed_at)
+                   VALUES ($1, $2, 'engagement_event', 'platform', $3::text::timestamptz)""",
+                person, node, day,
+            )
+    monkeypatch.setenv("LMS_AS_OF", "2026-10-15")
+    yield str(person)
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM evidence WHERE person_id = $1", person)
+        await conn.execute("DELETE FROM nodes WHERE id = $1", node)
+        await conn.execute("DELETE FROM persons WHERE id = $1", person)
+
+
+@pytest.mark.parametrize("window", [
+    {"start": "2026-09-01T00:00:00Z"},
+    {"start": "2026-09-01T00:00:00Z", "end": "2026-10-31T23:59:59Z"},
+    {},
+])
+async def test_query_window_stops_at_lms_as_of(server, evidence_around_as_of, window) -> None:
+    result = await _call(server, "analytics.query", {
+        "scope": {"person_id": evidence_around_as_of},
+        "metric": "engagement_count",
+        "window": window,
+    })
+    assert [row["value"] for row in result["rows"]] == [1]
+
+
+async def test_trend_and_cohort_compare_stop_at_lms_as_of(server, evidence_around_as_of) -> None:
+    scope = {"person_id": evidence_around_as_of}
+    window = {"start": "2026-09-01T00:00:00Z"}
+    trend = await _call(server, "analytics.trend", {
+        "scope": scope, "metric": "engagement_count", "window": window, "interval": "day",
+    })
+    cohorts = await _call(server, "analytics.cohort_compare", {
+        "scope": {}, "cohorts": [{"label": "one", "scope": scope}],
+        "metric": "engagement_count", "window": window,
+    })
+    assert [point["x"][:10] for point in trend["series"]] == ["2026-10-01"]
+    assert [c["value"] for c in cohorts["cohort_results"]] == [1.0]
 
 
 # ---------------------------------------------------------------------------

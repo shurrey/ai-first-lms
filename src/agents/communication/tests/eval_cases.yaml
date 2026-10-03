@@ -61,3 +61,30 @@ cases:
       assertions:
         - draft_count: 3
         - each_draft_personalized: true
+
+  - id: comm-scenario-5-midterm-announcement
+    inputs:
+      message: "Draft an announcement about Monday's midterm."
+      persona: faculty
+      course_id: cs101
+    expected:
+      artifact_types: [message]
+      assertions:
+        - emits_artifact: message
+        - uses_tool: communications.draft_message
+        - drafts_before_asking: true
+        - placeholders_listed: true
+
+  - id: comm-scenario-10-send-study-guide-note
+    inputs:
+      message: "Send the study guide to the students struggling with Chapter 5 with a supportive note."
+      persona: faculty
+      course_id: cs101
+    expected:
+      artifact_types: [message]
+      assertions:
+        - emits_artifact: message
+        - uses_tool: communications.draft_message
+        - send_goes_through_approval: communications.send_message
+        - single_draft_for_group: true
+        - tone: supportive

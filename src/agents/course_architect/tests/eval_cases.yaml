@@ -57,3 +57,16 @@ cases:
       assertions:
         - draft_saved_via_tool: true
         - has_draft_id: true
+
+  - id: ca-scenario-8-syllabus-without-questions
+    inputs:
+      message: "Help me draft a syllabus for Intro to Data Ethics."
+      persona: faculty
+      course_id: cs101
+    expected:
+      artifact_types: [content_draft]
+      assertions:
+        - emits_artifact: content_draft
+        - drafts_before_asking: true
+        - lists_defaults_used: true
+        - draft_saved_via_tool: true

@@ -63,6 +63,20 @@ def test_make_anthropic_client_uses_helper_client(monkeypatch: pytest.MonkeyPatc
     assert client._client is helper_client
 
 
+async def test_anthropic_client_logs_each_outbound_request(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    client = engine_http.make_anthropic_client()
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+
+    with caplog.at_level(logging.INFO, logger="common.http"):
+        for hook in client._client.event_hooks["request"]:
+            await hook(request)
+
+    assert [r.getMessage() for r in caplog.records] == ["anthropic_request POST /v1/messages"]
+
+
 @pytest.mark.parametrize("value", ["true", "TRUE", "1", "yes"])
 def test_escape_hatch_disables_verification(
     monkeypatch: pytest.MonkeyPatch, value: str

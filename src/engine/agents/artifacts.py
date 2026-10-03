@@ -2,7 +2,8 @@
 
 Sources, in priority order per artifact type: the agent's successful tool calls (deterministic),
 structured keys in its parsed output, then fenced ```artifact <type>``` blocks in its reply.
-A lower-priority source never adds a type a higher one already produced.
+A lower-priority source never adds a type a higher one already produced. The block protocol
+is specified in ARTIFACTS.md next to this file.
 """
 
 from __future__ import annotations
@@ -62,10 +63,32 @@ _BLOCK_SHAPES: Mapping[str, str] = MappingProxyType({
                      '"edges": [{"from": str, "to": str}], "recommended_next": [str]}',
 })
 
-_BLOCK_RE = re.compile(r"```artifact[ \t:]+([A-Za-z_]+)[ \t]*\n(.*?)\n?```", re.DOTALL)
+# The closing fence must start a line or directly follow the object's `}` and end its line.
+# JSON strings cannot hold raw newlines, so a ``` inside a string value never matches.
+_BLOCK_RE = re.compile(
+    r"```artifact[ \t:]+([A-Za-z_]+)[ \t]*\r?\n(.*?)(?:\r?\n|(?<=\}))```[ \t]*(?=\r?\n|\Z)",
+    re.DOTALL)
+# The same block written on one line (the type, a space, the object, the fence).
+_INLINE_RE = re.compile(
+    r"```artifact[ \t:]+([A-Za-z_]+)[ \t]+(\{[^\n]*\})[ \t]*```[ \t]*(?=\r?\n|\Z)")
+# A block the reply was cut off in (output token cap): no closing fence before the end.
+_UNTERMINATED_RE = re.compile(r"```artifact[ \t:]+([A-Za-z_]+)[^\n]*\n(?:(?!\n```).)*\Z",
+                              re.DOTALL)
 
 Artifact = dict[str, Any]
 _Wrap = Callable[[Any, dict[str, Any]], list[dict[str, Any]]]
+
+
+# A successful call to this tool makes the engine build the artifact itself (_TOOL_BUILDERS);
+# the instruction tells the agent it may then skip the block.
+_BUILT_FROM_TOOL: Mapping[str, str] = MappingProxyType({
+    "rubric_grades": "assessments.draft_grade",
+    "message": "communications.draft_message",
+    "quiz": "assessments.create_question",
+    "content_draft": "content.save_draft",
+    "degree_audit": "sis.degree_audit",
+    "wcag_report": "standards.check_wcag",
+})
 
 
 def artifact_instruction(agent: str) -> str:
@@ -73,22 +96,78 @@ def artifact_instruction(agent: str) -> str:
     types = AGENT_ARTIFACT_TYPES.get(agent, ())
     if not types:
         return ""
-    shapes = "\n".join(f"- `{t}`: {_BLOCK_SHAPES[t]}" for t in types)
+    shapes = "\n".join(f"- `{t}`: {_BLOCK_SHAPES[t]}{_built_note(t)}" for t in types)
+    draft_note = (
+        "For `content_draft`, leave out `body_md` when the draft is the markdown of your reply; "
+        "the reply is used as the body.\n" if "content_draft" in types else ""
+    )
     return (
         "\n\nARTIFACTS:\n"
-        "When your answer presents one of the artifacts below, end your reply with one fenced "
-        "block per artifact, written exactly as ```artifact <type> on its own line, then one "
-        "JSON object, then ```. This block is the one exception to the no-JSON rule; it is "
-        "removed before the user sees your reply, so keep the full answer in the markdown too. "
-        "Skip the block when you have no real data for it.\n"
-        f"{shapes}\n"
+        "Whenever your reply presents one of the artifacts below, you must end the reply with "
+        "one fenced block per artifact, written exactly as ```artifact <type> on its own line, "
+        "then one JSON object, then ```. This block is the one exception to the no-JSON rule; "
+        "it is removed from your reply and shown beside it as a preview, so the markdown must "
+        "still answer the request on its own but need not repeat every field of the block. "
+        "A block missing its required fields is discarded. Skip the block only when you "
+        "have no real data for it, or when the system already built the artifact from a tool "
+        "call that succeeded (noted below).\n"
+        f"{draft_note}{shapes}\n"
     )
 
 
-def split_artifact_blocks(agent: str, text: str) -> tuple[str, list[Artifact]]:
-    """`text` without its artifact blocks, and the blocks that parsed as an allowed type.
+def _built_note(kind: str) -> str:
+    tool = _BUILT_FROM_TOOL.get(kind)
+    if tool is None:
+        return ""
+    return (f" (built by the system from your `{tool}` calls when one succeeded; then skip "
+            "this block)")
 
-    A malformed or disallowed block is removed from the text and logged.
+
+def _non_empty_str(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _items_with(value: Any, *keys: str, non_empty: bool = True) -> bool:
+    """`value` is a list of objects, each with a non-empty string under one of `keys`."""
+    if not isinstance(value, list) or (non_empty and not value):
+        return False
+    return all(isinstance(v, dict) and any(_non_empty_str(v.get(k)) for k in keys)
+               for v in value)
+
+
+# Required fields per type (ARTIFACTS.md); a block failing its check is dropped.
+_REQUIRED: Mapping[str, Callable[[dict[str, Any]], bool]] = MappingProxyType({
+    "quiz": lambda d: _items_with(d.get("questions"), "question"),
+    "risk_list": lambda d: _items_with(d.get("students"), "name", "person_id", non_empty=False),
+    "wcag_report": lambda d: _items_with(d.get("issues"), "rule", "description",
+                                         non_empty=False),
+    "content_draft": lambda d: _non_empty_str(d.get("body_md")),
+    "message": lambda d: _non_empty_str(d.get("body")),
+    "learning_path": lambda d: isinstance(d.get("nodes"), list) and bool(d["nodes"]) and all(
+        isinstance(n, dict) and _non_empty_str(n.get("id")) and _non_empty_str(n.get("label"))
+        for n in d["nodes"]),
+    "rubric_grades": lambda d: _items_with(d.get("criteria"), "name"),
+    "chart": lambda d: isinstance(d.get("data"), list)
+    and all(isinstance(r, dict) for r in d["data"])
+    and _non_empty_str(d.get("x_key")) and isinstance(d.get("y_keys"), list)
+    and bool(d["y_keys"]) and all(_non_empty_str(k) for k in d["y_keys"]),
+    "degree_audit": lambda d: _non_empty_str(d.get("program"))
+    and isinstance(d.get("requirements"), list)
+    and all(isinstance(r, dict) for r in d["requirements"]),
+})
+
+
+def is_valid_artifact(kind: str, data: Any) -> bool:
+    """True when `data` is an object with the fields ARTIFACTS.md requires for `kind`."""
+    check = _REQUIRED.get(kind)
+    return check is not None and isinstance(data, dict) and check(data)
+
+
+def split_artifact_blocks(agent: str, text: str) -> tuple[str, list[Artifact]]:
+    """`text` without its artifact blocks, and the valid blocks of a type `agent` may emit.
+
+    Every other block (malformed, disallowed, missing a required field, or cut off) is
+    removed from the text and logged. A `content_draft` without `body_md` gets the reply.
     """
     allowed = AGENT_ARTIFACT_TYPES.get(agent, ())
     artifacts: list[Artifact] = []
@@ -109,8 +188,26 @@ def split_artifact_blocks(agent: str, text: str) -> tuple[str, list[Artifact]]:
         artifacts.append({"type": kind, "data": data})
         return ""
 
-    stripped = _BLOCK_RE.sub(take, text)
-    return (stripped.rstrip() if stripped != text else text), artifacts
+    def drop_unterminated(match: re.Match[str]) -> str:
+        logger.warning("Dropped unterminated %s artifact block from %s", match.group(1), agent)
+        return ""
+
+    stripped = _UNTERMINATED_RE.sub(drop_unterminated,
+                                    _INLINE_RE.sub(take, _BLOCK_RE.sub(take, text)))
+    if stripped == text:
+        return text, []
+    reply = stripped.rstrip()
+    kept: list[Artifact] = []
+    for artifact in artifacts:
+        kind, data = artifact["type"], artifact["data"]
+        if kind == "content_draft" and "body_md" not in data and reply:
+            data = {**data, "body_md": reply}
+        if is_valid_artifact(kind, data):
+            kept.append({"type": kind, "data": data})
+        else:
+            logger.warning("Dropped %s artifact block from %s: missing required fields",
+                           kind, agent)
+    return reply, kept
 
 
 def collect_artifacts(

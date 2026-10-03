@@ -50,6 +50,6 @@ certs/*
 !certs/.gitkeep
 *.pem
 
-# Recorded LLM fixtures replay only on the day they were recorded until T-P-106 lands; the
-# README, overlay and run-live-e2e beside them stay tracked.
+# Recorded LLM fixtures are committed; replay misses and partial writes are not.
+# Recorded once, when the project is done; until then nothing here is committed.
 src/platform/llm-fixtures/recordings/

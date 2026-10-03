@@ -1,8 +1,9 @@
 id: 2
 name: "Quiz generation: 10-question photosynthesis quiz"
-login_as: "m.torres@university.edu"
+# Photosynthesis is a BIO 150 module; CS 101 has no such content. BIO 150 is Dr. Patel's.
+login_as: "m.patel@university.edu"
 active_role: faculty
-course_id: "cs101"
+course_id: "bio150"
 
 user_turns:
   - message: "Build me a 10-question quiz on photosynthesis."

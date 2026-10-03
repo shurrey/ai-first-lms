@@ -8,6 +8,7 @@ from typing import Any
 
 import asyncpg
 
+from common import clock
 from data_mcp.mcp_base import ToolDef
 from data_mcp.mcp_servers._helpers import parse_json_column, resolve_concept_id
 
@@ -65,15 +66,16 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
     async def get_student_context(args: dict[str, Any]) -> dict[str, Any]:
         person_id = uuid.UUID(args["person_id"])
         course_id = uuid.UUID(args["course_id"])
+        now = clock.now()
         async with pool.acquire() as conn:
             # Recent evidence
             ev_rows = await conn.fetch(
                 """SELECT e.node_id, e.kind, e.score, e.observed_at, n.title
                    FROM evidence e
                    JOIN nodes n ON n.id = e.node_id
-                   WHERE e.person_id = $1
+                   WHERE e.person_id = $1 AND e.observed_at <= $2
                    ORDER BY e.observed_at DESC, n.title, e.kind, e.score LIMIT 10""",
-                person_id,
+                person_id, now,
             )
             recent_evidence = [
                 {"node_id": str(r["node_id"]), "kind": r["kind"],
@@ -98,9 +100,9 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
             assign_rows = await conn.fetch(
                 """SELECT a.assignment_id, a.title, a.due_at
                    FROM assignments a
-                   WHERE a.course_id = $1 AND a.due_at > now()
+                   WHERE a.course_id = $1 AND a.due_at > $2
                    ORDER BY a.due_at, a.title LIMIT 5""",
-                course_id,
+                course_id, now,
             )
             upcoming = [
                 {"id": str(r["assignment_id"]), "title": r["title"],

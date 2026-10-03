@@ -3,6 +3,7 @@
 import { ActivityTree } from "./ActivityTree";
 import { BriefCard } from "@/components/BriefCard/BriefCard";
 import { CanvasRouter } from "@/components/Canvas/CanvasRouter";
+import { approvalCanvasData } from "@/lib/approval-preview";
 import { ApprovalGate } from "@/components/ApprovalGate";
 import { useTurn } from "@/lib/turn-context";
 
@@ -29,7 +30,7 @@ export function ActivityPane() {
               artifact={{
                 artifact_id: turn.approval.approval_id,
                 type: turn.approval.artifact_type,
-                data: turn.approval.preview,
+                data: approvalCanvasData(turn.approval.artifact_type, turn.approval.preview),
               }}
               status="awaiting_approval"
             />

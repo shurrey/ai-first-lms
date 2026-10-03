@@ -12,6 +12,7 @@ import structlog
 from mcp.server import Server
 from mcp.types import TextContent, Tool
 
+from common import clock
 from data_mcp.mcp_base.logging import log_tool_call
 
 logger = structlog.get_logger()
@@ -37,8 +38,12 @@ def create_mcp_server(
 ) -> Server:
     """Create a configured MCP Server with the given tools.
 
-    Each tool call is wrapped with structured logging and error handling.
+    Each tool call is wrapped with structured logging and error handling. Raises
+    ValueError if LMS_AS_OF is set but malformed.
     """
+    pinned = clock.as_of()
+    if pinned is not None:
+        logger.info("mcp_clock_pinned", server=server_name, as_of=pinned.isoformat())
     server = Server(server_name)
     tool_map: dict[str, ToolDef] = {t.name: t for t in tools}
 

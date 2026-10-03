@@ -338,3 +338,31 @@ async def test_check_wcag_content_id_in_response(server, seeded_ids) -> None:
         "level": "AA",
     })
     assert result["content_id"] == seeded_ids["content_id"]
+
+
+_TIED_LOW = uuid.UUID("00000000-0000-4000-8000-000000000001")
+_TIED_HIGH = uuid.UUID("ffffffff-ffff-4fff-bfff-ffffffffffff")
+
+
+@pytest_asyncio.fixture(loop_scope="module")
+async def tied_node(pool):
+    """A module whose two content items share created_at, as every seeded item does.
+    The lower id is inserted first, which is the row an untied sort happens to return."""
+    node = uuid.uuid4()
+    async with pool.acquire() as conn:
+        await conn.execute("INSERT INTO nodes (id, kind, title) VALUES ($1, 'module', 'tie')", node)
+        for cid in (_TIED_LOW, _TIED_HIGH):
+            await conn.execute(
+                """INSERT INTO content_items (id, node_id, kind, title, body_md, created_at)
+                   VALUES ($1, $2, 'document', $3, '# Tie', '2026-09-01T00:00:00Z')""",
+                cid, node, str(cid),
+            )
+    yield str(node)
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM content_items WHERE node_id = $1", node)
+        await conn.execute("DELETE FROM nodes WHERE id = $1", node)
+
+
+async def test_check_wcag_by_node_breaks_created_at_ties_by_id(server, tied_node) -> None:
+    result = await _call(server, "standards.check_wcag", {"node_id": tied_node})
+    assert result["content_id"] == str(_TIED_HIGH)

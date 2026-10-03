@@ -1,15 +1,43 @@
 # Overlay on docker-compose.yaml that serves the orchestrator's model calls from recordings/.
 # Paths resolve against the repo root (the first -f file). Used by ./run-live-e2e.
+#
+# LMS_AS_OF pins "now" for the seed, the MCP servers' SQL and the engine's prompts, so tool
+# results, and therefore fixture keys, are the same on every day a recording is replayed.
+x-as-of: &as-of
+  LMS_AS_OF: ${LMS_AS_OF:-2026-10-15}
+
 services:
   orchestrator:
     environment:
+      <<: *as-of
       LLM_FIXTURE_MODE: ${LLM_FIXTURE_MODE:-replay}
       # The engine refuses record or replay without this (src/engine/llm_fixture.py).
       LLM_FIXTURE_ALLOW: "1"
       LLM_FIXTURE_DIR: /app/llm-fixtures
+      # fill mode only: the most misses it records (unset: no limit).
+      LLM_FIXTURE_FILL_MAX: ${LLM_FIXTURE_FILL_MAX:-}
+      # Pseudonyms in tool results are part of each request key; an unset salt is random per
+      # process. Synthetic seed data only, so the salt is not a secret here.
+      PII_PSEUDONYM_SALT: llm-fixtures
       # A replayed turn takes seconds, so a turn the recording cut off on wall time would run
       # on and miss. Recording with a wide cap keeps both runs on the same path; the scenario
       # caps and spec §4.5 still apply to live runs.
       MAX_WALL_TIME_PER_TURN_MS: "600000"
     volumes:
       - ./src/platform/llm-fixtures/recordings:/app/llm-fixtures
+  db-seed:
+    environment: *as-of
+  mcp-content:
+    environment: *as-of
+  mcp-roster:
+    environment: *as-of
+  mcp-assessments:
+    environment: *as-of
+  mcp-analytics:
+    environment: *as-of
+  mcp-sis:
+    environment: *as-of
+  mcp-communications:
+    environment: *as-of
+  mcp-standards:
+    environment: *as-of

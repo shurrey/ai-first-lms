@@ -13,9 +13,11 @@ import asyncpg
 import pytest
 from argon2 import PasswordHasher
 
+from data_mcp.mcp_servers.standards.tools import _analyze_wcag
 from data_mcp.seed.all_courses import MissingDemoPasswordError, seed
 from data_mcp.seed.cs101 import seed as seed_legacy_cs101
 from data_mcp.seed.demo_accounts import fetch_demo_accounts, format_demo_accounts
+from data_mcp.seed.scenario_data import ESSAY3_DUE
 
 DB_URL = os.environ.get("LMS_DATABASE_URL", "postgresql://lms:lms_dev@localhost:5432/lms_db")
 TEST_PASSWORD = "test-only-demo-password"
@@ -222,6 +224,7 @@ def test_reseed_is_deterministic(seeded) -> None:  # noqa: ANN001
     assert again["course_ids"] == seeded["course_ids"]
     assert again["total_edges"] == seeded["total_edges"]
     assert again["total_evidence"] == seeded["total_evidence"]
+    assert again["scenario_data"] == seeded["scenario_data"]
 
 
 # ── Provenance history (spec §6.3, §6.6) ──
@@ -402,3 +405,135 @@ def test_reseed_keeps_evidence_visibility(seeded) -> None:  # noqa: ANN001
     again = _run(_reseed())
     assert again["course_visible_evidence"] == seeded["course_visible_evidence"] > 0
     assert sorted(map(dict, _run(_fetch(_VISIBILITY_BY_SOURCE))), key=str) == before
+
+
+# ── Data the demo scenarios read ──
+
+@db
+def test_essay3_is_ready_to_grade_in_cs101(seeded) -> None:  # noqa: ANN001
+    cs101 = seeded["course_ids"]["cs101"]
+    assignment = _run(_fetch(
+        """SELECT id, title, metadata FROM nodes
+           WHERE kind = 'assessment_item' AND title LIKE 'Essay 3%' AND metadata->>'course_id' = $1""",
+        cs101,
+    ))
+    assert len(assignment) == 1
+    meta = json.loads(assignment[0]["metadata"])
+    assert str(assignment[0]["id"]) == seeded["scenario_data"]["essay3_assignment_id"]
+    assert meta["rubric_id"] == seeded["scenario_data"]["essay3_rubric_id"]
+    assert meta["due_at"] < "2026-10-02"
+
+    rubric = _run(_fetch(
+        """SELECT r.metadata, p.email FROM rubrics r JOIN persons p ON p.id = r.owner_id
+           WHERE r.id = $1""",
+        uuid.UUID(meta["rubric_id"]),
+    ))
+    assert rubric[0]["email"] == "m.torres@university.edu"
+    assert json.loads(rubric[0]["metadata"])["assignment_node"] == str(assignment[0]["id"])
+    criteria = _run(_fetch(
+        "SELECT key, levels FROM rubric_criteria WHERE rubric_id = $1 ORDER BY key",
+        uuid.UUID(meta["rubric_id"]),
+    ))
+    assert [c["key"] for c in criteria] == ["analysis", "evidence", "thesis", "writing_mechanics"]
+    assert all([lv["score"] for lv in json.loads(c["levels"])] == [1, 2, 3, 4] for c in criteria)
+
+    subs = _run(_fetch(
+        """SELECT s.status, s.version, s.parent_id, s.body_md, s.submitted_at, s.course_node,
+                  EXISTS (SELECT 1 FROM enrollments e WHERE e.person_id = s.person_id
+                          AND e.course_node = $2 AND e.role = 'student') AS enrolled
+           FROM submissions s WHERE s.assignment_node = $1""",
+        assignment[0]["id"], uuid.UUID(cs101),
+    ))
+    finals = [s for s in subs if s["status"] == "final"]
+    assert len(finals) >= 5
+    assert all(s["enrolled"] and str(s["course_node"]) == cs101 for s in subs)
+    assert all(len(s["body_md"]) > 300 and s["submitted_at"] <= ESSAY3_DUE for s in finals)
+    assert any(s["version"] == 2 and s["parent_id"] for s in finals)
+
+
+@db
+def test_essay3_history_lists_rubric_criteria(seeded) -> None:  # noqa: ANN001
+    from mcp.types import CallToolRequest
+
+    from data_mcp.mcp_base import create_mcp_server
+    from data_mcp.mcp_servers.assessments.tools import get_tools
+
+    async def _history() -> dict:
+        pool = await asyncpg.create_pool(DB_URL, min_size=1, max_size=2)
+        try:
+            person = await pool.fetchval(
+                "SELECT person_id FROM submissions WHERE version = 2 AND assignment_node = $1",
+                uuid.UUID(seeded["scenario_data"]["essay3_assignment_id"]),
+            )
+            server = create_mcp_server("assessments", get_tools(pool))
+            result = await server.request_handlers[CallToolRequest](CallToolRequest(
+                method="tools/call",
+                params={"name": "assessments.list_submission_history", "arguments": {
+                    "person_id": str(person),
+                    "assignment_node": seeded["scenario_data"]["essay3_assignment_id"],
+                }},
+            ))
+            return json.loads(result.root.content[0].text)
+        finally:
+            await pool.close()
+
+    subs = _run(_history())["submissions"]
+    assert [(s["version"], s["status"]) for s in subs] == [(2, "final"), (1, "draft")]
+    assert sorted(c["key"] for c in subs[0]["criteria"]) == [
+        "analysis", "evidence", "thesis", "writing_mechanics",
+    ]
+
+
+@db
+def test_bio150_content_has_wcag_failures_and_passes(seeded) -> None:  # noqa: ANN001
+    rows = _run(_fetch(
+        """SELECT ci.body_md FROM content_items ci JOIN nodes m ON m.id = ci.node_id
+           WHERE m.kind = 'module' AND m.metadata->>'course_id' = $1""",
+        seeded["course_ids"]["bio150"],
+    ))
+    failing: dict[str, int] = {}
+    compliant = 0
+    for r in rows:
+        fails = [f["criterion"] for f in _analyze_wcag(r["body_md"], "AA") if f["status"] == "fail"]
+        compliant += not fails
+        for criterion in fails:
+            failing[criterion] = failing.get(criterion, 0) + 1
+    assert set(failing) == {"1.1.1", "1.3.1", "2.4.4"}
+    assert compliant > 0
+
+
+@db
+def test_module_content_is_findable_by_chapter_and_topic(seeded) -> None:  # noqa: ANN001
+    chapter5 = _run(_fetch(
+        """SELECT m.title FROM content_items ci JOIN nodes m ON m.id = ci.node_id
+           WHERE ci.body_md ILIKE '%Chapter 5:%' AND m.metadata->>'course_id' = $1""",
+        seeded["course_ids"]["cs101"],
+    ))
+    assert {r["title"] for r in chapter5} == {"Recursion"}
+    photosynthesis = _run(_fetch(
+        """SELECT count(*) AS n FROM content_items ci JOIN nodes m ON m.id = ci.node_id
+           WHERE m.title = 'Photosynthesis' AND ci.body_md ILIKE '%Calvin cycle%'
+             AND m.metadata->>'course_id' = $1""",
+        seeded["course_ids"]["bio150"],
+    ))
+    assert photosynthesis[0]["n"] == 3
+
+
+@db
+def test_every_seeded_node_has_an_embedding(seeded) -> None:  # noqa: ANN001
+    missing = _run(_fetch("SELECT count(*) AS n FROM nodes WHERE embedding IS NULL"))
+    assert seeded["embedded_nodes"] > 0
+    assert missing[0]["n"] == 0
+
+
+@db
+def test_engagement_continues_through_october(seeded) -> None:  # noqa: ANN001
+    rows = _run(_fetch(
+        """SELECT count(DISTINCT ev.person_id) AS students, max(ev.observed_at) AS last
+           FROM evidence ev JOIN nodes n ON n.id = ev.node_id
+           WHERE ev.kind = 'engagement_event' AND n.metadata->>'course_id' = $1
+             AND ev.observed_at >= '2026-10-01' AND ev.observed_at < '2026-10-15'""",
+        seeded["course_ids"]["cs101"],
+    ))
+    assert rows[0]["students"] >= 25
+    assert seeded["scenario_data"]["october_engagement_events"] > 0

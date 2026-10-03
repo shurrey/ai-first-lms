@@ -12,9 +12,10 @@ test.describe("Scenario 10: Multi-agent study guide + send", () => {
     await expectActiveRole(page, scenario.activeRole);
     await startCourseSession(page, scenario.courseSlug);
 
-    const { approvedActions } = await runTurn(page, scenario.message, scenario.approvals);
+    const { approvedActions } = await runTurn(page, scenario);
 
-    expect(approvedActions).toHaveLength(scenario.approvals);
+    if (scenario.approveRest) expect(approvedActions.length).toBeGreaterThanOrEqual(scenario.approvals);
+    else expect(approvedActions).toHaveLength(scenario.approvals);
     for (const action of approvedActions) expect(action.trim()).not.toBe("");
     expect(await toolCallsRun(page)).not.toHaveLength(0);
   });

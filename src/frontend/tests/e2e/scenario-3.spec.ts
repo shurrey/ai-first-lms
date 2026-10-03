@@ -14,9 +14,10 @@ test.describe("Scenario 3: Faculty grades with rubric", () => {
     await expectActiveRole(page, scenario.activeRole);
     await startCourseSession(page, scenario.courseSlug);
 
-    const { approvedActions } = await runTurn(page, scenario.message, scenario.approvals);
+    const { approvedActions } = await runTurn(page, scenario);
 
-    expect(approvedActions).toHaveLength(scenario.approvals);
+    if (scenario.approveRest) expect(approvedActions.length).toBeGreaterThanOrEqual(scenario.approvals);
+    else expect(approvedActions).toHaveLength(scenario.approvals);
     expect(await toolCallsRun(page)).toContainEqual(expect.stringMatching(/^assessments\./));
   });
 });

@@ -40,6 +40,7 @@ agent:
   mcp_tools:
   - assessments.get_submission
   - assessments.get_rubric
+  - assessments.list_submission_history
   - assessments.draft_grade
   - assessments.commit_grade
   composable_with: []

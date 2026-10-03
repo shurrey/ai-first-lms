@@ -2,20 +2,24 @@
 # Brings up a freshly seeded stack whose orchestrator records or replays LLM fixtures, then runs
 # the live Chat UI specs (E2E_LIVE=1) followed by `scripts/demo all --check`. See README.md.
 #
-# Usage: src/platform/llm-fixtures/run-live-e2e record|replay
-# Needs SEED_DEMO_PASSWORD; record also needs ANTHROPIC_API_KEY. KEEP_STACK=1 leaves the
+# Usage: src/platform/llm-fixtures/run-live-e2e record|replay|fill
+# fill replays the existing set and records only the requests it has no fixture for.
+# Needs SEED_DEMO_PASSWORD; record and fill also need ANTHROPIC_API_KEY. KEEP_STACK=1 leaves the
 # stack running afterwards (CI uses it to collect logs).
 set -euo pipefail
 
 mode="${1:-}"
 case "$mode" in
-  record | replay) ;;
-  *) echo "usage: $0 record|replay" >&2; exit 2 ;;
+  record | replay | fill) ;;
+  *) echo "usage: $0 record|replay|fill" >&2; exit 2 ;;
 esac
 
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$ROOT"
 : "${SEED_DEMO_PASSWORD:?SEED_DEMO_PASSWORD must be set}"
+# The fixed "now" for seed, MCP servers and engine (compose.yaml). A set replays only under the
+# LMS_AS_OF it was recorded with; keep this default equal to compose.yaml's.
+export LMS_AS_OF="${LMS_AS_OF:-2026-10-15}"
 
 # A project of its own gets fresh volumes, so `down -v` here never touches the demo's database.
 PROJECT=lms-llm-fixtures
@@ -32,6 +36,9 @@ if [ -n "$others" ]; then
 fi
 
 mkdir -p "$RECORDINGS"
+if [ "$mode" = fill ]; then
+  : "${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY must be set to fill}"
+fi
 if [ "$mode" = record ]; then
   : "${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY must be set to record}"
   # Fixtures are keyed by request content; start empty so none outlive the requests they matched.
@@ -47,6 +54,7 @@ teardown() {
 trap teardown EXIT
 
 "${compose[@]}" down -v --remove-orphans
+echo "LLM fixtures: $mode with LMS_AS_OF=$LMS_AS_OF"
 LLM_FIXTURE_MODE="$mode" "${compose[@]}" up -d --build
 
 seed_status="$(docker wait lms-db-seed)"
@@ -70,7 +78,7 @@ status=0
 (cd src/frontend && E2E_LIVE=1 pnpm exec playwright test login.live scenario-) || status=1
 uv run python src/platform/scripts/demo all --check || status=1
 
-if [ "$mode" = record ]; then
+if [ "$mode" != replay ]; then
   echo "Recorded $(find "$RECORDINGS" -maxdepth 1 -name '*.json' | wc -l | tr -d ' ') fixtures in $RECORDINGS"
 fi
 exit "$status"

@@ -1,6 +1,5 @@
-# Runs on every push and PR to main. Job ids are the required status-check names
-# (see docs/setup.md "Make CI a required check on main"). A manual run also runs
-# e2e-live-replay, which never runs on push or PR.
+# Runs on every push and PR to main, and on demand. Job ids are the required status-check names
+# (see docs/setup.md "Make CI a required check on main").
 name: CI
 
 on:
@@ -9,13 +8,9 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      fixtures_run_id:
-        description: Run id of a same-day Record LLM Fixtures run whose llm-fixtures artifact e2e-live-replay replays
-        required: true
 
 concurrency:
-  # Keyed on the event too, so a push to main and a manual replay run never cancel each other.
+  # Keyed on the event too, so a push to main and a manual run never cancel each other.
   group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
@@ -201,28 +196,20 @@ jobs:
             exit 1
           fi
 
-  # Full stack with the orchestrator answering from recorded LLM fixtures (no API key), then the
-  # live Chat UI scenario specs and scripts/demo all --check. See src/platform/llm-fixtures/README.md.
-  # Manual only: a recording replays only on the day it was made (T-P-106), so fixtures are not
-  # committed and come from a same-day Record LLM Fixtures run. Run it on push/PR once T-P-106 lands.
+  # Full stack with the orchestrator answering from recorded LLM fixtures (no API key) under a
+  # fixed LMS_AS_OF, then the live Chat UI scenario specs and scripts/demo all --check. See
+  # src/platform/llm-fixtures/README.md. Manual only until a recorded set that replays green is
+  # committed (T-P-106); the fixtures come from a Record LLM Fixtures run's artifact.
+  # Replays the committed recordings in src/platform/llm-fixtures/recordings; no API key.
+  # Manual only: recordings are made once, when the project is done, so they match the final code.
   e2e-live-replay:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    # Scenario 10 and others fail on the live runner (T-E-134).
-    continue-on-error: true
     permissions:
       contents: read
-      actions: read
     steps:
       - uses: actions/checkout@v4
-      - name: Download the recorded fixtures
-        uses: actions/download-artifact@v4
-        with:
-          name: llm-fixtures
-          path: src/platform/llm-fixtures/recordings
-          run-id: ${{ inputs.fixtures_run_id }}
-          github-token: ${{ github.token }}
       # Seeds every account; the live specs and scripts/demo sign in with it.
       - name: Set SEED_DEMO_PASSWORD
         # Repo secret when set (absent on fork PRs), otherwise a fresh value per run.

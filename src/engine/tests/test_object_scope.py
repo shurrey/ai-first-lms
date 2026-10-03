@@ -784,3 +784,168 @@ async def test_bounded_analytics_scope_is_allowed(world, person, agent, tool, ar
 
     assert result.success
     assert len(rig.mcp.calls_to(tool)) == 1
+
+
+# --- submission history listing --------------------------------------------------------------
+
+
+def _history_gateway(world: AuthWorld, mcp: FakeMcp,
+                     extra_roles: frozenset[str] = frozenset()) -> ToolGateway:
+    """A gateway where grading_assistant holds list_submission_history as a served tool."""
+    from engine.guardrails.registry import get_manifest_registry, get_tool_roles
+    from engine.guardrails.tool_roles import ToolRoles
+    from engine.manifests import ManifestRegistry
+
+    registry = get_manifest_registry()
+    manifests = [registry.get_manifest(name) for name in registry.list_agents()]
+    grading = next(m for m in manifests if m.name == "grading_assistant")
+    tool = "assessments.list_submission_history"
+    manifests = [m for m in manifests if m is not grading] + [
+        grading.model_copy(update={"mcp_tools": [*grading.mcp_tools, tool]})]
+    roles = {**get_tool_roles(), tool: ToolRoles(
+        tool, frozenset({"student", "faculty"}) | extra_roles,
+        input_keys=frozenset({"person_id", "assignment_node", "assignment_title", "course_id",
+                              "limit"}))}
+    return ToolGateway(mcp, directory=world.directory, manifests=ManifestRegistry(manifests),
+                       tool_roles=roles)
+
+
+async def test_faculty_submission_listing_needs_a_course_or_a_learner(world):
+    mcp = FakeMcp({"assessments.list_submission_history": {"submissions": []}})
+    gateway = _history_gateway(world, mcp)
+    ctx = GatewayContext(auth=auth_context(world, "faculty"), session_id="sess-1",
+                         turn_id="turn-1", step_id="s1", course_id=CS101.course_id)
+
+    unscoped = await gateway.invoke(ctx, "grading_assistant",
+                                    "assessments.list_submission_history",
+                                    {"assignment_node": "essay-3"})
+    in_course = await gateway.invoke(ctx, "grading_assistant",
+                                     "assessments.list_submission_history",
+                                     {"assignment_node": "essay-3",
+                                      "course_id": CS101.course_id})
+
+    assert unscoped.outcome == "denied_scope"
+    assert in_course.success
+    assert mcp.calls_to("assessments.list_submission_history") == [
+        {"assignment_node": "essay-3", "course_id": CS101.course_id}]
+
+
+async def test_faculty_learner_submission_listing_must_name_the_course(world):
+    # The student is in CS 101 (taught by the faculty member) and MATH 201 (not taught).
+    mcp = FakeMcp({"assessments.list_submission_history": {"submissions": []}})
+    gateway = _history_gateway(world, mcp)
+    ctx = GatewayContext(auth=auth_context(world, "faculty"), session_id="sess-1",
+                         turn_id="turn-1", step_id="s1", course_id=CS101.course_id)
+    student = world.people["student"].id
+
+    other_course_assignment = await gateway.invoke(
+        ctx, "grading_assistant", "assessments.list_submission_history",
+        {"person_id": student, "assignment_node": "math-essay"})
+    learner_only = await gateway.invoke(
+        ctx, "grading_assistant", "assessments.list_submission_history",
+        {"person_id": student})
+    in_course = await gateway.invoke(
+        ctx, "grading_assistant", "assessments.list_submission_history",
+        {"person_id": student, "course_id": CS101.course_id})
+
+    assert other_course_assignment.outcome == "denied_scope"
+    assert learner_only.outcome == "denied_scope"
+    assert in_course.success
+    assert mcp.calls_to("assessments.list_submission_history") == [
+        {"person_id": student, "course_id": CS101.course_id}]
+
+
+async def test_student_lists_own_submissions_without_a_course(world):
+    mcp = FakeMcp({"assessments.list_submission_history": {"submissions": []}})
+    gateway = _history_gateway(world, mcp)
+    ctx = GatewayContext(auth=auth_context(world, "student"), session_id="sess-1",
+                         turn_id="turn-1", step_id="s1", course_id=CS101.course_id)
+
+    result = await gateway.invoke(ctx, "grading_assistant",
+                                  "assessments.list_submission_history",
+                                  {"assignment_node": "essay-3"})
+
+    assert result.success
+    assert mcp.calls_to("assessments.list_submission_history") == [
+        {"assignment_node": "essay-3", "person_id": world.people["student"].id}]
+
+
+async def test_student_course_listing_is_forced_to_self(world):
+    mcp = FakeMcp({"assessments.list_submission_history": {"submissions": []}})
+    gateway = _history_gateway(world, mcp)
+    ctx = GatewayContext(auth=auth_context(world, "student"), session_id="sess-1",
+                         turn_id="turn-1", step_id="s1", course_id=CS101.course_id)
+    me, noah = world.people["student"].id, world.people["noah"].id
+
+    omitted = await gateway.invoke(ctx, "grading_assistant",
+                                   "assessments.list_submission_history",
+                                   {"course_id": CS101.course_id})
+    null = await gateway.invoke(ctx, "grading_assistant",
+                                "assessments.list_submission_history",
+                                {"course_id": CS101.course_id, "person_id": None})
+    classmate = await gateway.invoke(ctx, "grading_assistant",
+                                     "assessments.list_submission_history",
+                                     {"course_id": CS101.course_id, "person_id": noah})
+
+    assert omitted.success and null.success
+    assert classmate.outcome == "denied_scope"
+    assert mcp.calls_to("assessments.list_submission_history") == [
+        {"course_id": CS101.course_id, "person_id": me},
+        {"course_id": CS101.course_id, "person_id": me},
+    ]
+
+
+async def test_faculty_lists_every_learner_in_own_course_by_title(world):
+    mcp = FakeMcp({"assessments.list_submission_history": {"submissions": []}})
+    gateway = _history_gateway(world, mcp)
+    ctx = GatewayContext(auth=auth_context(world, "faculty"), session_id="sess-1",
+                         turn_id="turn-1", step_id="s1", course_id=CS101.course_id)
+
+    omitted = await gateway.invoke(ctx, "grading_assistant",
+                                   "assessments.list_submission_history",
+                                   {"course_id": CS101.course_id, "assignment_title": "Essay 3"})
+    null = await gateway.invoke(ctx, "grading_assistant",
+                                "assessments.list_submission_history",
+                                {"course_id": CS101.course_id, "person_id": None,
+                                 "assignment_title": "Essay 3"})
+    no_course = await gateway.invoke(ctx, "grading_assistant",
+                                     "assessments.list_submission_history",
+                                     {"assignment_title": "Essay 3"})
+
+    assert omitted.success and null.success
+    assert no_course.outcome == "denied_scope"
+    assert mcp.calls_to("assessments.list_submission_history") == [
+        {"course_id": CS101.course_id, "assignment_title": "Essay 3"},
+        {"course_id": CS101.course_id, "assignment_title": "Essay 3"},
+    ]
+
+
+async def test_admin_lists_every_learner_without_a_course(world):
+    # admin is not granted this tool in the contract; added here to exercise the scope check.
+    mcp = FakeMcp({"assessments.list_submission_history": {"submissions": []}})
+    gateway = _history_gateway(world, mcp, extra_roles=frozenset({"admin"}))
+    ctx = GatewayContext(auth=auth_context(world, "admin"), session_id="sess-1",
+                         turn_id="turn-1", step_id="s1", course_id=ENG102.course_id)
+
+    result = await gateway.invoke(ctx, "grading_assistant",
+                                  "assessments.list_submission_history",
+                                  {"assignment_node": "essay-3"})
+
+    assert result.success
+    assert mcp.calls_to("assessments.list_submission_history") == [
+        {"assignment_node": "essay-3"}]
+
+
+async def test_faculty_cannot_list_submissions_in_another_course(world):
+    mcp = FakeMcp({"assessments.list_submission_history": {"submissions": []}})
+    gateway = _history_gateway(world, mcp)
+    ctx = GatewayContext(auth=auth_context(world, "faculty"), session_id="sess-1",
+                         turn_id="turn-1", step_id="s1", course_id=CS101.course_id)
+
+    result = await gateway.invoke(ctx, "grading_assistant",
+                                  "assessments.list_submission_history",
+                                  {"course_id": ENG102.course_id,
+                                   "assignment_title": "Essay 3"})
+
+    assert result.outcome == "denied_scope"
+    assert mcp.calls_to("assessments.list_submission_history") == []

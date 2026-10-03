@@ -10,15 +10,24 @@ Usage:
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
 import yaml
 
 AGENTS_DIR = Path(__file__).parent
+CONTRACT_EVENTS = AGENTS_DIR.parents[1] / "contracts" / "events.md"
 
 REQUIRED_CASE_FIELDS = {"id", "inputs", "expected"}
 MIN_CASES_PER_AGENT = 5
+
+
+def contract_artifact_types() -> frozenset[str]:
+    """The artifact `type` values allowed by `FinalPayload` in contracts/events.md."""
+    payload = CONTRACT_EVENTS.read_text().split("interface FinalPayload", 1)[1]
+    union = payload.split("type:", 1)[1].split(";", 1)[0]
+    return frozenset(re.findall(r'"([a-z_]+)"', union))
 
 
 def load_manifests() -> dict[str, dict]:
@@ -75,8 +84,22 @@ def validate_cases(agent_name: str, cases: list[dict]) -> list[str]:
         expected = case.get("expected") or {}
         if "assertions" not in expected:
             errors.append(f"{agent_name} case '{case_id}': expected.assertions missing")
+        errors.extend(_artifact_type_errors(agent_name, case_id, expected))
 
     return errors
+
+
+def _artifact_type_errors(agent_name: str, case_id: str, expected: dict) -> list[str]:
+    """`expected.artifact_types`, when present, must be a list of contract artifact types."""
+    if "artifact_types" not in expected:
+        return []
+    types = expected["artifact_types"]
+    if not isinstance(types, list) or not types:
+        return [f"{agent_name} case '{case_id}': artifact_types must be a non-empty list"]
+    unknown = sorted(str(t) for t in types if t not in contract_artifact_types())
+    if unknown:
+        return [f"{agent_name} case '{case_id}': artifact_types not in FinalPayload: {unknown}"]
+    return []
 
 
 def run_validation(agent_names: list[str] | None = None) -> bool:

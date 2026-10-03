@@ -45,12 +45,19 @@ def make_sync_http_client(**kw: Any) -> httpx.Client:
     return httpx.Client(verify=tls_verify(), **kw)
 
 
+async def log_anthropic_request(request: httpx.Request) -> None:
+    """One INFO line per outbound model request, retries included, so spend can be counted
+    from the logs."""
+    logger.info("anthropic_request %s %s", request.method, request.url.path)
+
+
 def make_anthropic_client(**kw: Any) -> anthropic.AsyncAnthropic:
     """AsyncAnthropic backed by make_http_client(); ``kw`` goes to the Anthropic constructor.
 
     A caller-supplied ``http_client`` is used as-is, so it must do its own TLS verification.
     """
-    http_client = kw.pop("http_client", None) or make_http_client()
+    http_client = kw.pop("http_client", None) or make_http_client(
+        event_hooks={"request": [log_anthropic_request]})
     return anthropic.AsyncAnthropic(http_client=http_client, **kw)
 
 

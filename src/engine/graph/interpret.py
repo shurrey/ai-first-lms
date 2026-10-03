@@ -53,8 +53,17 @@ Return valid JSON with these fields:
 assessment, grading_assistant, early_alert, advising, accessibility, engagement_analyst, communication)
 - parameters: object — any parameters extracted from the message
 - confidence: float 0-1 — how confident you are in this interpretation
-- needs_clarification: boolean — true if the intent is ambiguous
-- clarification_reason: string | null — why clarification is needed
+- needs_clarification: boolean — true only if the request cannot be acted on (see below)
+- clarification_reason: string | null — the question to ask the user, when clarification is needed
+
+When to ask for clarification:
+- Set needs_clarification to true only when no agent could act on the request: there is no \
+identifiable task, or it depends on something only the user can supply (e.g. "grade it" with nothing \
+to grade). Then give a low confidence.
+- Missing details are NOT a reason to ask: audience, length, level, duration, dates, tone and \
+format get reasonable defaults from the agent, which states them in its reply. \
+"Help me draft a syllabus for <course>" is actionable: course_architect, needs_clarification false.
+- When two agents could both handle a request, pick the better one; do not ask.
 
 Agent routing guide:
 - tutor: the default student-facing agent. Handles explaining concepts, Socratic tutoring, \
@@ -83,7 +92,9 @@ Key routing rules:
 MULTI-AGENT actions (set action to exactly these strings when the request needs multiple agents):
 - "identify_and_help": find struggling students AND create study guides AND send messages → uses early_alert → content_generator → communication
 - "quiz_generation": create a quiz WITH supporting study materials → uses content_generator → assessment
-- "syllabus_draft": draft a course structure WITH supporting content → uses course_architect → content_generator
+- "syllabus_draft": draft a course structure AND separately requested supporting materials (readings, \
+practice sets, slides) → uses course_architect → content_generator. A request for a syllabus or course \
+outline alone is a single course_architect step, not this pattern.
 - "risk_analysis": analyze at-risk students AND engagement trends simultaneously → uses early_alert + engagement_analyst
 
 For multi-agent actions, set the action to the pattern name above and include "agents" in parameters \
@@ -121,6 +132,18 @@ def _constrain_parameters(params: Any, allowed: frozenset[str], persona: str) ->
         logger.warning("Classifier listed agents %r; dropped those not routable for persona %s",
                        agents, persona)
     return {**params, "agents": kept}
+
+
+def _should_clarify(parsed: dict[str, Any], confidence: Any) -> bool:
+    """Clarify only on low confidence that the classifier also flags as unactionable.
+
+    A low-confidence pick it did not flag (e.g. a close call between two agents) proceeds;
+    a missing flag counts as flagged.
+    """
+    if isinstance(confidence, int | float) and confidence >= CONFIDENCE_THRESHOLD:
+        return False
+    return parsed.get("needs_clarification", True) is not False \
+        or parsed.get("action") in (None, "", "unknown")
 
 
 class LLMClient(Protocol):
@@ -248,10 +271,7 @@ async def interpret(state: OrchestratorState) -> OrchestratorState:
         }
 
     confidence = parsed.get("confidence", 0.0)
-    # Only clarify if confidence is genuinely low. If the LLM is >threshold
-    # confident, proceed even if it suggests clarification — otherwise the
-    # graph loops because there's no user input to break the cycle.
-    needs_clarification = confidence < CONFIDENCE_THRESHOLD
+    needs_clarification = _should_clarify(parsed, confidence)
 
     interpretation = {
         "action": parsed.get("action", "unknown"),

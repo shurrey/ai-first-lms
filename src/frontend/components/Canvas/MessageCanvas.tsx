@@ -5,7 +5,7 @@ import { CanvasShell, type ArtifactStatus } from "./CanvasShell";
 interface MessageData {
   subject?: string;
   body: string;
-  recipients: string[];
+  recipients?: string[];
   sender?: string;
 }
 
@@ -26,7 +26,7 @@ export function MessageCanvas({ data, status }: MessageCanvasProps) {
         )}
         <div>
           <span className="text-xs text-muted-foreground">To: </span>
-          <span>{data.recipients.join(", ")}</span>
+          <span>{(data.recipients ?? []).join(", ")}</span>
         </div>
         {data.sender && (
           <div>

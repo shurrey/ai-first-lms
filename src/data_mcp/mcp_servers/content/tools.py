@@ -63,7 +63,7 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                        FROM content_items ci
                        LEFT JOIN nodes n ON n.id = ci.node_id
                        WHERE ci.node_id = $1
-                       ORDER BY ci.created_at DESC LIMIT 1""",
+                       ORDER BY ci.created_at DESC, ci.id DESC LIMIT 1""",
                     uuid.UUID(node_id),
                 )
             else:
@@ -94,6 +94,7 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                    WHERE (ci.title ILIKE $1 OR ci.body_md ILIKE $1)
                      AND ($2::text IS NULL
                           OR ci.node_id IN (SELECT id FROM nodes WHERE metadata->>'course_id' = $2))
+                   ORDER BY ci.title, ci.id
                    LIMIT $3""",
                 f"%{query}%", str(course_id) if course_id else None, top_k,
             )
@@ -117,7 +118,7 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                        JOIN nodes n ON n.id = ci.node_id
                        WHERE n.embedding IS NOT NULL
                          AND ($2::text IS NULL OR n.metadata->>'course_id' = $2)
-                       ORDER BY n.embedding <=> $1::vector
+                       ORDER BY n.embedding <=> $1::vector, ci.title, ci.id
                        LIMIT $3""",
                     str(query_vec),
                     str(course_id) if course_id else None,

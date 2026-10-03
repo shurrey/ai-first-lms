@@ -53,6 +53,7 @@ agent:
   mcp_tools:
   - content.retrieve
   - content.search
+  - standards.check_wcag
   composable_with:
   - content_generator
   requires_human_approval: true

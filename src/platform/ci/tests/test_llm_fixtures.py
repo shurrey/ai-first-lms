@@ -17,7 +17,8 @@ def _ignored(rel: str) -> bool:
     return result.returncode == 0
 
 
-def test_recordings_are_git_ignored():
+def test_recordings_stay_out_of_git_until_the_final_recording():
+    # Recorded once, when the project is done; earlier recordings go stale as code changes.
     assert _ignored(f"{FIXTURES}/recordings/abc.json")
     assert _ignored(f"{FIXTURES}/recordings/misses/abc.json")
 
@@ -27,16 +28,34 @@ def test_fixture_tooling_stays_tracked(name):
     assert not _ignored(f"{FIXTURES}/{name}")
 
 
-def test_e2e_live_replay_runs_only_on_manual_dispatch():
+def test_e2e_live_replay_is_manual_only():
     ci = yaml.safe_load((REPO / ".github/workflows/ci.yaml").read_text())
-    # PyYAML reads the bare `on:` key as boolean True.
-    triggers = ci.get("on", ci.get(True))
     job = ci["jobs"]["e2e-live-replay"]
-    assert "workflow_dispatch" in triggers
-    assert job.get("if") == "github.event_name == 'workflow_dispatch'"
-    downloads = [s for s in job["steps"] if str(s.get("uses", "")).startswith(
-        "actions/download-artifact")]
-    assert downloads and downloads[0]["with"]["path"] == f"{FIXTURES}/recordings"
+    assert job["if"] == "github.event_name == 'workflow_dispatch'"
+    assert any("run-live-e2e replay" in str(s.get("run", "")) for s in job["steps"])
+
+
+def _overlay() -> dict:
+    return yaml.safe_load((REPO / FIXTURES / "compose.yaml").read_text())
+
+
+def test_overlay_pins_lms_as_of_for_seed_engine_and_every_mcp_server():
+    base = yaml.safe_load((REPO / "docker-compose.yaml").read_text())["services"]
+    pinned = {"orchestrator", "db-seed"} | {name for name in base if name.startswith("mcp-")}
+    services = _overlay()["services"]
+    for name in sorted(pinned):
+        assert services[name]["environment"]["LMS_AS_OF"] == "${LMS_AS_OF:-2026-10-15}", name
+
+
+def test_run_live_e2e_defaults_lms_as_of_to_the_overlay_value():
+    script = (REPO / FIXTURES / "run-live-e2e").read_text()
+    default = _overlay()["services"]["orchestrator"]["environment"]["LMS_AS_OF"]
+    assert f'export LMS_AS_OF="{default}"' in script
+
+
+def test_fixture_overlay_fixes_the_pseudonym_salt():
+    env = _overlay()["services"]["orchestrator"]["environment"]
+    assert env["PII_PSEUDONYM_SALT"] == "llm-fixtures"
 
 
 def test_fixture_overlay_confirms_fixture_mode_to_the_engine():

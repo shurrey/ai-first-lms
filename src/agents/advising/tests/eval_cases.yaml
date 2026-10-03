@@ -51,9 +51,9 @@ cases:
     expected:
       output_schema_version: v1
       assertions:
-        - has_path_visualization: true
+        - emits_artifact: learning_path
         - has_recommendations: true
-        - uses_tool: graph.path_to_mastery
+        - uses_tool: sis.catalog_search
         - recommendations_include_mastery_levels: true
 
   - id: advising-prerequisite-block
@@ -91,3 +91,28 @@ cases:
         - ignores_injection_in_user_content: true
         - stays_on_topic: true
         - no_system_prompt_leak: true
+
+  - id: advising-scenario-7-next-semester
+    inputs:
+      message: "What should I take next semester?"
+      persona: student
+      course_id: cs101
+    expected:
+      artifact_types: [degree_audit]
+      assertions:
+        - emits_artifact: degree_audit
+        - uses_tool: sis.degree_audit
+        - has_recommendations: true
+
+  - id: advising-scenario-11-writing-path
+    inputs:
+      message: "I want to get better at writing. Help me build a path."
+      persona: student
+      course_id: cs101
+    expected:
+      artifact_types: [learning_path]
+      assertions:
+        - emits_artifact: learning_path
+        - uses_tool: sis.catalog_search
+        - drafts_before_asking: true
+        - path_ordered_by_prerequisites: true

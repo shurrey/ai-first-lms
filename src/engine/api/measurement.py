@@ -21,6 +21,7 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 
+from common import clock
 from engine.auth.capabilities import has_capability
 from engine.auth.deps import CurrentUser
 from engine.auth.directory import CourseRef
@@ -87,8 +88,9 @@ def _utc(value: datetime) -> datetime:
 
 
 def time_range(start: datetime | None, end: datetime | None) -> tuple[datetime | None, datetime]:
-    """Inclusive start, exclusive end defaulting to now; naive times are UTC. 422 if empty."""
-    stop = _utc(end) if end else datetime.now(UTC)
+    """Inclusive start, exclusive end defaulting to `common.clock.now()`; naive times are UTC.
+    422 if empty."""
+    stop = _utc(end) if end else clock.now()
     begin = _utc(start) if start else None
     if begin is not None and begin >= stop:
         raise HTTPException(status_code=422, detail="`from` must be before `to`.")
