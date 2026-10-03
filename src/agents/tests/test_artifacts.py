@@ -31,7 +31,10 @@ AGENT_ARTIFACTS: dict[str, tuple[str, ...]] = {
 }
 
 # Artifacts the engine builds from the named tool's result, so the prompt shows no block.
-TOOL_BUILT: dict[tuple[str, str], str] = {("advising", "degree_audit"): "sis.degree_audit"}
+TOOL_BUILT: dict[tuple[str, str], str] = {
+    ("advising", "degree_audit"): "sis.degree_audit",
+    ("grading_assistant", "rubric_grades"): "assessments.draft_grade",
+}
 
 _TOOL_ROW = re.compile(r"^\| `[a-z_]+\.[a-z_]+`.*?\|", re.MULTILINE)
 _TOOL_NAME = re.compile(r"`([a-z_]+\.[a-z_]+)`")

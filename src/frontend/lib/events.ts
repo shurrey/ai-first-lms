@@ -83,12 +83,19 @@ export const ApprovalRequestPayload = z.object({
   agent: z.string(),
   action: z.string(),
   preview: z.record(z.string(), z.unknown()),
+  // contracts/events.md: the interface's values plus the per-tool table under it.
   artifact_type: z.enum([
     "rubric_grades",
     "message",
     "quiz",
     "content_draft",
     "other",
+    "grade_commit",
+    "credential",
+    "attestation_override",
+    "content_publish",
+    "feedback_release",
+    "policy_change",
   ]),
 });
 

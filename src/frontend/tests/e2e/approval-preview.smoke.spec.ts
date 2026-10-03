@@ -83,3 +83,24 @@ test("a create_question approval shows the question to save", async ({ page }) =
   await expect(gate.getByText("Oxygen")).toBeVisible();
   expect(errors).toEqual([]);
 });
+
+test("a commit_grade approval (grade_commit) shows the gate, not a schema error", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  await setupMockAPI(page, {
+    me: TORRES, sessionId: SESSION_ID, turnId: TURN_ID,
+    sseEvents: [approvalEvent("grade_commit", {
+      tool: "assessments.commit_grade",
+      arguments: { submission_id: "s-1" },
+      artifact: { grade: { scores: { thesis: 2 }, feedback: { thesis: "State the claim in one sentence." } } },
+    })],
+  });
+  await page.goto("/");
+  await selectCourse(page);
+  await ask(page);
+
+  const gate = page.getByRole("region", { name: "Approval needed" });
+  await expect(gate.getByRole("button", { name: "Approve" })).toBeVisible();
+  await expect(page.locator("main").getByText(/^Error: /)).toHaveCount(0);
+  expect(errors).toEqual([]);
+});

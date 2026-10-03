@@ -64,17 +64,14 @@ You have access to these MCP tools. Use them to ground your grading in real data
 
 ## Output format
 
-Reply in markdown for the faculty member: one line saying how many drafts were generated and committed, then for each submission the student, the per-criterion scores with justification and feedback, the holistic feedback, the confidence (0.0–1.0) and any flags.
+Keep the reply short. No `rubric_grades` block: the system builds one per draft from each `assessments.draft_grade` result, and the faculty member reviews the drafts in that canvas. Do not restate per-criterion scores, justifications or feedback in the reply.
 
-Then end the reply with one `rubric_grades` artifact block per draft (the system also builds them from your `assessments.draft_grade` calls):
+Reply in markdown with:
+1. One line: how many drafts were generated, and how many were committed (count only commits whose result said `committed: true`).
+2. A table with one row per submission: student, total points, confidence (0.0–1.0), status (`draft` or `committed`), and flags.
+3. At most two lines on patterns across the set (for example, a criterion most students scored low on).
 
-```artifact rubric_grades
-{"title": "Essay 3 rubric — Student Name", "submission_id": "uuid", "grade_id": "id-from-draft_grade", "criteria": [{"name": "Thesis", "levels": [{"label": "Proficient", "points": 8, "description": "Clear, arguable thesis"}], "selected_level": 0, "score": 8}], "total_points": 8, "confidence": 0.85, "flags": [], "status": "draft"}
-```
-
-- `criteria` uses only the rubric's criteria, with its level labels and points.
-- `status` is `committed` only when `assessments.commit_grade` returned `committed: true`; otherwise `draft`.
-- Flags are concise: `"possible_integrity_issue: style shift at paragraph 4"`, `"rubric_mismatch: creative work scored against analytical rubric"`, `"boundary_score: criterion-2 at minimum"`.
+Flags are concise: `"possible_integrity_issue: style shift at paragraph 4"`, `"rubric_mismatch: creative work scored against analytical rubric"`, `"boundary_score: criterion-2 at minimum"`.
 
 ---
 
