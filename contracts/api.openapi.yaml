@@ -461,6 +461,13 @@ paths:
       operationId: submitApproval
       x-required-capability: authenticated
       x-scope-check: session and turn belong to the caller
+      description: |
+        For `artifact_type: grade_commit` the decision must be `edit` (or `reject`), and
+        `edited_payload` is `{ grade_id, final_scores: { <criterion key>: integer },
+        holistic_md: string, feedback?: { <criterion key>: string } }`. `final_scores` must
+        cover every key in the preview's `artifact.requires.final_scores`; otherwise, or with
+        a blank `holistic_md`, the response is 422 and the approval stays pending. The model
+        never supplies these fields: the gateway drops them from its call. Change: T-C-118.
       security:
         - sessionCookie: []
           csrfHeader: []
@@ -498,10 +505,15 @@ paths:
             application/json:
               schema: {$ref: "#/components/schemas/ErrorDetail"}
         "422":
-          description: Malformed body or unknown decision
+          description: Malformed body or unknown decision (ValidationError), or a grade_commit
+            approval without the instructor's final scores and closing comment (ErrorDetail
+            with a message string)
           content:
             application/json:
-              schema: {$ref: "#/components/schemas/ValidationError"}
+              schema:
+                oneOf:
+                  - {$ref: "#/components/schemas/ValidationError"}
+                  - {$ref: "#/components/schemas/ErrorDetail"}
 
   /api/clarify:
     post:
@@ -896,7 +908,7 @@ paths:
         "403": {$ref: "#/components/responses/Forbidden"}
 
   # ---------------------------------------------------------------------------
-  # Assessment: submissions, feedback, improvement (planned)
+  # Assessment: submissions, feedback, improvement
   # ---------------------------------------------------------------------------
 
   /api/submissions:
@@ -904,7 +916,6 @@ paths:
       tags: [assessment]
       summary: Submit a draft, revision or final version of an assignment
       operationId: createSubmission
-      x-implementation-status: planned
       x-task: T-D-104
       x-required-capability: submit_work
       x-scope-check: caller is an enrolled student in the assignment's course
@@ -915,7 +926,9 @@ paths:
         Proxies `assessments.submit`. The submitter is always the caller.
         A draft starts formative feedback asynchronously; poll
         GET /api/feedback/{submission_id} or wait for a notification.
-        `parent_id` marks a revision and must be the latest version.
+        There is one version chain per learner and assignment: the first
+        submission has no `parent_id`, and every later one names the latest
+        version as `parent_id`.
       requestBody:
         required: true
         content:
@@ -948,21 +961,26 @@ paths:
         "403": {$ref: "#/components/responses/Forbidden"}
         "404": {$ref: "#/components/responses/NotFound"}
         "409":
-          description: A final version already exists, or parent_id is not the latest version.
+          description: |
+            A final version already exists, parent_id is not the latest version,
+            or a version exists and parent_id is missing.
           content:
             application/json:
               schema: {$ref: "#/components/schemas/ErrorDetail"}
         "422": {$ref: "#/components/responses/ValidationFailed"}
+        "502": {$ref: "#/components/responses/UpstreamFailed"}
     get:
       tags: [assessment]
       summary: List submissions (latest version per chain unless all_versions)
       operationId: listSubmissions
-      x-implementation-status: planned
       x-task: T-D-104
       x-required-capability: authenticated
-      x-scope-check: students see only their own; faculty see their own courses
+      x-scope-check: |
+        student: own only; faculty: own courses; advisor: one assigned student,
+        named by person_id; admin: all; program_lead: 403 (aggregate views only)
       security:
         - sessionCookie: []
+      description: Items carry `body_md` null and no attachments; read one version for its text.
       parameters:
         - in: query
           name: assignment_id
@@ -1000,7 +1018,6 @@ paths:
       tags: [assessment]
       summary: One submission version
       operationId: getSubmission
-      x-implementation-status: planned
       x-task: T-D-104
       x-required-capability: authenticated
       x-scope-check: submitter, or faculty of the course; others via scope.can_view_student(purpose="submission")
@@ -1023,13 +1040,19 @@ paths:
       tags: [assessment]
       summary: The version chain containing this submission, oldest first, with per-criterion deltas
       operationId: getSubmissionHistory
-      x-implementation-status: planned
       x-task: T-D-104
       x-required-capability: authenticated
       x-scope-check: same as GET /api/submissions/{submission_id}
       security:
         - sessionCookie: []
-      description: Proxies `assessments.list_submission_history`.
+      description: |
+        Versions carry `body_md` null; read a version for its text. Scores are
+        `final_score` when set, else `ai_score`; the submitter sees only released
+        criteria, and no score when `feedback.show_scores_on_drafts=false`.
+        Faculty of the course see every score; an admin sees every score on a
+        final version and the learner's view of a draft version; anyone else
+        (an advisor) sees the learner's view. Change: T-C-120 (applied on
+        round2/phase2, awaiting approval).
       parameters:
         - $ref: "#/components/parameters/SubmissionIdPath"
       responses:
@@ -1072,7 +1095,6 @@ paths:
       tags: [assessment]
       summary: Feedback awaiting instructor release (Review Queue)
       operationId: getFeedbackQueue
-      x-implementation-status: planned
       x-task: T-D-104
       x-required-capability: feedback_release
       x-scope-check: faculty of the course(s); without course_id, all the caller's own courses
@@ -1105,7 +1127,6 @@ paths:
       tags: [assessment]
       summary: Criterion-level feedback for a submission
       operationId: getFeedback
-      x-implementation-status: planned
       x-task: T-D-104
       x-required-capability: authenticated
       x-scope-check: submitter (released criteria only), or faculty of the course
@@ -1115,6 +1136,8 @@ paths:
         For the submitter, criteria not yet released are omitted and `status`
         is `pending` or `awaiting_release`. `ai_score` is null for the
         submitter on drafts when `feedback.show_scores_on_drafts=false`.
+        `practice_set_ai_action_id` is set only for the submitter (practice is
+        private, spec.md §12.5).
       parameters:
         - $ref: "#/components/parameters/SubmissionIdPath"
       responses:
@@ -1132,7 +1155,6 @@ paths:
       tags: [assessment]
       summary: Release (optionally edited) or suppress feedback held under instructor_release
       operationId: releaseFeedback
-      x-implementation-status: planned
       x-task: T-D-104
       x-required-capability: feedback_release
       x-scope-check: faculty of the submission's course
@@ -1141,9 +1163,11 @@ paths:
           csrfHeader: []
       description: |
         Proxies `assessments.release_feedback`. The request is the human
-        approval; it does not go through approval_request. Writes one
-        human_decisions row per criterion: `accepted` (unchanged), `edited`
-        (diff recorded) or `rejected` (suppressed).
+        approval; it does not go through approval_request. The assessments
+        server writes one human_decisions row per criterion for the caller:
+        `accepted` (unchanged), `edited` (diff recorded) or `rejected`
+        (suppressed). An edit with `suppress: true` suppresses that criterion
+        while the others are released.
       parameters:
         - $ref: "#/components/parameters/SubmissionIdPath"
       requestBody:
@@ -1178,29 +1202,70 @@ paths:
         "403": {$ref: "#/components/responses/Forbidden"}
         "404": {$ref: "#/components/responses/NotFound"}
         "409":
-          description: Already released or suppressed, or the course uses `auto` release.
+          description: |
+            Nothing is awaiting release (no feedback yet, generation failed, or
+            already released or suppressed), or the course uses `auto` release.
           content:
             application/json:
               schema: {$ref: "#/components/schemas/ErrorDetail"}
         "422": {$ref: "#/components/responses/ValidationFailed"}
+        "502": {$ref: "#/components/responses/UpstreamFailed"}
+
+  /api/feedback/{submission_id}/retry:
+    post:
+      tags: [assessment]
+      summary: Start another feedback run for a draft whose feedback failed
+      operationId: retryFeedback
+      x-task: T-C-119
+      x-required-capability: authenticated
+      x-scope-check: the submitter (submit_work), or faculty of the submission's course (feedback_release)
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      description: |
+        Only when `status` is `failed`. Records a `dismissed` human decision by
+        the caller on each failed run (a criterion_feedback ai_action with
+        `output.failed = true`) and starts a new run in the background; poll
+        GET /api/feedback/{submission_id} as after a submission. The response
+        is the caller's view of the feedback, with `status` `pending`. When the
+        failed run had saved feedback and only its automatic release was
+        refused, the saved feedback is kept, the new run only releases it, and
+        the response `status` is `awaiting_release`.
+      parameters:
+        - $ref: "#/components/parameters/SubmissionIdPath"
+      responses:
+        "202":
+          description: A new feedback run has started
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/SubmissionFeedback"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409":
+          description: The feedback has not failed (it is pending, awaiting release, released or suppressed, or the submission is final).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorDetail"}
 
   /api/improvement/{course_id}:
     get:
       tags: [assessment]
       summary: Student × criterion improvement trajectories for a course
       operationId: getImprovement
-      x-implementation-status: planned
       x-task: T-D-104
       x-required-capability: improvement_view
       x-scope-check: |
         student: own trajectory only (student_id forced to self); faculty: own
-        course; advisor: assigned students, summary; program_lead/admin:
-        aggregate only (students omitted)
+        course; advisor: a course with an assigned student, summary (aggregate
+        over assigned students, students omitted); program_lead (program
+        courses) and admin: aggregate only (students omitted)
       security:
         - sessionCookie: []
       description: |
-        Proxies `assessments.get_improvement`. Uses only `course`-visibility
-        evidence (§12.5): private practice attempts never appear.
+        Proxies `assessments.get_improvement` with the caller as `requester_id`.
+        Uses only `course`-visibility evidence (§12.5): private practice
+        attempts never appear.
       parameters:
         - $ref: "#/components/parameters/CourseIdPath"
         - in: query
@@ -1218,6 +1283,175 @@ paths:
         "401": {$ref: "#/components/responses/Unauthorized"}
         "403": {$ref: "#/components/responses/Forbidden"}
         "404": {$ref: "#/components/responses/NotFound"}
+        "502": {$ref: "#/components/responses/UpstreamFailed"}
+
+  /api/assignments/{assignment_node}/alignment/decisions:
+    post:
+      tags: [assessment]
+      summary: Accept, edit or reject each criterion of an alignment proposal
+      operationId: decideAlignment
+      x-task: T-C-117
+      x-required-capability: authenticated
+      x-scope-check: faculty of the assignment's course (metadata.course_id)
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      description: |
+        spec.md §7.6.3-4. The proposal is the `generation` ai_action recorded
+        for a successful `assessments.propose_alignment` call that returned a
+        `proposal` (target_type `nodes`, target_id the assignment node,
+        `output.proposal`); `ai_action_id` defaults to the assignment's latest.
+        Each choice names a proposed criterion by `key`. Accepted criteria (as
+        proposed) and edited ones (as given in `criterion`) are written in one
+        `assessments.apply_alignment` call with the caller as `requester_id`,
+        which sets their `rubric_criteria.outcome_nodes`; the request is the
+        instructor's approval, so it does not go through approval_request. Then
+        each choice writes one human_decisions row on the proposal:
+        `accepted`, `edited` (diff `{criterion_key, fields: {name: {before,
+        after}}, changed}`) or `rejected` (diff `{criterion_key}`). Nothing is
+        recorded when the tool refuses. Rejecting every criterion calls no tool.
+        Each proposed criterion is decided once: a request naming a key that
+        already has a decision on this proposal is refused (409) before any
+        write. An edited `criterion.key` must equal the choice's `key` (422).
+        Change: T-C-117 (applied on round2/phase2, awaiting approval).
+      parameters:
+        - in: path
+          name: assignment_node
+          required: true
+          schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decisions]
+              properties:
+                ai_action_id: {type: [string, "null"], format: uuid}
+                decisions:
+                  type: array
+                  minItems: 1
+                  maxItems: 6
+                  description: At most one per proposed criterion key.
+                  items:
+                    type: object
+                    required: [key, decision]
+                    properties:
+                      key: {type: string}
+                      decision: {type: string, enum: [accept, edit, reject]}
+                      criterion:
+                        description: The edited criterion; required for `edit`.
+                        oneOf:
+                          - $ref: "#/components/schemas/AlignedCriterion"
+                          - {type: "null"}
+                      reason: {type: [string, "null"], maxLength: 2000}
+      responses:
+        "201":
+          description: Decisions recorded (and accepted or edited criteria applied)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ai_action_id, assignment_node, rubric_id, criterion_ids, decisions]
+                properties:
+                  ai_action_id: {type: string, format: uuid}
+                  assignment_node: {type: string, format: uuid}
+                  rubric_id:
+                    type: [string, "null"]
+                    format: uuid
+                    description: Null when every criterion was rejected.
+                  criterion_ids:
+                    type: array
+                    items: {type: string, format: uuid}
+                  decisions:
+                    type: array
+                    items: {$ref: "#/components/schemas/HumanDecision"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404":
+          description: No such assignment, or no alignment proposal for it.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorDetail"}
+        "409":
+          description: >-
+            A named criterion already has a decision on this proposal, or the
+            tool refused (e.g. a criterion that already has scores).
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorDetail"}
+        "422": {$ref: "#/components/responses/ValidationFailed"}
+        "502": {$ref: "#/components/responses/UpstreamFailed"}
+
+  /api/practice/{practice_set_id}/attempts:
+    post:
+      tags: [assessment]
+      summary: Record a learner's answers to their practice set and mark them
+      operationId: recordPracticeAttempt
+      x-task: T-C-120
+      x-required-capability: submit_work
+      x-scope-check: |
+        student role, and the practice set's own learner (its practice_item
+        ai_action's subject_person); anyone else gets 404 for another
+        learner's set and 403 outside the student role
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      description: |
+        spec.md §7.3 "Student practice attempts -> evidence rows (practice;
+        private per §12.5)". `practice_set_id` is the practice_item ai_action
+        id (`content.generate_practice`'s `practice_set_id`). Proxies
+        `assessments.record_practice_attempt` with the caller as `person_id`;
+        the tool marks each answer against the question's stored
+        `answer_key.correct` (trimmed, case-insensitive) and writes `private`
+        evidence rows (one per outcome the set is aligned to), which only the
+        learner sees. `correct` is null where the key has no `correct` (open
+        answers). `expected` is the key's `correct` (accepted values joined
+        with " or "), else its `model_answer` or `model_points`; `feedback` is
+        its `explanation`. Change: T-C-120 (applied on round2/phase2, awaiting
+        approval).
+      parameters:
+        - in: path
+          name: practice_set_id
+          required: true
+          schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [answers]
+              properties:
+                answers:
+                  type: array
+                  minItems: 1
+                  maxItems: 20
+                  description: One per question, each a question of this set.
+                  items:
+                    type: object
+                    required: [question_id, answer]
+                    properties:
+                      question_id: {type: string, format: uuid}
+                      answer:
+                        type: string
+                        maxLength: 5000
+                        description: The answer text; for an `mcq`, the option key (e.g. "B").
+      responses:
+        "201":
+          description: Recorded and marked
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/PracticeAttempt"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404":
+          description: No such practice set for the caller, or an unknown question.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorDetail"}
+        "422": {$ref: "#/components/responses/ValidationFailed"}
+        "502": {$ref: "#/components/responses/UpstreamFailed"}
 
   # ---------------------------------------------------------------------------
   # Provenance (planned)
@@ -1240,6 +1474,15 @@ paths:
         committed, criterion_feedback only once released, a rejected one never,
         and decisions carry no diff or reason. GET /api/ai-actions/{id}
         answers 404 for an item left out. Change: T-C-115.
+        Student and advisor views carry only the outcome_links whose observed
+        side the learner can see (an attestation, course-visible evidence, or a
+        released or committed criterion score) and that are on a criterion the
+        learner-view output scores; a criterion link's `before`, `after` and
+        change are the scores the learner sees now. Practice items (`practice_item`) and their
+        decisions appear only to their learner (spec.md §12.5); criterion_feedback
+        on a draft submission appears only to its learner (once released) and to
+        faculty of its course. Change: T-C-120 (applied on round2/phase2,
+        awaiting approval).
       security:
         - sessionCookie: []
       parameters:
@@ -1387,7 +1630,10 @@ paths:
       operationId: getMeasurementRollup
       x-task: T-E-112
       x-required-capability: ai_review
-      x-scope-check: program_lead of program_id, or admin (program_id omitted = institution, admin only)
+      x-scope-check: |
+        program_lead of program_id, or admin (program_id omitted = institution,
+        admin only). A program is led by the people in its node's
+        metadata.program_lead_ids; a program lead of none gets 403. Change: T-C-114.
       security:
         - sessionCookie: []
       parameters:
@@ -1420,6 +1666,10 @@ paths:
         document. `format=csv` returns one table, chosen by `table`; jsonb
         columns are serialized as JSON strings. Sent with
         `Content-Disposition: attachment`.
+        Practice items are never exported, and criterion_feedback on draft
+        submissions is exported only to faculty of the course (with their
+        decisions and outcome links). Change: T-C-120 (applied on
+        round2/phase2, awaiting approval).
       parameters:
         - in: query
           name: course_id
@@ -1923,6 +2173,62 @@ paths:
             application/json:
               schema: {$ref: "#/components/schemas/ValidationError"}
 
+  /api/reject-credential/{pending_id}:
+    post:
+      tags: [credentials]
+      summary: Reject a pending microcredential
+      operationId: rejectCredential
+      x-implementation-status: live
+      x-task: T-E-133
+      description: |
+        Closes the pending credential without issuing it (`assessments.reject_credential`)
+        and records `human_decisions(rejected, reason)` on its badge recommendation. Like
+        /api/approve-credential, the click is the decision: it does not go
+        through approval_request. `reviewer_id` must equal the authenticated
+        person (403 otherwise). 404 for an unknown pending credential, 409 when it
+        was already reviewed. Change: T-C-113.
+      x-required-capability: badge_approve
+      x-scope-check: caller is faculty of the pending credential's course, or admin
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      parameters:
+        - $ref: "#/components/parameters/PendingIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reviewer_id]
+              properties:
+                reviewer_id:
+                  type: string
+                  format: uuid
+                  description: persons.id of the rejecting reviewer; must equal the caller.
+                reason: {type: [string, "null"], maxLength: 2000}
+      responses:
+        "200":
+          description: Rejected
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pending_id, status]
+                properties:
+                  pending_id: {type: string, format: uuid}
+                  status: {type: string, const: rejected}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409":
+          description: The credential was already approved or rejected.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/ErrorDetail"}
+        "422": {$ref: "#/components/responses/ValidationFailed"}
+        "502": {$ref: "#/components/responses/UpstreamFailed"}
+
   /api/approve-credentials/bulk:
     post:
       tags: [credentials]
@@ -2209,6 +2515,71 @@ paths:
         "401": {$ref: "#/components/responses/Unauthorized"}
         "403": {$ref: "#/components/responses/Forbidden"}
         "404": {$ref: "#/components/responses/NotFound"}
+
+  # ---------------------------------------------------------------------------
+  # Privacy: access log (admin)
+  # ---------------------------------------------------------------------------
+
+  /api/access-log:
+    get:
+      tags: [privacy]
+      summary: Who read one learner's sensitive data (admin view of data_access_log)
+      operationId: listAccessLog
+      x-task: T-E-132
+      x-required-capability: access_log
+      x-scope-check: admin only (the learner's own view is `access_log` in GET /api/me/data)
+      description: |
+        Newest first. `from` is inclusive and `to` exclusive. Reading the log is
+        not itself logged: it holds no learner content. Change: T-C-110.
+      security:
+        - sessionCookie: []
+      parameters:
+        - in: query
+          name: subject_id
+          required: true
+          schema: {type: string, format: uuid}
+        - in: query
+          name: resource
+          schema: {type: string, enum: [transcript, profile, analyst_summary, submission]}
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+        - in: query
+          name: before
+          description: Opaque `next_before` from the previous page.
+          schema: {type: string}
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [entries, next_before]
+                properties:
+                  entries:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, actor, subject_id, resource, resource_id, purpose,
+                                 created_at]
+                      properties:
+                        id: {type: string}
+                        actor:
+                          type: object
+                          required: [id, display_name]
+                          properties:
+                            id: {type: string, format: uuid}
+                            display_name: {type: [string, "null"]}
+                        subject_id: {type: string, format: uuid}
+                        resource: {type: string}
+                        resource_id: {type: [string, "null"]}
+                        purpose: {type: [string, "null"]}
+                        created_at: {type: string, format: date-time}
+                  next_before: {type: [string, "null"]}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "422": {$ref: "#/components/responses/ValidationFailed"}
 
   # ---------------------------------------------------------------------------
   # Privacy: My Data (planned)
@@ -2803,6 +3174,11 @@ components:
       content:
         application/json:
           schema: {$ref: "#/components/schemas/ValidationError"}
+    UpstreamFailed:
+      description: An MCP tool behind the endpoint failed or returned an uncoded error.
+      content:
+        application/json:
+          schema: {$ref: "#/components/schemas/ErrorDetail"}
 
   parameters:
     PersonIdPath:
@@ -2973,6 +3349,9 @@ components:
         program_outcome_report: {$ref: "#/components/schemas/CapabilityGrant"}
         my_data: {$ref: "#/components/schemas/CapabilityGrant"}
         deletion_request_approval: {$ref: "#/components/schemas/CapabilityGrant"}
+        access_log:
+          $ref: "#/components/schemas/CapabilityGrant"
+          description: "Admin read of data_access_log (GET /api/access-log). Change: T-C-110."
         system_settings:
           description: §17 "Badge issuer / provider settings"; gates /api/settings.
           $ref: "#/components/schemas/CapabilityGrant"
@@ -3353,6 +3732,53 @@ components:
       type: string
       enum: [accepted, edited, rejected, overridden, dismissed, disputed, snoozed]
 
+    AlignedCriterion:
+      type: object
+      description: "A rubric criterion as `assessments.propose_alignment` validates it. Change: T-C-117."
+      required: [key, description, levels]
+      properties:
+        key: {type: string, maxLength: 100, description: snake_case, unique in the rubric}
+        description: {type: string, maxLength: 2000}
+        levels:
+          type: array
+          minItems: 2
+          maxItems: 6
+          items:
+            type: object
+            required: [score, label, descriptor]
+            properties:
+              score: {type: integer}
+              label: {type: string, maxLength: 200}
+              descriptor: {type: string, maxLength: 2000}
+        outcome_nodes:
+          type: array
+          maxItems: 20
+          items: {type: string, format: uuid}
+
+    PracticeAttempt:
+      type: object
+      description: "Change: T-C-120 (applied on round2/phase2, awaiting approval)."
+      required: [practice_set_id, attempt_id, results, correct, total]
+      properties:
+        practice_set_id: {type: string, format: uuid}
+        attempt_id:
+          type: [string, "null"]
+          description: The first private evidence row the attempt wrote; null only when the data server wrote none.
+        results:
+          type: array
+          items:
+            type: object
+            required: [question_id, correct, expected, feedback]
+            properties:
+              question_id: {type: string, format: uuid}
+              correct:
+                type: [boolean, "null"]
+                description: Null when the answer key cannot be marked automatically.
+              expected: {type: [string, "null"]}
+              feedback: {type: [string, "null"]}
+        correct: {type: integer, minimum: 0}
+        total: {type: integer, minimum: 0}
+
     HumanDecision:
       type: object
       required: [id, ai_action_id, decided_by, decision, decided_at]
@@ -3468,7 +3894,12 @@ components:
             type: object
             required: [criterion_id, criterion_key, n, mean_delta]
             properties:
-              criterion_id: {type: string, format: uuid}
+              criterion_id:
+                type: string
+                format: uuid
+                description: |
+                  rubric_criteria.id; a stable UUIDv5 of (rubric id, criterion key)
+                  when the criterion has no rubric_criteria row. Change: T-C-114.
               criterion_key: {type: string}
               n: {type: integer}
               mean_delta: {type: number}
@@ -3485,13 +3916,18 @@ components:
             type: object
             required: [criterion_id, criterion_key, edit_count, edit_rate]
             properties:
-              criterion_id: {type: string, format: uuid}
+              criterion_id:
+                type: string
+                format: uuid
+                description: "As in criterion_score_changes. Change: T-C-114."
               criterion_key: {type: string}
               edit_count: {type: integer}
               edit_rate: {type: number}
+        practice:
+          $ref: "#/components/schemas/PracticeCounts"
         offloading:
           type: object
-          description: §13.2 metrics.
+          description: "§13.2 metrics. Omitted until T-E-118 (Phase 3). Change: T-C-114."
           properties:
             hint_dependency_ratio: {type: [number, "null"]}
             solution_check_trips: {type: integer}
@@ -3515,6 +3951,21 @@ components:
               required: [mismatches_count]
               properties:
                 mismatches_count: {type: integer}
+
+    PracticeCounts:
+      type: object
+      description: |
+        Practice sets in scope, counted only (spec.md §12.5): practice_item
+        rows are left out of `rates` and of every other per-item view for
+        anyone but their learner. `started` / `dismissed` count sets whose
+        learner's latest decision is Start (`accepted`) / Not helpful
+        (`dismissed`). Change: T-C-120 (applied on round2/phase2, awaiting
+        approval).
+      required: [generated, started, dismissed]
+      properties:
+        generated: {type: integer, minimum: 0}
+        started: {type: integer, minimum: 0}
+        dismissed: {type: integer, minimum: 0}
 
     MeasurementExport:
       type: object
@@ -3721,6 +4172,9 @@ components:
         id: {type: string, format: uuid}
         person_id: {type: string, format: uuid}
         assignment_id: {type: string, format: uuid}
+        assignment_title:
+          type: [string, "null"]
+          description: "The assignment node's title. Change: T-C-120 (applied on round2/phase2, awaiting approval)."
         course_id: {type: [string, "null"], format: uuid}
         version: {type: integer, minimum: 1}
         parent_id: {type: [string, "null"], format: uuid}
@@ -3734,8 +4188,12 @@ components:
 
     FeedbackStatus:
       type: string
-      enum: [pending, awaiting_release, released, suppressed, none]
-      description: "`none` for finals, which get a grade draft instead of formative feedback."
+      enum: [pending, awaiting_release, released, suppressed, failed, none]
+      description: |
+        `none` for finals, which get a grade draft instead of formative feedback.
+        `failed`: the feedback run saved nothing, or (under `auto` release) saved feedback
+        whose release was refused (T-C-119); the submitter or faculty of the course can start
+        another with POST /api/feedback/{submission_id}/retry.
 
     EvidenceSpan:
       type: object

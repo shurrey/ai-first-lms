@@ -2,7 +2,6 @@ version: 1
 agent:
   name: feedback
   version: 0.1.0
-  status: planned
   description: 'Formative-mode reviewer for draft and revision submissions. Scores
     each rubric
 
@@ -52,8 +51,7 @@ agent:
         type: string
     required:
     - criteria
-  mcp_tools: []
-  planned_mcp_tools:
+  mcp_tools:
   - assessments.get_submission
   - assessments.get_rubric
   - assessments.list_submission_history

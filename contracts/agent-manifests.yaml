@@ -93,9 +93,9 @@ agents:
       - content.get_skill
       - content.save_skill
       - content.list_skills
-    planned_mcp_tools:
       - assessments.propose_alignment      # T-D-105 / T-A-105, spec.md §7.6
       - graph.subgraph_for_outcomes        # T-D-105, spec.md §7.6
+    planned_mcp_tools:
       - content.publish                    # write-gated, spec.md §5.3
     composable_with: [content_generator, assessment]
     requires_human_approval: true
@@ -132,8 +132,8 @@ agents:
       - content.get_skill
       - content.save_skill
       - content.list_skills
-    planned_mcp_tools:
       - content.generate_practice          # T-A-104, spec.md §7.4
+    planned_mcp_tools:
       - content.generate_flashcards        # T-A-107, spec.md §10.3
       - content.publish                    # write-gated; faculty and instructional_designer only
     composable_with: [tutor, course_architect, assessment, communication]
@@ -206,6 +206,7 @@ agents:
       - assessments.list_submission_history
       - assessments.draft_grade
       - assessments.commit_grade
+      - assessments.grading_status         # T-C-112, applied on round2/phase2, awaiting approval
     composable_with: []
     requires_human_approval: true
 
@@ -420,7 +421,6 @@ agents:
 
   - name: feedback
     version: "0.1.0"
-    status: planned                       # T-A-103; not routable until built
     description: |
       Formative-mode reviewer for draft and revision submissions. Scores each rubric
       criterion against its level descriptors, quotes evidence spans from the
@@ -451,8 +451,7 @@ agents:
               next_step:      {type: string}
         summary_md: {type: string}
       required: [criteria]
-    mcp_tools: []
-    planned_mcp_tools:
+    mcp_tools:
       - assessments.get_submission
       - assessments.get_rubric
       - assessments.list_submission_history
