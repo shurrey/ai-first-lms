@@ -12,6 +12,7 @@ import { ClarifyPrompt } from "./ClarifyPrompt";
 import { ErrorDisplay } from "./ErrorDisplay";
 import { ApprovalGate } from "@/components/ApprovalGate";
 import { CanvasRouter } from "@/components/Canvas/CanvasRouter";
+import { approvalCanvasData } from "@/lib/approval-preview";
 import { AiGeneratedLabel } from "@/components/common/AiGeneratedLabel";
 import { artifactAiActionId, buildTurnSources } from "@/lib/provenance";
 
@@ -199,7 +200,7 @@ export function ChatPane() {
               artifact={{
                 artifact_id: pendingApproval.approval_id,
                 type: pendingApproval.artifact_type,
-                data: pendingApproval.preview,
+                data: approvalCanvasData(pendingApproval.artifact_type, pendingApproval.preview),
               }}
               status="awaiting_approval"
             />

@@ -12,7 +12,7 @@ test.describe("Scenario 1: Student asks about recursion", () => {
     await expectActiveRole(page, scenario.activeRole);
     await startCourseSession(page, scenario.courseSlug);
 
-    await runTurn(page, scenario.message, scenario.approvals);
+    await runTurn(page, scenario);
 
     expect(await toolCallsRun(page)).not.toHaveLength(0);
   });

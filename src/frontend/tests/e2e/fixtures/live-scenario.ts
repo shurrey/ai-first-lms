@@ -26,7 +26,12 @@ export interface LiveScenario {
   courseSlug: string;
   /** Only the first user turn; every Chat UI scenario spec is single-turn. */
   message: string;
+  /** Scripted `approve` decisions in `approvals`. */
   approvals: number;
+  /** The YAML sets `default_approval: approve`: gates past `approvals` are approved too. */
+  approveRest: boolean;
+  /** The YAML's `expected.max_wall_time_ms`: send to answer, approval gates excluded. */
+  maxWallTimeMs: number;
   xfail: string | null;
 }
 
@@ -53,6 +58,8 @@ export function loadScenario(id: number): LiveScenario {
     courseSlug: required("course_id"),
     message: required("message"),
     approvals: (text.match(/^\s*-\s*decision:\s*approve\s*$/gm) ?? []).length,
+    approveRest: /^\s*default_approval:\s*\n\s*decision:\s*approve\s*$/m.test(text),
+    maxWallTimeMs: Number(required("max_wall_time_ms")),
     xfail: field(text, "xfail"),
   };
 }
@@ -104,43 +111,80 @@ function turnError(page: Page): Locator {
   return page.locator("main").getByText(/^(Error: |Failed to send message)/).first();
 }
 
+/** ChatPane's ClarifyPrompt: the blue box holding the orchestrator's question. */
+function clarifyPrompt(page: Page): Locator {
+  return page
+    .getByTestId("clarify-prompt")
+    .or(page.locator("div.border-blue-200.bg-blue-50:has(> p.text-sm.font-medium)"))
+    .first();
+}
+
+/** Something that ends the wait for the next gate or the answer without either arriving. */
+function turnStopped(page: Page): Locator {
+  return turnError(page).or(clarifyPrompt(page));
+}
+
+async function expectTurnNotStopped(page: Page, when: string) {
+  await expect(clarifyPrompt(page), `turn asked a clarifying question ${when}`).toHaveCount(0);
+  await expect(turnError(page), `turn failed ${when}`).toHaveCount(0);
+}
+
 export interface TurnObservations {
   /** The action text of each approval gate, in the order they were approved. */
   approvedActions: string[];
+  /** Send to answer minus the time each gate waited for its decision, as `scripts/demo` counts. */
+  activeMs: number;
 }
 
 /**
- * Sends `message`, approves `approvals` gates as they appear, and waits for the final answer.
- * Fails on an error answer or when fewer gates appear than expected.
+ * Sends the scenario's message, approves its scripted gates as they appear, and waits for the
+ * final answer. Fails on an error, a clarifying question, a gate count that differs from the
+ * script (fewer than scripted, with `approveRest`), or an answer slower than the scenario's
+ * `max_wall_time_ms`.
  */
-export async function runTurn(page: Page, message: string, approvals: number): Promise<TurnObservations> {
+export async function runTurn(page: Page, scenario: LiveScenario): Promise<TurnObservations> {
+  const { message, approvals, approveRest } = scenario;
   const labelsBefore = await answerLabels(page).count();
   await page.getByPlaceholder(/Type a message/).fill(message);
+  const sentAt = Date.now();
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByText(message, { exact: true }).first()).toBeVisible();
 
+  const gate = approvalGate(page);
+  // The previous gate stays rendered, disabled, until its decision lands; an enabled
+  // button therefore belongs to the next gate.
+  const nextApprove = gate.getByRole("button", { name: "Approve" }).and(page.locator(":enabled"));
   const approvedActions: string[] = [];
-  for (let i = 0; i < approvals; i++) {
-    const gate = approvalGate(page);
-    await expect(gate.or(turnError(page))).toBeVisible({ timeout: TURN_TIMEOUT_MS });
-    await expect(turnError(page), `turn failed before approval ${i + 1}`).toHaveCount(0);
-    // The previous gate stays rendered, disabled, until its decision lands; an enabled
-    // button therefore belongs to the next gate.
-    const approve = gate.getByRole("button", { name: "Approve" });
-    await expect(approve).toBeEnabled({ timeout: TURN_TIMEOUT_MS });
+  let approvalWaitMs = 0;
+  const approveNext = async () => {
+    const shownAt = Date.now();
     await expect(gate.getByText("Awaiting Approval")).toBeVisible();
     approvedActions.push((await gate.locator("p.text-sm.font-medium").last().textContent()) ?? "");
     const decided = page.waitForResponse(
       (r) => new URL(r.url()).pathname === "/api/approval" && r.request().method() === "POST"
     );
-    await approve.click();
+    await nextApprove.click();
     expect((await decided).ok()).toBe(true);
+    approvalWaitMs += Date.now() - shownAt;
+  };
+  for (let i = 0; i < approvals; i++) {
+    await expect(nextApprove.or(turnStopped(page))).toBeVisible({ timeout: TURN_TIMEOUT_MS });
+    await expectTurnNotStopped(page, `before approval ${i + 1}`);
+    await approveNext();
   }
 
-  await expect(answerLabels(page).nth(labelsBefore).or(turnError(page))).toBeVisible({ timeout: TURN_TIMEOUT_MS });
-  await expect(turnError(page)).toHaveCount(0);
+  const answer = answerLabels(page).nth(labelsBefore);
+  await expect(answer.or(turnStopped(page)).or(nextApprove)).toBeVisible({ timeout: TURN_TIMEOUT_MS });
+  while (approveRest && (await nextApprove.isVisible()) && !(await answer.isVisible())) {
+    await approveNext();
+    await expect(answer.or(turnStopped(page)).or(nextApprove)).toBeVisible({ timeout: TURN_TIMEOUT_MS });
+  }
+  const activeMs = Date.now() - sentAt - approvalWaitMs;
+  await expect(nextApprove, `unscripted approval gate after ${approvals} approvals`).toHaveCount(0);
+  await expectTurnNotStopped(page, "instead of answering");
   await expect(approvalGate(page)).toHaveCount(0);
-  return { approvedActions };
+  expect(activeMs, "send to answer, approval gates excluded").toBeLessThanOrEqual(scenario.maxWallTimeMs);
+  return { approvedActions, activeMs };
 }
 
 /** The collapsed "What ran" drawer lists every tool call the turn made. */

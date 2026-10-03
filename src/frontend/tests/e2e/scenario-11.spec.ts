@@ -12,7 +12,7 @@ test.describe("Scenario 11: Student learning path (AI-native)", () => {
     await expectActiveRole(page, scenario.activeRole);
     await startCourseSession(page, scenario.courseSlug);
 
-    await runTurn(page, scenario.message, scenario.approvals);
+    await runTurn(page, scenario);
 
     const canvas = page.locator("main > div").first().getByTestId("canvas-shell");
     await expect(canvas.first()).toBeVisible();
