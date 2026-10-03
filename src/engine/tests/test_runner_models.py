@@ -126,3 +126,15 @@ def test_tool_use_rules_allow_per_item_batch_work():
 
     assert "more than 5 times" not in runner._TOOL_USE_ADDENDUM
     assert "same arguments" in runner._TOOL_USE_ADDENDUM
+
+
+def test_agent_timeout_uses_the_remaining_turn_budget():
+    from types import SimpleNamespace
+
+    from engine.agents.runner import _AGENT_TIMEOUT_S, _agent_timeout_s
+
+    budget = SimpleNamespace(config=SimpleNamespace(max_wall_time_ms=120_000), wall_time_ms=10_000)
+    assert _agent_timeout_s(budget) == 110.0
+    assert _agent_timeout_s(None) == _AGENT_TIMEOUT_S
+    spent = SimpleNamespace(config=SimpleNamespace(max_wall_time_ms=120_000), wall_time_ms=130_000)
+    assert _agent_timeout_s(spent) == 1.0

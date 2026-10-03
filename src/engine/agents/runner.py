@@ -58,8 +58,20 @@ _MCP_SERVERS: dict[str, str] = {
 _MAX_TOOL_ROUNDS = 10
 # Room for a full draft plus its artifact block; a reply cut off at this cap loses the block.
 _MAX_OUTPUT_TOKENS = 4096
-# Backstop per agent run; time spent waiting on a human approval is not counted.
+# Backstop per agent run when the turn has no budget; time spent waiting on a human approval is not counted.
 _AGENT_TIMEOUT_S = 90.0
+
+
+def _agent_timeout_s(budget: Any) -> float:
+    """Seconds this agent run may take: what's left of the turn's wall-time budget, if there is one.
+
+    Per-item work such as drafting a grade for each submission can need most of the turn, so the
+    per-turn cap (SPEC-v1 §4.5) governs rather than a tighter fixed limit.
+    """
+    if budget is None:
+        return _AGENT_TIMEOUT_S
+    remaining_ms = budget.config.max_wall_time_ms - budget.wall_time_ms
+    return max(remaining_ms / 1000, 1.0)
 
 APPROVAL_TIMEOUT_MESSAGE = (
     "Nobody approved the pending action in time, so it was not carried out. "
@@ -477,7 +489,7 @@ class ClaudeAgentRunner:
                     model=model,
                 ),
                 agent_clock,
-                _AGENT_TIMEOUT_S,
+                _agent_timeout_s(getattr(tool_ctx, "budget", None)),
             )
         except TimeoutError:
             elapsed_ms = (time.monotonic() - start) * 1000
