@@ -2,7 +2,9 @@
 
 LLM_FIXTURE_MODE: `off` (default) uses the real client; `record` calls it and saves each
 response under LLM_FIXTURE_DIR; `replay` serves saved responses and raises
-LLMFixtureMissError when none matches; both also need LLM_FIXTURE_ALLOW=1. A request is keyed
+LLMFixtureMissError when none matches; `fill` replays and records only the misses. All but
+`off` also need LLM_FIXTURE_ALLOW=1. LLM_FIXTURE_FILL_MAX caps how many misses `fill` records
+per process; past it a miss raises as in replay. A request is keyed
 by model, system, messages and tools after UUIDs, tool-use ids and timestamps are replaced by
 placeholders. The n-th identical request in a process is stored as `<key>.json` (n=1) or
 `<key>.<n>.json`, so replay serves the responses in the order they were recorded.
@@ -30,7 +32,10 @@ logger = logging.getLogger(__name__)
 MODE_ENV = "LLM_FIXTURE_MODE"
 DIR_ENV = "LLM_FIXTURE_DIR"
 ALLOW_ENV = "LLM_FIXTURE_ALLOW"
-MODES = ("off", "record", "replay")
+FILL_MAX_ENV = "LLM_FIXTURE_FILL_MAX"
+MODES = ("off", "record", "replay", "fill")
+# Modes that call the real API (and so need an upstream client and a key).
+CALLING_MODES = ("record", "fill")
 
 _UUID_RE = re.compile(
     r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
@@ -138,10 +143,11 @@ class FixtureAnthropicClient:
         self, mode: str, directory: Path, upstream: anthropic.AsyncAnthropic | None = None,
         occurrences: OccurrenceCounter | None = None,
     ) -> None:
-        if mode not in ("record", "replay"):
-            raise ValueError(f"FixtureAnthropicClient mode must be record or replay, not {mode!r}")
-        if mode == "record" and upstream is None:
-            raise ValueError("record mode needs an upstream Anthropic client")
+        if mode not in ("record", "replay", "fill"):
+            raise ValueError(
+                f"FixtureAnthropicClient mode must be record, replay or fill, not {mode!r}")
+        if mode in CALLING_MODES and upstream is None:
+            raise ValueError(f"{mode} mode needs an upstream Anthropic client")
         self.mode = mode
         self.directory = directory
         self._upstream = upstream
@@ -165,8 +171,11 @@ class _FixtureMessages:
         if self._owner.mode == "record":
             return await self._record(kwargs, normalized, uuids,
                                       self._owner.path_for(key, occurrence))
-        return _replay(_recorded_path(self._owner.directory, key, occurrence), key,
-                       kwargs.get("model"), uuids, normalized)
+        recorded = _recorded_path(self._owner.directory, key, occurrence)
+        if self._owner.mode == "fill" and not recorded.exists() and _take_fill_slot():
+            return await self._record(kwargs, normalized, uuids,
+                                      self._owner.path_for(key, occurrence))
+        return _replay(recorded, key, kwargs.get("model"), uuids, normalized)
 
     async def _record(
         self, kwargs: dict[str, Any], normalized: str, uuids: list[str], path: Path
@@ -184,6 +193,22 @@ class _FixtureMessages:
         os.replace(tmp, path)
         logger.info("Recorded LLM response %s", path.name)
         return response
+
+
+_fill_lock = threading.Lock()
+_fill_used = 0
+
+
+def _take_fill_slot() -> bool:
+    """False once LLM_FIXTURE_FILL_MAX misses were recorded in this process (no limit if unset)."""
+    global _fill_used
+    raw = os.environ.get(FILL_MAX_ENV, "").strip()
+    with _fill_lock:
+        if raw and _fill_used >= int(raw):
+            logger.error("%s=%s reached; not recording this miss", FILL_MAX_ENV, raw)
+            return False
+        _fill_used += 1
+        return True
 
 
 def _recorded_path(directory: Path, key: str, occurrence: int) -> Path:
@@ -216,6 +241,7 @@ def _replay(
         _save_miss(path.parent / "misses" / f"{key}.json", normalized)
         raise LLMFixtureMissError(message)
     entry = json.loads(path.read_text())
+    logger.info("Replayed LLM response %s", path.name)
     recorded = entry.get("request_uuids", [])
     mapping = dict(zip(recorded, live_uuids, strict=False))
     text = json.dumps(entry["response"])

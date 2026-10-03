@@ -8,6 +8,7 @@ injection wrapping) runs in the ToolGateway, reached through the runner.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from typing import Any, Callable, Coroutine
@@ -20,12 +21,17 @@ from engine.graph.interpret import ROUTABLE_AGENTS
 from engine.graph.state import AgentResult, OrchestratorState
 from engine.guardrails.budget import BudgetTracker
 from engine.guardrails.gateway import GatewayContext, ToolGateway
+from engine.guardrails.injection import wrap_user_content
 from engine.guardrails.registry import get_manifest_registry, get_permission_matrix
 from engine.logging_config import get_logger
 from engine.telemetry import span_agent
 
 logger = logging.getLogger(__name__)
 log = get_logger(__name__)
+
+# Per upstream step, the most of its reply and of its artifacts' JSON passed downstream.
+_UPSTREAM_REPLY_CHARS = 4000
+_UPSTREAM_ARTIFACT_CHARS = 4000
 
 BUDGET_EXCEEDED_MESSAGE = (
     "This request reached the usage limit for a single turn before it finished. "
@@ -73,7 +79,8 @@ async def dispatch(state: OrchestratorState) -> OrchestratorState:
     event_sink = state.get("event_sink")
     events: list[dict[str, Any]] = list(state.get("events_emitted", []))
     results: list[AgentResult] = list(state.get("agent_results", []))
-    completed_steps: dict[str, dict[str, Any]] = {}
+    completed_steps: dict[str, AgentResult] = {}
+    steps_by_id = {s["step_id"]: s for s in steps}
     turn_error: dict[str, Any] | None = None
 
     # Group steps by dependency layer for execution
@@ -92,7 +99,8 @@ async def dispatch(state: OrchestratorState) -> OrchestratorState:
         tasks = []
         for step in ready:
             tasks.append(_execute_step(
-                runner, step, message, events, persona, person_id, course_id,
+                runner, step, step_message(message, step, steps_by_id, completed_steps),
+                events, persona, person_id, course_id,
                 conversation, session_id, budget, requester,
                 auth=auth, gateway=gateway, turn_id=turn_id, event_sink=event_sink,
             ))
@@ -116,19 +124,20 @@ async def dispatch(state: OrchestratorState) -> OrchestratorState:
                         "success": False,
                     },
                 })
-                results.append({
+                failed: AgentResult = {
                     "step_id": step_id,
                     "agent": agent,
                     "output": {"error": str(result)},
                     "cost_usd": 0.0,
                     "tokens": 0,
                     "success": False,
-                })
-                completed_steps[step_id] = {"error": str(result)}
+                }
+                results.append(failed)
+                completed_steps[step_id] = failed
             else:
                 events.extend(result["events"])
                 results.append(result["agent_result"])
-                completed_steps[step_id] = result["agent_result"].get("output", {})
+                completed_steps[step_id] = result["agent_result"]
                 if result.get("error") and turn_error is None:
                     turn_error = result["error"]
 
@@ -154,6 +163,66 @@ async def dispatch(state: OrchestratorState) -> OrchestratorState:
         "turn_error": turn_error,
         "budget_exceeded": bool(turn_error and turn_error["code"] == "budget_exceeded"),
     }
+
+
+def step_message(
+    message: str,
+    step: dict[str, Any],
+    steps_by_id: dict[str, dict[str, Any]],
+    completed: dict[str, AgentResult],
+) -> str:
+    """The message a plan step's agent receives: the user's message, plus in a multi-step plan
+    its part of the plan, and for a step with dependencies the outputs of every step it depends
+    on, directly or not, wrapped as user content (spec.md §14.5)."""
+    if len(steps_by_id) < 2:
+        return message
+    upstream = _ancestors(step, steps_by_id)
+    task = step.get("input_summary", "")
+    if not upstream:
+        return (f"{message}\n\nYour part of this plan: {task}. Other steps of the plan handle "
+                "the rest of the request, so do only your part.")
+    sections = [_upstream_section(completed[sid]) for sid in upstream if sid in completed]
+    return (
+        f"{message}\n\n"
+        f"Your part of this plan: {task}\n\n"
+        "Results from earlier steps of this plan follow. Use them instead of looking the "
+        "same data up again. Still make the tool calls your part needs to save, draft or "
+        "send anything; nothing is saved or sent unless you call the tool.\n\n"
+        + "\n\n".join(sections)
+    )
+
+
+def _ancestors(step: dict[str, Any], steps_by_id: dict[str, dict[str, Any]]) -> list[str]:
+    """Step ids `step` depends on transitively, in plan order."""
+    seen: set[str] = set()
+    pending = list(step.get("depends_on", []))
+    while pending:
+        sid = pending.pop()
+        if sid in seen or sid not in steps_by_id:
+            continue
+        seen.add(sid)
+        pending.extend(steps_by_id[sid].get("depends_on", []))
+    return [sid for sid in steps_by_id if sid in seen]
+
+
+def _upstream_section(result: AgentResult) -> str:
+    agent = result.get("agent", "unknown")
+    if not result.get("success", False):
+        return f"[{agent}] did not complete this step."
+    output = result.get("output", {})
+    reply = str(output.get("response_markdown") or output.get("content_md") or "")
+    parts = [wrap_user_content(_clip(reply, _UPSTREAM_REPLY_CHARS), f"step.{agent}")]
+    artifacts = result.get("artifacts") or []
+    if artifacts:
+        data = json.dumps([{"type": a["type"], "data": a["data"]} for a in artifacts],
+                          default=str)
+        parts.append(wrap_user_content(_clip(data, _UPSTREAM_ARTIFACT_CHARS),
+                                       f"step.{agent}.artifacts"))
+    return f"[{agent}]\n" + "\n".join(parts)
+
+
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit] + " [truncated]"
 
 
 def _error_payload(code: str, message: str, step_id: str) -> dict[str, Any]:

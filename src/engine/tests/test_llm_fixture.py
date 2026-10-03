@@ -149,9 +149,46 @@ def test_sdk_content_blocks_normalize_like_dicts():
     assert as_model == as_dict
 
 
-def test_record_mode_needs_an_upstream(tmp_path: Path):
+async def test_fill_replays_recorded_requests_and_records_only_misses(tmp_path: Path):
+    known = _request(SESSION_A, GRADE_A, "2026-10-01T09:00:00Z", "toolu_01AAA")
+    await FixtureAnthropicClient("record", tmp_path, _Upstream(_message("recorded")),
+                                 OccurrenceCounter()).messages.create(**known)
+    new = _request(SESSION_A, GRADE_A, "2026-10-01T09:00:00Z", "toolu_01AAA")
+    new["system"] = "You tutor."
+    upstream = _Upstream(_message("filled"))
+    filler = FixtureAnthropicClient("fill", tmp_path, upstream, OccurrenceCounter())
+
+    replayed = await filler.messages.create(**known)
+    filled = await filler.messages.create(**new)
+    again = await FixtureAnthropicClient("replay", tmp_path,
+                                         occurrences=OccurrenceCounter()).messages.create(**new)
+
+    assert (replayed.content[0].text, filled.content[0].text) == ("recorded", "filled")
+    assert len(upstream.calls) == 1
+    assert again.content[0].text == "filled"
+
+
+async def test_fill_stops_recording_at_the_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import engine.llm_fixture as fixture_mod
+
+    monkeypatch.setattr(fixture_mod, "_fill_used", 0)
+    monkeypatch.setenv("LLM_FIXTURE_FILL_MAX", "1")
+    upstream = _Upstream(_message("filled"))
+    filler = FixtureAnthropicClient("fill", tmp_path, upstream, OccurrenceCounter())
+    first = _request(SESSION_A, GRADE_A, "2026-10-01T09:00:00Z", "toolu_01AAA")
+    second = {**first, "system": "You tutor."}
+
+    await filler.messages.create(**first)
+    with pytest.raises(LLMFixtureMissError):
+        await filler.messages.create(**second)
+
+    assert len(upstream.calls) == 1
+
+
+@pytest.mark.parametrize("mode", ["record", "fill"])
+def test_calling_modes_need_an_upstream(tmp_path: Path, mode: str):
     with pytest.raises(ValueError):
-        FixtureAnthropicClient("record", tmp_path)
+        FixtureAnthropicClient(mode, tmp_path)
 
 
 def test_engine_client_factory_follows_the_mode(
@@ -182,7 +219,7 @@ def test_unknown_mode_or_missing_dir_fails(monkeypatch: pytest.MonkeyPatch):
         engine_http.make_anthropic_client()
 
 
-@pytest.mark.parametrize("mode", ["record", "replay"])
+@pytest.mark.parametrize("mode", ["record", "replay", "fill"])
 @pytest.mark.parametrize("allow", [None, "", "0", "true"])
 def test_record_and_replay_are_refused_without_the_allow_flag(
         monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: str, allow: str | None):

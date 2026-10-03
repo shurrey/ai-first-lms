@@ -59,6 +59,9 @@ _CROSS_COURSE_ROLES = frozenset({"advisor", "admin"})
 APPROVER_ARGS = ("reviewer_id", GRADER_ARG)  # set to the approving person on resume
 
 SUBMISSION_TOOLS = frozenset({"assessments.get_submission", "assessments.draft_grade"})
+# Non-admin staff callers must name the course: the server filters by it and nothing else ties
+# the call to a course the caller teaches.
+SUBMISSION_LIST_TOOL = "assessments.list_submission_history"
 PENDING_TOOLS = frozenset({"assessments.get_credential_evidence",
                            "assessments.approve_credential"})
 # Tools whose session_id must be the caller's current session or one they may view;
@@ -765,6 +768,9 @@ class ToolGateway:
             for key in SUBJECT_ARGS:
                 if key in declared and key not in out:
                     out[key] = auth.person_id
+        elif tool == SUBMISSION_LIST_TOOL and out.get("person_id") in (None, ""):
+            # Staff may list every learner's submissions; _check_objects bounds it by course.
+            out.pop("person_id", None)
         if tool == AUDIENCE_TOOL and "audience" in out:
             out["audience"] = _parse_audience(out["audience"])
         tree = await self._scope_tree(auth, out, None, purpose, self._profile_read(tool))
@@ -888,6 +894,11 @@ class ToolGateway:
             await self._check_audience(auth, args.get("audience"), purpose)
         elif tool in ANALYTICS_TOOLS:
             await self._check_analytics_scope(auth, tool, args, purpose)
+        elif tool == SUBMISSION_LIST_TOOL and not args.get(COURSE_ARG) \
+                and auth.active_role not in ("admin", "student"):
+            # Without a course the server lists the learner's (or, with no person_id, every
+            # learner's) submissions in every course; course_id is what gets scope-checked.
+            raise ScopeDenied("Listing submissions needs the course.")
         elif tool == BANK_TOOL:
             course = await self._bank_course(args.get("bank_id"))
             if course is None:

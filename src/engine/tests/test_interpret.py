@@ -274,3 +274,46 @@ def test_every_persona_has_routable_agents_and_a_default():
         allowed = frozenset(matrix.allowed_agents(persona)) & ROUTABLE_AGENTS
         assert len(allowed) >= 4, persona
         assert _default_agent(allowed, persona) == default
+
+
+async def test_low_confidence_pick_the_classifier_did_not_flag_proceeds():
+    set_llm_client(MockLLMClient({
+        "action": "build_path", "agent": "advising", "parameters": {},
+        "confidence": 0.62, "needs_clarification": False, "clarification_reason": None,
+    }))
+
+    result = await interpret({"persona": "student", "events_emitted": [],
+                              "current_message": "Help me build a path to get better at recursion."})
+
+    assert result["needs_clarification"] is False
+    assert result["interpretation"]["agent"] == "advising"
+
+
+async def test_low_confidence_without_a_flag_still_clarifies():
+    set_llm_client(MockLLMClient({"action": "unknown", "agent": "tutor", "confidence": 0.2}))
+
+    result = await interpret({"persona": "student", "events_emitted": [], "current_message": "hm"})
+
+    assert result["needs_clarification"] is True
+
+
+async def test_low_confidence_known_action_the_classifier_flags_clarifies():
+    set_llm_client(MockLLMClient({
+        "action": "grade", "agent": "grading_assistant", "parameters": {},
+        "confidence": 0.3, "needs_clarification": True,
+        "clarification_reason": "Which assignment?",
+    }))
+
+    result = await interpret({"persona": "faculty", "events_emitted": [],
+                              "current_message": "grade it"})
+
+    assert result["needs_clarification"] is True
+    assert result["clarification"] == "Which assignment?"
+
+
+def test_classifier_prompt_treats_missing_details_as_defaults_not_questions():
+    from engine.graph.interpret import INTERPRET_SYSTEM_PROMPT
+
+    assert "Missing details are NOT a reason to ask" in INTERPRET_SYSTEM_PROMPT
+    assert "A request for a syllabus or course outline alone is a single course_architect step" \
+        in " ".join(INTERPRET_SYSTEM_PROMPT.split())

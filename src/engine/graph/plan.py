@@ -87,10 +87,20 @@ async def plan_react(state: OrchestratorState) -> OrchestratorState:
 MULTI_AGENT_PATTERNS: dict[str, list[dict[str, Any]]] = {
     # Scenario 10: struggling students → study guide → send
     "identify_and_help": [
-        {"agent": "early_alert", "input_summary": "Identify at-risk students"},
-        {"agent": "content_generator", "input_summary": "Create tailored study guide",
+        {"agent": "early_alert",
+         "input_summary": "Identify the struggling students from this course's roster and "
+                          "analytics, queried in this request (earlier conversation is not "
+                          "current data; person_id values come only from "
+                          "roster.list_by_course); reply with a short list of them and the "
+                          "risk_list block, without a methodology section"},
+        {"agent": "content_generator",
+         "input_summary": "Create a tailored study guide of about 500 words and save it with "
+                          "content.save_draft",
          "depends_on_prev": True},
-        {"agent": "communication", "input_summary": "Send study guide to students",
+        {"agent": "communication",
+         "input_summary": "Draft one supportive note to those students with "
+                          "communications.draft_message, then send it with "
+                          "communications.send_message (the instructor approves the send)",
          "depends_on_prev": True},
     ],
     # Scenario 8: syllabus drafting

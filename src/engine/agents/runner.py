@@ -16,6 +16,7 @@ from opentelemetry import trace
 
 from engine.agents.artifacts import artifact_instruction, collect_artifacts, split_artifact_blocks
 from engine.agents.post import ToolOutput, apply_artifact_post_processors, apply_post_processors
+from engine.agents.pricing import cost_usd as model_cost_usd
 from engine.guardrails.approval import ApprovalTimeoutError
 from engine.guardrails.budget import ActiveClock, BudgetExceededError
 from engine.guardrails.gateway import GatewayContext, ToolGateway
@@ -55,6 +56,8 @@ _MCP_SERVERS: dict[str, str] = {
 
 # Max tool-use iterations to prevent infinite loops
 _MAX_TOOL_ROUNDS = 10
+# Room for a full draft plus its artifact block; a reply cut off at this cap loses the block.
+_MAX_OUTPUT_TOKENS = 4096
 # Backstop per agent run; time spent waiting on a human approval is not counted.
 _AGENT_TIMEOUT_S = 90.0
 
@@ -62,6 +65,16 @@ APPROVAL_TIMEOUT_MESSAGE = (
     "Nobody approved the pending action in time, so it was not carried out. "
     "Ask again when you're ready to review it."
 )
+
+# Agents that produce drafts for staff. The tutor is excluded: it must not write a student's work for them.
+DRAFTING_AGENTS = frozenset({"assessment", "communication", "content_generator", "course_architect"})
+
+_DRAFTING_RULES = """
+IMPORTANT RULES FOR DRAFTING:
+- When asked to create, draft or write something, produce the draft in this reply. Do not ask the user for details first.
+- Fill missing details (audience, length, level, dates, tone) with reasonable defaults, and list the assumptions you made in one short line so the user can adjust them.
+- Ask a question instead of answering only when the request cannot be acted on at all.
+"""
 
 _TOOL_USE_ADDENDUM = """
 
@@ -79,7 +92,7 @@ IMPORTANT RULES FOR PERSONA CONTEXT:
 - For faculty asking about at-risk students: use analytics.query or analytics.cohort_compare to find outliers. Do NOT fetch evidence for every student one by one.
 - For faculty asking about a specific student: ask for the student's name, then look them up via roster tools.
 - Only use the Person ID for student-data lookups when the persona is "student".
-- NEVER call the same tool more than 5 times in a single turn. If you need data for many students, use analytics tools that aggregate across the course.
+- Never call a tool again with the same arguments after it has answered. For questions about many students, prefer analytics tools that aggregate across the course over one lookup per student; per-item calls are fine when the task is per item (for example, drafting a grade for each submission).
 
 IMPORTANT RULES FOR RESPONSE FORMAT:
 - Return your response as plain markdown text. Do NOT wrap it in JSON.
@@ -339,10 +352,11 @@ class ClaudeAgentRunner:
 
     def __init__(
         self,
-        model: str = "claude-sonnet-4-6",
+        model: str | None = None,
         client: anthropic.AsyncAnthropic | None = None,
         gateway: ToolGateway | None = None,
     ) -> None:
+        """`model` overrides every agent's manifest `model`; None uses the manifest's."""
         self._client = client if client is not None else make_anthropic_client()
         self._model = model
         self._gateway = gateway or default_tool_gateway()
@@ -372,9 +386,10 @@ class ClaudeAgentRunner:
         tool_ctx: GatewayContext = inputs.pop("_tool_context", None) or GatewayContext(
             auth=None, session_id=inputs.get("session_id", ""),
         )
+        model = self._model or get_manifest_registry().get_manifest(agent_name).model
         agent_clock = ActiveClock()
         tool_ctx = replace(tool_ctx, agent_clock=agent_clock,
-                           provenance=ProvenanceTrail(model=self._model))
+                           provenance=ProvenanceTrail(model=model))
         logger.info("ClaudeAgentRunner: invoking %s with tools", agent_name)
         start = time.monotonic()
         try:
@@ -384,7 +399,9 @@ class ClaudeAgentRunner:
 
         await _ensure_tool_schemas()
         base_prompt = self._load_system_prompt(agent_name)
-        system_prompt = (base_prompt + _TOOL_USE_ADDENDUM + artifact_instruction(agent_name)
+        system_prompt = (base_prompt + _TOOL_USE_ADDENDUM
+                         + (_DRAFTING_RULES if agent_name in DRAFTING_AGENTS else "")
+                         + artifact_instruction(agent_name)
                          + INJECTION_GUARDRAIL_INSTRUCTION)
         message = gateway.redact_context(agent_name, inputs.get("message", ""))
         persona = inputs.get("persona", "student")
@@ -457,6 +474,7 @@ class ClaudeAgentRunner:
                 self._tool_loop(
                     agent_name, system_prompt, messages, claude_tools, tool_name_map,
                     tool_call_records, start, gateway, tool_ctx, on_event, session_id,
+                    model=model,
                 ),
                 agent_clock,
                 _AGENT_TIMEOUT_S,
@@ -495,6 +513,8 @@ class ClaudeAgentRunner:
         tool_ctx: GatewayContext,
         on_event: Any = None,
         session_id: str = "",
+        *,
+        model: str,
     ) -> dict[str, Any]:
         usage = [0, 0]
         tool_outputs: list[ToolOutput] = []
@@ -503,7 +523,7 @@ class ClaudeAgentRunner:
             final_text = await self._tool_rounds(
                 agent_name, system_prompt, messages, claude_tools, tool_name_map,
                 tool_call_records, gateway, tool_ctx, on_event, session_id, usage,
-                tool_outputs,
+                tool_outputs, model,
             )
         except BudgetExceededError:
             final_text = None
@@ -521,11 +541,11 @@ class ClaudeAgentRunner:
 
         elapsed_ms = (time.monotonic() - start) * 1000
         total_tokens = total_input_tokens + total_output_tokens
-        cost_usd = (total_input_tokens * 3.0 / 1_000_000) + (total_output_tokens * 15.0 / 1_000_000)
+        cost_usd = model_cost_usd(model, total_input_tokens, total_output_tokens)
 
         logger.info(
-            "Agent %s done in %.0fms (%d tokens, %d tool calls, $%.4f)",
-            agent_name, elapsed_ms, total_tokens, len(tool_call_records), cost_usd,
+            "Agent %s (%s) done in %.0fms (%d tokens, %d tool calls, $%.4f)",
+            agent_name, model, elapsed_ms, total_tokens, len(tool_call_records), cost_usd,
         )
 
         if final_text is None:
@@ -558,6 +578,7 @@ class ClaudeAgentRunner:
         session_id: str,
         usage: list[int],
         tool_outputs: list[ToolOutput],
+        model: str,
     ) -> str:
         """Model/tool rounds until a final text; `usage` accumulates [input, output] tokens
         and `tool_outputs` the successful tool results, for the post-processors.
@@ -566,11 +587,11 @@ class ClaudeAgentRunner:
         """
         for _round in range(_MAX_TOOL_ROUNDS):
                 response = await self._client.messages.create(
-                    model=self._model,
+                    model=model,
                     system=system_prompt,
                     messages=messages,
                     tools=claude_tools if claude_tools else anthropic.NOT_GIVEN,
-                    max_tokens=2048,
+                    max_tokens=_MAX_OUTPUT_TOKENS,
                 )
 
                 if tool_ctx.provenance is not None:

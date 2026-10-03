@@ -154,3 +154,14 @@ async def test_multi_agent_fallback_to_react():
     result = await plan_multi_agent(state)
     assert result["plan"]["strategy"] == "react"
     assert len(result["plan"]["steps"]) == 1
+
+
+def test_study_guide_steps_name_the_tools_that_save_and_send():
+    from engine.graph.plan import MULTI_AGENT_PATTERNS
+
+    steps = {s["agent"]: s["input_summary"] for s in MULTI_AGENT_PATTERNS["identify_and_help"]}
+
+    assert "roster.list_by_course" in steps["early_alert"]
+    assert "content.save_draft" in steps["content_generator"]
+    assert "communications.draft_message" in steps["communication"]
+    assert "communications.send_message" in steps["communication"]

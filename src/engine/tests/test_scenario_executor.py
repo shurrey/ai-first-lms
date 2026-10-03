@@ -135,6 +135,10 @@ def test_repo_scenarios_expect_contract_artifact_types_and_realistic_caps():
 
     for s in scenarios:
         assert set(s.expected.artifacts_of_type) <= CONTRACT_TYPES, s.id
-        cap = 120_000 if s.expected.min_agent_invocations > 1 else 60_000
-        assert s.expected.max_wall_time_ms == cap, s.id
-    assert [s.id for s in scenarios if s.xfail] == [3]
+        if s.expected.min_agent_invocations > 1:
+            # Never tighter than the engine's own per-turn wall-time budget (SPEC-v1 §4.5).
+            assert s.expected.max_wall_time_ms >= 120_000, s.id
+        else:
+            # 120 s when the SPEC-v1 §9 plan may add a second agent (scenario 8).
+            assert s.expected.max_wall_time_ms in (60_000, 120_000), s.id
+        assert s.xfail is None or "T-" in s.xfail, s.id

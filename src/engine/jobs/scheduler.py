@@ -15,6 +15,7 @@ from typing import Any
 import asyncpg
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from common import clock
 from engine.jobs.outcome_linker import PgOutcomeLinker
 from engine.logging_config import get_logger
 from engine.telemetry import get_tracer
@@ -28,7 +29,8 @@ Clock = Callable[[], datetime]
 
 
 def utc_now() -> datetime:
-    return datetime.now(UTC)
+    """The jobs' `now`; LMS_AS_OF fixes it (common.clock)."""
+    return clock.now()
 
 
 def _positive_int(name: str, default: int) -> int:
