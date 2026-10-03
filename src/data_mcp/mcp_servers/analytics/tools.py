@@ -7,6 +7,7 @@ from uuid import UUID
 
 import asyncpg
 
+from common import clock
 from data_mcp.mcp_base import ToolDef
 from data_mcp.mcp_servers._helpers import validation_error
 
@@ -109,6 +110,17 @@ def _scope_params(scope: dict[str, Any]) -> list[Any]:
     ]
 
 
+def _window_end(window: dict[str, str]) -> datetime:
+    """The window's end, capped at clock.now(): evidence after the as-of instant is the future."""
+    present = clock.now()
+    end = _parse_ts(window.get("end"))
+    if end is None:
+        return present
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=present.tzinfo)
+    return min(end, present)
+
+
 def _evidence_params(
     scope: dict[str, Any],
     window: dict[str, str],
@@ -122,7 +134,7 @@ def _evidence_params(
     return [
         *_scope_params(scope),
         _parse_ts(window.get("start")),
-        _parse_ts(window.get("end")),
+        _window_end(window),
         filters.get("kind"),
         str(filters["node_id"]) if filters.get("node_id") is not None else None,
         metric,

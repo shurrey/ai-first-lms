@@ -332,7 +332,7 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                     """SELECT ci.id, ci.title, ci.body_md
                        FROM content_items ci
                        WHERE ci.node_id = $1
-                       ORDER BY ci.created_at DESC LIMIT 1""",
+                       ORDER BY ci.created_at DESC, ci.id DESC LIMIT 1""",
                     uuid.UUID(node_id),
                 )
 

@@ -113,3 +113,77 @@ async def test_content_list_modules(server, seeded_ids) -> None:
     # Verify ordering
     orders = [m["order"] for m in result["modules"]]
     assert orders == sorted(orders)
+
+
+_TIED_LOW = uuid.UUID("00000000-0000-4000-8000-000000000001")
+_TIED_HIGH = uuid.UUID("ffffffff-ffff-4fff-bfff-ffffffffffff")
+
+
+@pytest_asyncio.fixture(loop_scope="module")
+async def tied_node(pool):
+    """A module whose two content items share created_at, as every seeded item does.
+    The lower id is inserted first, which is the row an untied sort happens to return."""
+    node = uuid.uuid4()
+    async with pool.acquire() as conn:
+        await conn.execute("INSERT INTO nodes (id, kind, title) VALUES ($1, 'module', 'tie')", node)
+        for cid in (_TIED_LOW, _TIED_HIGH):
+            await conn.execute(
+                """INSERT INTO content_items (id, node_id, kind, title, body_md, created_at)
+                   VALUES ($1, $2, 'document', $3, '# Tie', '2026-09-01T00:00:00Z')""",
+                cid, node, str(cid),
+            )
+    yield str(node)
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM content_items WHERE node_id = $1", node)
+        await conn.execute("DELETE FROM nodes WHERE id = $1", node)
+
+
+async def test_content_retrieve_by_node_breaks_created_at_ties_by_id(server, tied_node) -> None:
+    result = await _call(server, "content.retrieve", {"node_id": tied_node})
+    assert result["id"] == str(_TIED_HIGH)
+
+
+async def test_content_search_keyword_matches_are_ordered_by_title(server, pool) -> None:
+    node = uuid.uuid4()
+    async with pool.acquire() as conn:
+        await conn.execute("INSERT INTO nodes (id, kind, title) VALUES ($1, 'module', 'order')", node)
+        for title in ("Zeta qxsearchorder", "Alpha qxsearchorder", "Mid qxsearchorder"):
+            await conn.execute(
+                """INSERT INTO content_items (node_id, kind, title, body_md)
+                   VALUES ($1, 'document', $2, 'body')""",
+                node, title,
+            )
+    try:
+        result = await _call(server, "content.search", {"query": "qxsearchorder", "top_k": 2})
+    finally:
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM content_items WHERE node_id = $1", node)
+            await conn.execute("DELETE FROM nodes WHERE id = $1", node)
+    assert [r["title"] for r in result["results"]] == ["Alpha qxsearchorder", "Mid qxsearchorder"]
+
+
+async def test_content_search_semantic_ties_are_ordered_by_title(server, pool) -> None:
+    # Every item of a module shares the module node's embedding, so their distances tie.
+    from data_mcp.embeddings.pipeline import embed_text
+
+    node, course = uuid.uuid4(), str(uuid.uuid4())
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO nodes (id, kind, title, metadata, embedding)
+               VALUES ($1, 'module', 'semtie', jsonb_build_object('course_id', $2::text),
+                       $3::vector)""",
+            node, course, str(embed_text("qxsemtie")))
+        for title in ("Zeta", "Mid", "Alpha"):
+            await conn.execute(
+                """INSERT INTO content_items (node_id, kind, title, body_md)
+                   VALUES ($1, 'document', $2, 'body')""",
+                node, title,
+            )
+    try:
+        result = await _call(server, "content.search",
+                             {"query": "qxsemtie", "course_id": course, "top_k": 2})
+    finally:
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM content_items WHERE node_id = $1", node)
+            await conn.execute("DELETE FROM nodes WHERE id = $1", node)
+    assert [r["title"] for r in result["results"]] == ["Alpha", "Mid"]

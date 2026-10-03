@@ -131,3 +131,20 @@ async def test_roster_list_by_course_includes_assigned_advisor(pool, server, see
     assert sum(1 for p in everyone["persons"] if p["role"] == "advisor") == 1
     assert all(p["role"] == "faculty" for p in faculty["persons"])
 
+
+
+async def test_student_context_is_relative_to_lms_as_of(server, pool, seeded_ids, monkeypatch) -> None:
+    async with pool.acquire() as conn:
+        expected = [str(r["assignment_id"]) for r in await conn.fetch(
+            """SELECT assignment_id FROM assignments
+               WHERE course_id = $1 AND due_at > '2026-09-01T00:00:00Z'
+               ORDER BY due_at, title LIMIT 5""",
+            uuid.UUID(seeded_ids["course_id"]),
+        )]
+    assert expected, "seed has no assignments due after 2026-09-01"
+    monkeypatch.setenv("LMS_AS_OF", "2026-09-01")
+    result = await _call(server, "roster.get_student_context", {
+        "person_id": seeded_ids["student_id"], "course_id": seeded_ids["course_id"],
+    })
+    assert [a["id"] for a in result["upcoming_assignments"]] == expected
+    assert all(e["observed_at"] <= "2026-09-01T00:00:00+00:00" for e in result["recent_evidence"])

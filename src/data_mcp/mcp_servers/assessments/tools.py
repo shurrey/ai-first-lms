@@ -8,12 +8,16 @@ from typing import Any
 
 import asyncpg
 
+from common import clock
 from data_mcp.mcp_base import ToolDef
 from data_mcp.mcp_servers._helpers import (
     parse_json_column,
     resolve_concept_id,
     validation_error,
 )
+
+HISTORY_DEFAULT_LIMIT = 20
+HISTORY_MAX_LIMIT = 100
 
 
 def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
@@ -291,13 +295,16 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                 """SELECT e.id, e.node_id, e.kind, e.score, e.confidence, e.source, e.observed_at
                    FROM evidence e
                    WHERE e.person_id = $1
-                     AND e.observed_at >= now() - make_interval(days => $2)
+                     AND e.observed_at >= $4::timestamptz - make_interval(days => $2)
+                     AND e.observed_at <= $4::timestamptz
                      AND ($3::uuid[] IS NULL OR e.node_id = ANY($3))
-                   ORDER BY e.observed_at DESC, e.kind, e.score, e.source
+                   ORDER BY e.observed_at DESC, e.kind, e.score, e.source,
+                            e.node_id, e.payload::text, e.id
                    LIMIT 100""",
                 uuid.UUID(person_id),
                 since_days,
                 [uuid.UUID(n) for n in node_ids] if node_ids else None,
+                clock.now(),
             )
             return {
                 "evidence": [
@@ -313,6 +320,91 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                     for r in rows
                 ]
             }
+
+    async def list_submission_history(args: dict[str, Any]) -> dict[str, Any]:
+        """Newest first. Without person_id it lists every learner's submissions in the scope.
+        Criteria are the assignment's rubric criteria (node metadata rubric_id) plus any
+        criterion scored on the submission; unscored ones have null scores. ai_score is
+        returned unmasked: the server cannot tell whether the caller is a student."""
+        try:
+            person = args.get("person_id")
+            assignment = args.get("assignment_node")
+            course = args.get("course_id")
+            person_id = uuid.UUID(str(person)) if person else None
+            assignment_id = uuid.UUID(str(assignment)) if assignment else None
+            course_id = uuid.UUID(str(course)) if course else None
+        except ValueError:
+            return {**validation_error(
+                "person_id, assignment_node and course_id must be UUIDs"), "submissions": []}
+        if assignment_id is None and course_id is None:
+            return {**validation_error(
+                "One of assignment_node or course_id is required"), "submissions": []}
+        title = args.get("assignment_title")
+        if title is not None and (not isinstance(title, str) or not title.strip()):
+            return {**validation_error(
+                "assignment_title must be a non-empty string"), "submissions": []}
+        limit = args.get("limit", HISTORY_DEFAULT_LIMIT)
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= HISTORY_MAX_LIMIT:
+            return {**validation_error(
+                f"Invalid limit {limit!r}; expected an integer from 1 to {HISTORY_MAX_LIMIT}"),
+                "submissions": []}
+
+        async with pool.acquire() as conn:
+            subs = await conn.fetch(
+                """SELECT s.id, s.person_id, s.assignment_node, s.version, s.status,
+                          s.parent_id, s.submitted_at,
+                          a.title AS assignment_title, a.metadata->>'rubric_id' AS rubric_id
+                   FROM submissions s
+                   JOIN nodes a ON a.id = s.assignment_node
+                   WHERE ($1::uuid IS NULL OR s.person_id = $1)
+                     AND ($2::uuid IS NULL OR s.assignment_node = $2)
+                     AND ($3::uuid IS NULL OR s.course_node = $3
+                          OR (s.course_node IS NULL AND a.metadata->>'course_id' = $3::text))
+                     AND ($5::text IS NULL OR strpos(lower(a.title), lower($5)) > 0)
+                   ORDER BY s.submitted_at DESC, s.version DESC, s.id
+                   LIMIT $4""",
+                person_id, assignment_id, course_id, limit,
+                title.strip() if title is not None else None,
+            )
+            criteria = await conn.fetch(
+                """SELECT s.id AS submission_id, rc.id AS criterion_id, rc.key,
+                          cs.ai_score, cs.final_score, cs.released_at
+                   FROM submissions s
+                   JOIN nodes a ON a.id = s.assignment_node
+                   JOIN rubric_criteria rc
+                     ON rc.rubric_id::text = a.metadata->>'rubric_id'
+                     OR EXISTS (SELECT 1 FROM criterion_scores x
+                                WHERE x.submission_id = s.id AND x.criterion_id = rc.id)
+                   LEFT JOIN criterion_scores cs
+                     ON cs.submission_id = s.id AND cs.criterion_id = rc.id
+                   WHERE s.id = ANY($1::uuid[])
+                   ORDER BY s.id, rc.key, rc.id""",
+                [r["id"] for r in subs],
+            )
+        by_submission: dict[uuid.UUID, list[dict[str, Any]]] = {}
+        for c in criteria:
+            by_submission.setdefault(c["submission_id"], []).append({
+                "criterion_id": str(c["criterion_id"]),
+                "key": c["key"],
+                "ai_score": c["ai_score"],
+                "final_score": c["final_score"],
+                "released_at": c["released_at"].isoformat() if c["released_at"] else None,
+            })
+        return {"submissions": [
+            {
+                "id": str(r["id"]),
+                "person_id": str(r["person_id"]),
+                "assignment_node": str(r["assignment_node"]),
+                "assignment_title": r["assignment_title"],
+                "rubric_id": r["rubric_id"],
+                "version": r["version"],
+                "status": r["status"],
+                "parent_id": str(r["parent_id"]) if r["parent_id"] else None,
+                "submitted_at": r["submitted_at"].isoformat(),
+                "criteria": by_submission.get(r["id"], []),
+            }
+            for r in subs
+        ]}
 
     # ── Credential management ──
 
@@ -734,6 +826,24 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                 "required": ["person_id"],
             },
             handler=list_recent_evidence,
+        ),
+        ToolDef(
+            name="assessments.list_submission_history",
+            description=(
+                "List submissions (all versions, newest first) for an assignment or a course, "
+                "for one learner or all learners, with per-criterion rubric scores"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "person_id": {"type": "string"},
+                    "assignment_node": {"type": "string"},
+                    "assignment_title": {"type": "string"},
+                    "course_id": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+            },
+            handler=list_submission_history,
         ),
         ToolDef(
             name="attestations.attest",
