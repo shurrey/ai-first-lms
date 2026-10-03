@@ -408,6 +408,18 @@ Also hosts `attestations.*`; the engine routes those prefixes here (see Routing)
 - Notes: `since_days` defaults to 30; at most 100 rows. Not course-scoped: a `course_id` argument (the engine sends one) is ignored.
 - Change: T-C-108 — added program_lead (read-only) so personas reach the agents their job needs; object-level scope still applies.
 
+### `assessments.list_submission_history`
+- Server: `assessments` (port 7003)
+- Mutates: false
+- Requires approval: false
+- Allowed roles: `student` (self), `faculty` (own courses)
+- Reached by: agents `grading_assistant`; planned agent `feedback`; engine `/api/submissions/*` (T-C-102, planned)
+- Input: `{ person_id?: string, assignment_node?: string, assignment_title?: string, course_id?: string, limit?: integer }`
+- Output: `{ submissions: [{ id, person_id, assignment_node, assignment_title, rubric_id, version, status, parent_id, submitted_at, criteria: [{ criterion_id, key, ai_score, final_score, released_at }] }] }`
+- Notes: Newest first. Requires one of `assignment_node` / `course_id`. Without `person_id` it lists every learner's submissions in that scope; the gateway forces a `student`'s `person_id` to self and requires `course_id` (checked against the caller's courses) for every other non-admin caller. `assignment_title` keeps assignments whose title contains it (case-insensitive). `rubric_id` is the assignment node's `metadata.rubric_id` (null when unset). `limit` defaults to 20, at most 100. `criteria` lists the assignment's rubric criteria (the assignment node's `metadata.rubric_id`) and any criterion scored on that submission; scores are null until written. For `student`, `ai_score` is null on unreleased feedback: not applied by the server yet (it cannot see the caller's role; T-D-104).
+- Change: T-C-105 — approved as planned; served from T-D-104. Allowed roles follow the spec.md §17 matrix, so `admin` is not granted although `grading_assistant` serves admin.
+- Change: T-C-116 — `person_id` optional for staff callers when `course_id` is given (students stay forced to self); rows add `person_id`, `rubric_id`, `assignment_title`; optional `assignment_title` filter. Not breaking.
+
 ### `attestations.attest`
 - Server: `assessments` (port 7003)
 - Mutates: true
@@ -688,11 +700,12 @@ Also hosts `attestations.*`; the engine routes those prefixes here (see Routing)
 - Server: `standards` (port 7007)
 - Mutates: false
 - Requires approval: false
-- Allowed roles: none (no agent or engine caller today)
-- Reached by: nothing today
+- Allowed roles: `faculty`, `instructional_designer`, `student`, `admin`, `advisor`, `program_lead`
+- Reached by: agents `accessibility`
 - Input: `{ content_id?: string, node_id?: string, level?: string }`
 - Output: `{ compliant, level, content_id, findings: [{ criterion, status, details }] }`
 - Notes: Requires one of `content_id` / `node_id`; `level` defaults to `AA`. Heuristic markdown scan.
+- Change: T-C-111 — the accessibility agent gets this read-only tool so its WCAG report is built from scan results; roles are the agent's persona_scope. Awaiting approval.
 
 ### `standards.list_frameworks`
 - Server: `standards` (port 7007)
@@ -725,17 +738,6 @@ Rules that apply to every tool below:
 - Input: `{ person_id: string, assignment_node: string, body_md: string, attachments?: object[], status: "draft" | "final", parent_id?: string }`
 - Output: `{ submission_id, version, status, parent_id, submitted_at }`
 - Notes: `version` is one more than the parent's. `parent_id` must be the same person's submission on the same assignment. A `draft` triggers the `feedback` agent (spec.md §7.3).
-
-### `assessments.list_submission_history`
-- Server: `assessments` (port 7003)
-- Status: planned (T-D-104)
-- Mutates: false
-- Requires approval: false
-- Allowed roles: `student` (self), `faculty` (own courses)
-- Reached by: planned agent `feedback`; engine `/api/submissions/*` (T-C-102)
-- Input: `{ person_id: string, assignment_node?: string, course_id?: string, limit?: integer }`
-- Output: `{ submissions: [{ id, assignment_node, version, status, parent_id, submitted_at, criteria: [{ criterion_id, key, ai_score, final_score, released_at }] }] }`
-- Notes: Newest first. Requires one of `assignment_node` / `course_id`. For `student`, `ai_score` is null on unreleased feedback.
 
 ### `assessments.save_criterion_feedback`
 - Server: `assessments` (port 7003)

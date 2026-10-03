@@ -203,6 +203,7 @@ agents:
     mcp_tools:
       - assessments.get_submission
       - assessments.get_rubric
+      - assessments.list_submission_history
       - assessments.draft_grade
       - assessments.commit_grade
     composable_with: []
@@ -302,6 +303,7 @@ agents:
     mcp_tools:
       - content.retrieve
       - content.search
+      - standards.check_wcag            # T-C-111, awaiting approval
     composable_with: [content_generator]
     requires_human_approval: true
 
