@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ SESSION_A = "11111111-2222-4333-8444-555555555555"
 SESSION_B = "99999999-8888-4777-8666-555555555555"
 GRADE_A = "aaaaaaaa-0000-4000-8000-000000000001"
 GRADE_B = "bbbbbbbb-0000-4000-8000-000000000002"
+COURSE = "cccccccc-0000-4000-8000-000000000003"
 
 
 def _message(text: str, tool_input: dict[str, Any] | None = None) -> Message:
@@ -89,6 +91,16 @@ async def test_record_then_replay_with_fresh_ids_and_timestamps(tmp_path: Path):
     assert len(upstream.calls) == 1
 
 
+async def test_replayed_tool_input_keeps_the_models_key_order(tmp_path: Path):
+    request = _request(SESSION_A, GRADE_A, "2026-10-01T09:00:00Z", "toolu_01AAA")
+    upstream = _Upstream(_message("Querying.", {"course_id": COURSE, "chapter": "5"}))
+    await FixtureAnthropicClient("record", tmp_path, upstream).messages.create(**request)
+
+    replayed = await FixtureAnthropicClient("replay", tmp_path).messages.create(**request)
+
+    assert list(replayed.content[1].input) == ["course_id", "chapter"]
+
+
 async def test_repeated_identical_requests_replay_in_recorded_order(tmp_path: Path):
     upstream = _Upstream(_message("first"))
     recorder = FixtureAnthropicClient("record", tmp_path, upstream, OccurrenceCounter())
@@ -118,6 +130,30 @@ async def test_replay_miss_raises_with_the_key(tmp_path: Path):
     assert not list(tmp_path.glob("*.json"))
 
 
+class _HangingUpstream:
+    def __init__(self) -> None:
+        self.messages = self
+
+    async def create(self, **kwargs: Any) -> Message:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+async def test_request_cancelled_while_recording_replays_as_never_answered(tmp_path: Path):
+    request = _request(SESSION_A, GRADE_A, "2026-10-01T09:00:00Z", "toolu_01AAA")
+    recorder = FixtureAnthropicClient("record", tmp_path, _HangingUpstream(), OccurrenceCounter())
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(recorder.messages.create(**request), timeout=0.05)
+
+    [saved] = tmp_path.glob("*.json")
+    assert json.loads(saved.read_text())["cancelled"] is True
+
+    replayer = FixtureAnthropicClient("replay", tmp_path, occurrences=OccurrenceCounter())
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(replayer.messages.create(**request), timeout=0.05)
+    assert not (tmp_path / "misses").exists()
+
+
 async def test_different_prompt_is_a_miss(tmp_path: Path):
     recorder = FixtureAnthropicClient("record", tmp_path, _Upstream(_message("ok")))
     await recorder.messages.create(
@@ -137,6 +173,30 @@ def test_normalization_keeps_uuid_identity_by_position():
 
     assert same != swapped
     assert "<uuid:1> <uuid:1> <uuid:2>" in same
+
+
+def _tool_result_request(content: Any) -> dict[str, Any]:
+    return {"model": "m", "system": "s", "tools": None, "messages": [
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "toolu_01X", "content": content}]}]}
+
+
+def _key(request: dict[str, Any]) -> str:
+    return request_key(normalize_request(
+        request["model"], request["system"], request["messages"], request["tools"])[0])
+
+
+def test_json_tool_results_key_the_same_whatever_their_key_order():
+    a = json.dumps({"scope": {"course_id": COURSE, "chapter": "5"}, "rows": [1.5]})
+    b = json.dumps({"rows": [1.5], "scope": {"chapter": "5", "course_id": COURSE}})
+    assert _key(_tool_result_request(a)) == _key(_tool_result_request(b))
+    assert (_key(_tool_result_request([{"type": "text", "text": a}]))
+            == _key(_tool_result_request([{"type": "text", "text": b}])))
+
+
+def test_non_json_tool_results_are_left_as_text():
+    assert _key(_tool_result_request("chapter 5, course A")) != _key(
+        _tool_result_request("course A, chapter 5"))
 
 
 def test_sdk_content_blocks_normalize_like_dicts():

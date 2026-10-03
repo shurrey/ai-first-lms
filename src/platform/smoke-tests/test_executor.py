@@ -185,9 +185,10 @@ def test_repo_scenario_caps_are_60s_single_agent_and_120s_multi_agent():
             assert s.expected.max_wall_time_ms == 120_000, s.id
 
 
-def test_grading_scenario_has_no_xfail_and_targets_dr_torres_in_cs101():
+def test_grading_scenario_xfails_only_on_the_agent_backstop_and_targets_dr_torres_in_cs101():
     s = next(s for s in load_all_scenarios(SCENARIOS_DIR) if s.id == 3)
-    assert s.xfail is None
+    # The T-C-116 listing gap is fixed; what remains is the agent timeout.
+    assert s.xfail is not None and "T-E-134" in s.xfail and "T-C-116" not in s.xfail
     assert (s.login_as, s.course_id) == (SEEDED_FACULTY, "cs101")
 
 

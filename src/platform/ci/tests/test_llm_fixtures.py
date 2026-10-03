@@ -17,8 +17,9 @@ def _ignored(rel: str) -> bool:
     return result.returncode == 0
 
 
-def test_recordings_are_git_ignored():
-    assert _ignored(f"{FIXTURES}/recordings/abc.json")
+def test_recordings_are_tracked_but_misses_and_partial_writes_are_not():
+    assert not _ignored(f"{FIXTURES}/recordings/abc.json")
+    assert not _ignored(f"{FIXTURES}/recordings/abc.2.json")
     assert _ignored(f"{FIXTURES}/recordings/misses/abc.json")
     assert _ignored(f"{FIXTURES}/recordings/abc.json.tmp")
 
@@ -28,16 +29,21 @@ def test_fixture_tooling_stays_tracked(name):
     assert not _ignored(f"{FIXTURES}/{name}")
 
 
-def test_e2e_live_replay_runs_only_on_manual_dispatch():
+def test_e2e_live_replay_runs_on_push_and_pr_from_committed_recordings():
     ci = yaml.safe_load((REPO / ".github/workflows/ci.yaml").read_text())
     # PyYAML reads the bare `on:` key as boolean True.
     triggers = ci.get("on", ci.get(True))
     job = ci["jobs"]["e2e-live-replay"]
-    assert "workflow_dispatch" in triggers
-    assert job.get("if") == "github.event_name == 'workflow_dispatch'"
-    downloads = [s for s in job["steps"] if str(s.get("uses", "")).startswith(
+    assert {"push", "pull_request"} <= set(triggers)
+    assert "if" not in job
+    assert "continue-on-error" not in job
+    assert not [s for s in job["steps"] if str(s.get("uses", "")).startswith(
         "actions/download-artifact")]
-    assert downloads and downloads[0]["with"]["path"] == f"{FIXTURES}/recordings"
+    assert any("run-live-e2e replay" in str(s.get("run", "")) for s in job["steps"])
+
+
+def test_committed_recordings_exist():
+    assert list((REPO / FIXTURES / "recordings").glob("*.json"))
 
 
 def _overlay() -> dict:

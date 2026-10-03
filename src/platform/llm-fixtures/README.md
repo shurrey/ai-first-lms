@@ -3,11 +3,10 @@
 `recordings/` holds the orchestrator's recorded Anthropic responses, one JSON file per request
 (engine side: `src/engine/llm_fixture.py`). With them, the full stack runs the live Chat UI
 scenario specs and `scripts/demo all --check` with no API key and no model cost. CI's
-`e2e-live-replay` job (`.github/workflows/ci.yaml`) does exactly that, on a manual run, from a
-**Record LLM Fixtures** run's artifact.
+`e2e-live-replay` job (`.github/workflows/ci.yaml`) does exactly that on every push and PR, from
+the committed `recordings/`.
 
-`recordings/` is git-ignored until a recorded set replays green; then it is committed and
-`e2e-live-replay` runs on every push (T-P-106). Several tools filter on "now" (upcoming assignments, evidence
+Several tools filter on "now" (upcoming assignments, evidence
 windows, "this month") against a seed with absolute dates, so the overlay pins the clock:
 `LMS_AS_OF` (default `2026-10-15`) is set for the seed, every MCP server and the orchestrator,
 which use it in place of the real time. A set therefore replays on any day, as long as replay
@@ -15,7 +14,7 @@ uses the `LMS_AS_OF` it was recorded with; `run-live-e2e` exports the same defau
 
 | File | Purpose |
 |------|---------|
-| `recordings/*.json` | Git-ignored for now (see above). Fixtures, keyed by a hash of the normalised request (model, system, messages, tools). The n-th identical request in a run is `<key>.<n>.json` (the first is `<key>.json`), so replay serves repeated requests, such as each session's opening brief, in recorded order |
+| `recordings/*.json` | Committed. Fixtures, keyed by a hash of the normalised request (model, system, messages, tools). The n-th identical request in a run is `<key>.<n>.json` (the first is `<key>.json`), so replay serves repeated requests, such as each session's opening brief, in recorded order. A request its caller cancelled while recording (the runner's 90 s agent backstop) is saved with `"cancelled": true` and no response; replay never answers it, so the same timeout fires again |
 | `recordings/misses/` | Git-ignored (`.gitignore` here). Written by replay: the normalised request for each miss, to diff against the nearest recording |
 | `compose.yaml` | Overlay on `docker-compose.yaml`: sets `LLM_FIXTURE_DIR=/app/llm-fixtures` and `LLM_FIXTURE_ALLOW=1`, bind-mounts `recordings/` there, sets `LMS_AS_OF` on the seed, MCP servers and orchestrator, and fixes `PII_PSEUDONYM_SALT` (learner pseudonyms in tool results are part of each request key; an unset salt is random per process) |
 | `run-live-e2e` | `record`, `replay` or `fill`: fresh stack, then the live specs, then `scripts/demo all --check` |
@@ -67,10 +66,9 @@ the requests they matched. Commit the new set as a whole, once it replays green.
 
 From GitHub: run the **Record LLM Fixtures** workflow (`.github/workflows/record-llm-fixtures.yaml`,
 needs the `ANTHROPIC_API_KEY` repo secret), download its `llm-fixtures` artifact into
-`recordings/` in place of the existing `*.json`, or replay it in CI by running the CI workflow
-manually with that run's id as `fixtures_run_id`.
+`recordings/` in place of the existing `*.json`, replay it locally, and commit it.
 
-Locally:
+Locally (then commit the new set as a whole, replacing the old one):
 
 ```bash
 docker compose down            # never -v
@@ -80,13 +78,12 @@ src/platform/llm-fixtures/run-live-e2e replay   # confirm the set replays cleanl
 docker compose up -d
 ```
 
+A cancelled request costs its caller's full timeout in replay too (scenario 3 waits 90 s, twice).
+
 `run-live-e2e fill` replays the existing set and calls the API only for requests it has no
 fixture for, saving those (`LLM_FIXTURE_FILL_MAX` caps how many). Use it after a change that
 alters a few requests late in the run; a prompt, manifest or tool-schema change, or a changed
 outcome early in a course's chain of scenarios, alters most keys, so record instead.
-
-`e2e-live-replay` stays manual and `continue-on-error: true` until a set recorded under
-`LMS_AS_OF` replays green; then commit the set, run the job on push and PR, and remove both.
 
 `KEEP_STACK=1` leaves the `lms-llm-fixtures` stack running for debugging. Stop it with
 `docker compose -p lms-llm-fixtures -f docker-compose.yaml -f src/platform/llm-fixtures/compose.yaml down -v`

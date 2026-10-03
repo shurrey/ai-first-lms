@@ -6,12 +6,15 @@ LLMFixtureMissError when none matches; `fill` replays and records only the misse
 `off` also need LLM_FIXTURE_ALLOW=1. LLM_FIXTURE_FILL_MAX caps how many misses `fill` records
 per process; past it a miss raises as in replay. A request is keyed
 by model, system, messages and tools after UUIDs, tool-use ids and timestamps are replaced by
-placeholders. The n-th identical request in a process is stored as `<key>.json` (n=1) or
-`<key>.<n>.json`, so replay serves the responses in the order they were recorded.
+placeholders and JSON tool results are re-serialised with sorted keys. The n-th identical request in a process is stored as `<key>.json` (n=1) or
+`<key>.<n>.json`, so replay serves the responses in the order they were recorded. A request
+the caller cancelled while recording (e.g. the agent backstop) is saved as `cancelled`, and
+replay never answers it, so the caller's own timeout ends the call again.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -104,7 +107,41 @@ def normalize_request(
     tool_ids = {t: i for i, t in enumerate(_distinct(_TOOL_USE_ID_RE.findall(text)), start=1)}
     text = _TOOL_USE_ID_RE.sub(lambda m: f"<toolu:{tool_ids[m.group(0)]}>", text)
     text = _DATE_RE.sub("<date>", _TIMESTAMP_RE.sub("<ts>", text))
-    return text, uuids
+    return canonical_tool_results(text), uuids
+
+
+def canonical_tool_results(normalized: str) -> str:
+    """`normalized` with JSON tool-result content re-dumped with sorted keys.
+
+    Tools echo their input's key order, and a replayed tool_use input does not keep the order
+    the model produced, so without this a replay misses on key order alone.
+    """
+    payload = json.loads(normalized)
+    for message in payload.get("messages") or []:
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            inner = block.get("content")
+            if isinstance(inner, str):
+                block["content"] = _sorted_json(inner)
+            elif isinstance(inner, list):
+                for part in inner:
+                    if isinstance(part, dict) and isinstance(part.get("text"), str):
+                        part["text"] = _sorted_json(part["text"])
+    return json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
+def _sorted_json(text: str) -> str:
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return text
+    if not isinstance(value, (dict, list)):
+        return text
+    return json.dumps(value, sort_keys=True, ensure_ascii=False)
 
 
 def request_key(normalized: str) -> str:
@@ -175,24 +212,36 @@ class _FixtureMessages:
         if self._owner.mode == "fill" and not recorded.exists() and _take_fill_slot():
             return await self._record(kwargs, normalized, uuids,
                                       self._owner.path_for(key, occurrence))
-        return _replay(recorded, key, kwargs.get("model"), uuids, normalized)
+        entry = _replay_entry(recorded, key, kwargs.get("model"), normalized)
+        if entry.get("cancelled"):
+            logger.info("Replaying cancelled LLM request %s: waiting for the caller to give up",
+                        recorded.name)
+            await asyncio.Event().wait()
+        logger.info("Replayed LLM response %s", recorded.name)
+        return _replay_response(entry, uuids)
 
     async def _record(
         self, kwargs: dict[str, Any], normalized: str, uuids: list[str], path: Path
     ) -> Message:
         assert self._owner._upstream is not None
-        response = await self._owner._upstream.messages.create(**kwargs)
-        entry = {
-            "request": json.loads(normalized),
-            "request_uuids": uuids,
-            "response": response.model_dump(mode="json"),
-        }
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(entry, indent=2, sort_keys=True, ensure_ascii=False))
-        os.replace(tmp, path)
+        entry: dict[str, Any] = {"request": json.loads(normalized), "request_uuids": uuids}
+        try:
+            response = await self._owner._upstream.messages.create(**kwargs)
+        except asyncio.CancelledError:
+            _write_entry(path, {**entry, "cancelled": True})
+            logger.info("Recorded cancelled LLM request %s", path.name)
+            raise
+        _write_entry(path, {**entry, "response": response.model_dump(mode="json")})
         logger.info("Recorded LLM response %s", path.name)
         return response
+
+
+def _write_entry(path: Path, entry: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    # Unsorted, so a replayed tool_use input keeps the key order the model produced.
+    tmp.write_text(json.dumps(entry, indent=2, ensure_ascii=False))
+    os.replace(tmp, path)
 
 
 _fill_lock = threading.Lock()
@@ -224,14 +273,9 @@ def _recorded_path(directory: Path, key: str, occurrence: int) -> Path:
     return occurrence_path(directory, key, 1)
 
 
-def _replay(
-    path: Path, key: str, model: Any, live_uuids: list[str], normalized: str
-) -> Message:
-    """The recorded response, with the recording's request UUIDs swapped for this run's.
-
-    On a miss the normalized request is written to `<dir>/misses/<key>.json` (when the
-    directory is writable) so it can be diffed against the nearest recording.
-    """
+def _replay_entry(path: Path, key: str, model: Any, normalized: str) -> dict[str, Any]:
+    """The recorded entry at `path`. On a miss the normalized request is written to
+    `<dir>/misses/<key>.json` (when writable), to diff against the nearest recording."""
     if not path.exists():
         message = (
             f"No recorded LLM response for request {key[:16]} (model {model}) in "
@@ -240,8 +284,11 @@ def _replay(
         logger.error(message)
         _save_miss(path.parent / "misses" / f"{key}.json", normalized)
         raise LLMFixtureMissError(message)
-    entry = json.loads(path.read_text())
-    logger.info("Replayed LLM response %s", path.name)
+    return json.loads(path.read_text())
+
+
+def _replay_response(entry: dict[str, Any], live_uuids: list[str]) -> Message:
+    """The recorded response, with the recording's request UUIDs swapped for this run's."""
     recorded = entry.get("request_uuids", [])
     mapping = dict(zip(recorded, live_uuids, strict=False))
     text = json.dumps(entry["response"])

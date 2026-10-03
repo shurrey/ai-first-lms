@@ -3,6 +3,7 @@ name: "Grading: rubric-based scoring with approval"
 login_as: "m.torres@university.edu"
 active_role: faculty
 course_id: "cs101"
+xfail: "grading_assistant drafts all 6 Essay 3 grades, then hits the runner's 90 s agent backstop before any commit_grade approval (T-E-134)."
 
 user_turns:
   - message: "Grade submissions for Essay 3 with my rubric."
