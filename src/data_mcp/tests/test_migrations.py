@@ -49,7 +49,7 @@ def migrate_fresh() -> None:
 def test_alembic_current_shows_head() -> None:
     result = _run_alembic("current")
     assert result.returncode == 0, f"alembic current failed:\n{result.stderr}"
-    assert "003 (head)" in result.stdout, f"Expected 003 (head) in output:\n{result.stdout}"
+    assert "004 (head)" in result.stdout, f"Expected 004 (head) in output:\n{result.stdout}"
 
 
 def test_schema_tables_exist() -> None:
@@ -296,3 +296,53 @@ def test_idempotent_upgrade() -> None:
     """Running upgrade again should be a no-op (already at head)."""
     result = _run_alembic("upgrade", "head")
     assert result.returncode == 0, f"Second upgrade failed:\n{result.stderr}"
+
+
+V1_CRITERIA = [
+    {"name": "Correctness", "description": "Content is correct", "levels": [
+        {"label": "Excellent", "points": 40, "description": "All correct"},
+        {"label": "Good", "points": 30, "description": "Minor errors"},
+        {"label": "Poor", "points": 10, "description": "Major errors"},
+    ]},
+    {"name": "Writing Mechanics", "levels": [
+        {"label": "Strong", "points": 3}, {"label": "Weak", "points": 1},
+    ]},
+]
+
+
+def test_004_backfills_every_v1_rubric_criterion() -> None:
+    import json
+    import uuid as _uuid
+
+    from data_mcp.rubric_criteria import CRITERION_NAMESPACE
+
+    down = _run_alembic("downgrade", "003")
+    assert down.returncode == 0, f"downgrade failed:\n{down.stderr}"
+    rubric = _uuid.uuid4()
+    _fetch("INSERT INTO rubrics (id, title, criteria) VALUES ($1, 'v1', $2) RETURNING id",
+           rubric, json.dumps(V1_CRITERIA))
+    for _ in range(2):  # the second upgrade proves the backfill is idempotent
+        up = _run_alembic("upgrade", "head")
+        assert up.returncode == 0, f"upgrade failed:\n{up.stderr}"
+        rows = _fetch("SELECT id, key, description, levels FROM rubric_criteria "
+                      "WHERE rubric_id = $1 ORDER BY key", rubric)
+        assert [r["key"] for r in rows] == ["correctness", "writing_mechanics"]
+        _run_alembic("downgrade", "003")
+    _run_alembic("upgrade", "head")
+    correctness, mechanics = rows
+    assert [(lv["score"], lv["label"], lv["descriptor"], lv["points"])
+            for lv in json.loads(correctness["levels"])] == [
+        (1, "Poor", "Major errors", 10), (2, "Good", "Minor errors", 30),
+        (3, "Excellent", "All correct", 40)]
+    assert mechanics["description"] == "Writing Mechanics"
+    namespace = _uuid.UUID(CRITERION_NAMESPACE)
+    assert correctness["id"] == _uuid.uuid5(namespace, f"criterion:{rubric}:correctness")
+    _fetch("DELETE FROM rubrics WHERE id = $1 RETURNING id", rubric)
+
+
+def test_backfill_ids_match_the_engines_stand_in_criterion_ids() -> None:
+    from data_mcp.rubric_criteria import BACKFILL_SQL, CRITERION_NAMESPACE
+    from engine.measurement import _NAMESPACE
+
+    assert str(_NAMESPACE) == CRITERION_NAMESPACE
+    assert CRITERION_NAMESPACE in BACKFILL_SQL

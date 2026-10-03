@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -10,11 +11,72 @@ import asyncpg
 
 from common import clock
 from data_mcp.mcp_base import ToolDef
+from data_mcp.mcp_servers._args import conflict, is_int, not_found, text_arg, uuid_arg
 from data_mcp.mcp_servers._helpers import (
     parse_json_column,
     resolve_concept_id,
     validation_error,
 )
+from data_mcp.mcp_servers.assessments.access import load_viewer
+from data_mcp.mcp_servers.assessments.formative import (
+    formative_handlers,
+    link_revision,
+    submission_criteria,
+)
+
+MAX_CLOSING_CHARS = 20_000
+_NON_WORD = re.compile(r"[^a-z0-9]+")
+
+
+def normalize_criterion_key(key: str) -> str:
+    """'Writing Mechanics', 'writing_mechanics' and 'writing-mechanics' are one criterion."""
+    return _NON_WORD.sub("_", key.lower()).strip("_")
+
+
+def _allowed_score(levels: Any, score: int) -> bool:
+    """Level scores for §7.2 criteria; backfilled v1 criteria (levels carry `points`) take any
+    whole number from 0 to the top level's points, as v1 grades did."""
+    levels = parse_json_column(levels) if levels else []
+    if not isinstance(levels, list) or not levels:
+        return True
+    points = [lv["points"] for lv in levels if isinstance(lv, dict)
+              and isinstance(lv.get("points"), (int, float))]
+    if points:
+        return 0 <= score <= max(points)
+    return score in {lv.get("score") for lv in levels if isinstance(lv, dict)}
+
+
+def _final_scores(
+    final_scores: dict[str, Any], criteria: list[Any], draft: Any,
+) -> tuple[dict[str, int], list[tuple[uuid.UUID, int]]]:
+    """(grades.scores, [(criterion_id, final_score)]); raises ValueError unless every rubric
+    criterion has an allowed whole-number score. Keys outside the rubric must be draft keys."""
+    by_norm = {normalize_criterion_key(c["key"]): c for c in criteria}
+    draft_keys = {normalize_criterion_key(k): k for k in draft if isinstance(k, str)} \
+        if isinstance(draft, dict) else {}
+    scores: dict[str, int] = {}
+    per_criterion: list[tuple[uuid.UUID, int]] = []
+    for key, value in final_scores.items():
+        norm = normalize_criterion_key(key) if isinstance(key, str) else ""
+        if not is_int(value) or value < 0:
+            raise ValueError(f"final score for {key} must be a non-negative whole number")
+        crit = by_norm.get(norm)
+        if crit is not None:
+            if not _allowed_score(crit["levels"], value):
+                raise ValueError(f"final score {value} is not a level of {crit['key']}")
+            scores[crit["key"]] = value
+            per_criterion.append((crit["id"], value))
+        elif norm in draft_keys:
+            scores[draft_keys[norm]] = value
+        else:
+            raise ValueError(f"{key} is not a criterion of this grade")
+    required = list(by_norm) or list(draft_keys)
+    missing = [k for k in required
+               if k not in {normalize_criterion_key(s) for s in scores}]
+    if missing:
+        raise ValueError("final_scores is missing " + ", ".join(missing))
+    return scores, per_criterion
+
 
 HISTORY_DEFAULT_LIMIT = 20
 HISTORY_MAX_LIMIT = 100
@@ -22,6 +84,7 @@ HISTORY_MAX_LIMIT = 100
 
 def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
     """Return all assessments server tool definitions."""
+    formative = formative_handlers(pool)
 
     async def create_question(args: dict[str, Any]) -> dict[str, Any]:
         bank_id = args["bank_id"]
@@ -69,7 +132,9 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
             rows = await conn.fetch(
                 """SELECT q.id, q.type, q.stem, q.options, q.bloom_level, q.difficulty, q.aligned_nodes
                    FROM questions q
+                   JOIN question_banks b ON b.id = q.bank_id
                    WHERE ($1::uuid IS NULL OR q.bank_id = $1)
+                     AND COALESCE(b.metadata->>'kind', '') <> 'practice'
                      AND ($2::text IS NULL OR q.stem ILIKE $2)
                      AND ($3::uuid[] IS NULL OR q.aligned_nodes && $3)
                    LIMIT 50""",
@@ -156,25 +221,96 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                 holistic_md,
                 uuid.UUID(graded_by),
             )
+            await _record_ai_scores(conn, uuid.UUID(submission_id), rubric_id, scores, feedback)
             return {"grade_id": str(grade_id)}
 
+    async def _grade_criteria(conn: asyncpg.Connection, submission_id: uuid.UUID,
+                              rubric_id: str | uuid.UUID | None) -> list[asyncpg.Record]:
+        """rubric_criteria of the grade's rubric, else of the submission's assignment."""
+        return await conn.fetch(
+            """SELECT rc.id, rc.key, rc.levels FROM rubric_criteria rc
+               WHERE rc.rubric_id::text = COALESCE($2::text, (
+                 SELECT a.metadata->>'rubric_id' FROM submissions s
+                 JOIN nodes a ON a.id = s.assignment_node WHERE s.id = $1))
+               ORDER BY rc.key""",
+            submission_id, str(rubric_id) if rubric_id else None,
+        )
+
+    async def _record_ai_scores(conn: asyncpg.Connection, submission_id: uuid.UUID,
+                                rubric_id: str | None, scores: Any, feedback: Any) -> None:
+        """A final version's draft scores become criterion_scores.ai_score; drafts keep the
+        feedback agent's scores, which a learner may already have been shown."""
+        status = await conn.fetchval("SELECT status FROM submissions WHERE id = $1",
+                                     submission_id)
+        if status != "final" or not isinstance(scores, dict):
+            return
+        by_key = {normalize_criterion_key(k): v for k, v in scores.items() if isinstance(k, str)}
+        notes = ({normalize_criterion_key(k): v for k, v in feedback.items()
+                  if isinstance(k, str) and isinstance(v, str)}
+                 if isinstance(feedback, dict) else {})
+        rows = [
+            (submission_id, c["id"], by_key[c["key"]], notes.get(c["key"]))
+            for c in await _grade_criteria(conn, submission_id, rubric_id)
+            if is_int(by_key.get(c["key"]))
+        ]
+        await conn.executemany(
+            """INSERT INTO criterion_scores (submission_id, criterion_id, ai_score, ai_rationale)
+               VALUES ($1, $2, $3, $4)
+               ON CONFLICT (submission_id, criterion_id) DO UPDATE SET
+                 ai_score = EXCLUDED.ai_score,
+                 ai_rationale = COALESCE(EXCLUDED.ai_rationale, criterion_scores.ai_rationale)""",
+            rows,
+        )
+
     async def commit_grade(args: dict[str, Any]) -> dict[str, Any]:
-        grade_id = args["grade_id"]
-        async with pool.acquire() as conn:
+        try:
+            grade_id = uuid_arg(args, "grade_id", required=True)
+            final_scores = args.get("final_scores")
+            if not isinstance(final_scores, dict) or not final_scores:
+                raise ValueError("final_scores must map each rubric criterion to a score")
+            holistic_md = text_arg(args.get("holistic_md"), "holistic_md",
+                                   max_chars=MAX_CLOSING_CHARS)
+            edits = args.get("feedback")
+            if edits is not None and not (isinstance(edits, dict) and all(
+                    isinstance(k, str) and isinstance(v, str) for k, v in edits.items())):
+                raise ValueError("feedback must map criterion keys to text")
+        except ValueError as exc:
+            return validation_error(str(exc))
+
+        async with pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
-                "SELECT id, is_draft FROM grades WHERE id = $1",
-                uuid.UUID(grade_id),
+                """SELECT id, submission_id, rubric_id, scores, feedback, is_draft
+                   FROM grades WHERE id = $1 FOR UPDATE""",
+                grade_id,
             )
             if not row:
-                return {"error": "Grade not found"}
+                return not_found("Grade not found")
             if not row["is_draft"]:
-                return {"error": "Grade is already committed"}
-
-            committed_at = await conn.fetchval(
-                """UPDATE grades SET is_draft = false, committed_at = now()
-                   WHERE id = $1 RETURNING committed_at""",
-                uuid.UUID(grade_id),
+                return conflict("Grade is already committed")
+            criteria = await _grade_criteria(conn, row["submission_id"], row["rubric_id"])
+            draft = parse_json_column(row["scores"]) or {}
+            try:
+                scores, per_criterion = _final_scores(final_scores, criteria, draft)
+            except ValueError as exc:
+                return validation_error(str(exc))
+            merged = parse_json_column(row["feedback"]) or {}
+            if not isinstance(merged, dict):
+                merged = {}
+            merged.update(edits or {})
+            await conn.executemany(
+                """INSERT INTO criterion_scores (submission_id, criterion_id, final_score)
+                   VALUES ($1, $2, $3)
+                   ON CONFLICT (submission_id, criterion_id) DO UPDATE SET
+                     final_score = EXCLUDED.final_score""",
+                [(row["submission_id"], cid, score) for cid, score in per_criterion],
             )
+            committed_at = await conn.fetchval(
+                """UPDATE grades SET is_draft = false, committed_at = now(), scores = $2,
+                          holistic_md = $3, feedback = $4
+                   WHERE id = $1 RETURNING committed_at""",
+                grade_id, json.dumps(scores), holistic_md, json.dumps(merged),
+            )
+            await link_revision(conn, row["submission_id"], dict(per_criterion))
             return {
                 "committed": True,
                 "committed_at": committed_at.isoformat(),
@@ -277,7 +413,14 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
             ]}
 
     async def list_recent_evidence(args: dict[str, Any]) -> dict[str, Any]:
-        person_id = args["person_id"]
+        """Private evidence (practice, drafts) is returned only when requester_id is the
+        learner; any other or absent requester gets course/program evidence only."""
+        try:
+            person = uuid_arg(args, "person_id", required=True)
+            requester_id = uuid_arg(args, "requester_id", required=False)
+        except ValueError as exc:
+            return {**validation_error(str(exc)), "evidence": []}
+        include_private = requester_id is not None and requester_id == person
         node_ids = args.get("node_ids")
         since_days = args.get("since_days", 30)
         if isinstance(since_days, str) and since_days.strip().isdigit():
@@ -292,19 +435,22 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
 
         async with pool.acquire() as conn:
             rows = await conn.fetch(
-                """SELECT e.id, e.node_id, e.kind, e.score, e.confidence, e.source, e.observed_at
+                """SELECT e.id, e.node_id, e.kind, e.score, e.confidence, e.source, e.observed_at,
+                          e.visibility::text AS visibility
                    FROM evidence e
                    WHERE e.person_id = $1
                      AND e.observed_at >= $4::timestamptz - make_interval(days => $2)
                      AND e.observed_at <= $4::timestamptz
                      AND ($3::uuid[] IS NULL OR e.node_id = ANY($3))
+                     AND ($5::bool OR e.visibility::text <> 'private')
                    ORDER BY e.observed_at DESC, e.kind, e.score, e.source,
                             e.node_id, e.payload::text, e.id
                    LIMIT 100""",
-                uuid.UUID(person_id),
+                person,
                 since_days,
                 [uuid.UUID(n) for n in node_ids] if node_ids else None,
                 clock.now(),
+                include_private,
             )
             return {
                 "evidence": [
@@ -316,6 +462,7 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                         "confidence": r["confidence"],
                         "source": r["source"],
                         "observed_at": r["observed_at"].isoformat(),
+                        "visibility": r["visibility"],
                     }
                     for r in rows
                 ]
@@ -324,18 +471,21 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
     async def list_submission_history(args: dict[str, Any]) -> dict[str, Any]:
         """Newest first. Without person_id it lists every learner's submissions in the scope.
         Criteria are the assignment's rubric criteria (node metadata rubric_id) plus any
-        criterion scored on the submission; unscored ones have null scores. ai_score is
-        returned unmasked: the server cannot tell whether the caller is a student."""
+        criterion scored on the submission. Unless requester_id is faculty of the submission's
+        course (or an admin), unreleased feedback and uncommitted final scores are null."""
         try:
             person = args.get("person_id")
             assignment = args.get("assignment_node")
             course = args.get("course_id")
+            requester = args.get("requester_id")
             person_id = uuid.UUID(str(person)) if person else None
             assignment_id = uuid.UUID(str(assignment)) if assignment else None
             course_id = uuid.UUID(str(course)) if course else None
+            requester_id = uuid.UUID(str(requester)) if requester else None
         except ValueError:
             return {**validation_error(
-                "person_id, assignment_node and course_id must be UUIDs"), "submissions": []}
+                "person_id, assignment_node, course_id and requester_id must be UUIDs"),
+                "submissions": []}
         if assignment_id is None and course_id is None:
             return {**validation_error(
                 "One of assignment_node or course_id is required"), "submissions": []}
@@ -353,6 +503,7 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
             subs = await conn.fetch(
                 """SELECT s.id, s.person_id, s.assignment_node, s.version, s.status,
                           s.parent_id, s.submitted_at,
+                          COALESCE(s.course_node::text, a.metadata->>'course_id') AS course,
                           a.title AS assignment_title, a.metadata->>'rubric_id' AS rubric_id
                    FROM submissions s
                    JOIN nodes a ON a.id = s.assignment_node
@@ -366,42 +517,22 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                 person_id, assignment_id, course_id, limit,
                 title.strip() if title is not None else None,
             )
-            criteria = await conn.fetch(
-                """SELECT s.id AS submission_id, rc.id AS criterion_id, rc.key,
-                          cs.ai_score, cs.final_score, cs.released_at
-                   FROM submissions s
-                   JOIN nodes a ON a.id = s.assignment_node
-                   JOIN rubric_criteria rc
-                     ON rc.rubric_id::text = a.metadata->>'rubric_id'
-                     OR EXISTS (SELECT 1 FROM criterion_scores x
-                                WHERE x.submission_id = s.id AND x.criterion_id = rc.id)
-                   LEFT JOIN criterion_scores cs
-                     ON cs.submission_id = s.id AND cs.criterion_id = rc.id
-                   WHERE s.id = ANY($1::uuid[])
-                   ORDER BY s.id, rc.key, rc.id""",
-                [r["id"] for r in subs],
-            )
-        by_submission: dict[uuid.UUID, list[dict[str, Any]]] = {}
-        for c in criteria:
-            by_submission.setdefault(c["submission_id"], []).append({
-                "criterion_id": str(c["criterion_id"]),
-                "key": c["key"],
-                "ai_score": c["ai_score"],
-                "final_score": c["final_score"],
-                "released_at": c["released_at"].isoformat() if c["released_at"] else None,
-            })
+            viewer = await load_viewer(conn, requester_id)
+            criteria, statuses = await submission_criteria(conn, subs, viewer)
         return {"submissions": [
             {
                 "id": str(r["id"]),
                 "person_id": str(r["person_id"]),
                 "assignment_node": str(r["assignment_node"]),
                 "assignment_title": r["assignment_title"],
+                "course_id": r["course"],
                 "rubric_id": r["rubric_id"],
                 "version": r["version"],
                 "status": r["status"],
                 "parent_id": str(r["parent_id"]) if r["parent_id"] else None,
                 "submitted_at": r["submitted_at"].isoformat(),
-                "criteria": by_submission.get(r["id"], []),
+                "feedback_status": statuses[r["id"]],
+                "criteria": criteria.get(r["id"], []),
             }
             for r in subs
         ]}
@@ -666,6 +797,32 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
 
             return {"approved": True, "credential_id": credential_id}
 
+    async def reject_credential(args: dict[str, Any]) -> dict[str, Any]:
+        """Close a pending credential without issuing it. The caller records the reason."""
+        try:
+            pending_id = uuid_arg(args, "pending_id", required=True)
+            reviewer_id = uuid_arg(args, "reviewer_id", required=True)
+            if args.get("reason") is not None:
+                text_arg(args["reason"], "reason")
+        except ValueError as exc:
+            return validation_error(str(exc))
+
+        async with pool.acquire() as conn:
+            status = await conn.fetchval(
+                """UPDATE pending_credentials SET status = 'rejected', reviewed_by = $2,
+                          reviewed_at = now()
+                   WHERE id = $1 AND status = 'pending'
+                   RETURNING status""",
+                pending_id, reviewer_id,
+            )
+            if status is None:
+                exists = await conn.fetchval(
+                    "SELECT 1 FROM pending_credentials WHERE id = $1", pending_id)
+                if exists is None:
+                    return not_found("Pending credential not found")
+                return conflict("This credential was already reviewed")
+        return {"rejected": True, "pending_id": str(pending_id)}
+
     async def list_issued_credentials(args: dict[str, Any]) -> dict[str, Any]:
         """List issued credentials for a student."""
         person_id = args.get("person_id")
@@ -806,6 +963,9 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                 "type": "object",
                 "properties": {
                     "grade_id": {"type": "string"},
+                    "final_scores": {"type": "object"},
+                    "holistic_md": {"type": "string"},
+                    "feedback": {"type": "object"},
                 },
                 "required": ["grade_id"],
             },
@@ -822,6 +982,7 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                     "person_id": {"type": "string"},
                     "node_ids": {"type": "array", "items": {"type": "string"}},
                     "since_days": {"type": "integer"},
+                    "requester_id": {"type": "string"},
                 },
                 "required": ["person_id"],
             },
@@ -841,6 +1002,7 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                     "assignment_title": {"type": "string"},
                     "course_id": {"type": "string"},
                     "limit": {"type": "integer"},
+                    "requester_id": {"type": "string"},
                 },
             },
             handler=list_submission_history,
@@ -897,6 +1059,15 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
             handler=approve_credential, mutates=True, requires_approval=True,
         ),
         ToolDef(
+            name="assessments.reject_credential",
+            description="Reject a pending credential so it is never issued",
+            input_schema={"type": "object", "properties": {
+                "pending_id": {"type": "string"}, "reviewer_id": {"type": "string"},
+                "reason": {"type": "string"},
+            }, "required": ["pending_id", "reviewer_id"]},
+            handler=reject_credential, mutates=True, requires_approval=True,
+        ),
+        ToolDef(
             name="assessments.list_issued_credentials",
             description="List issued OB3 badge credentials for a student",
             input_schema={"type": "object", "properties": {
@@ -919,5 +1090,265 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
                 "key": {"type": "string"}, "value": {},
             }, "required": ["key", "value"]},
             handler=save_settings, mutates=True, requires_approval=False,
+        ),
+        ToolDef(
+            name="assessments.submit",
+            description=(
+                "Submit a draft, revision or final version of an assignment for the student "
+                "themself; a revision names the latest version as parent_id"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "person_id": {"type": "string"},
+                    "assignment_node": {"type": "string"},
+                    "body_md": {"type": "string"},
+                    "attachments": {"type": "array", "items": {"type": "object"}},
+                    "status": {"type": "string", "enum": ["draft", "final"]},
+                    "parent_id": {"type": "string"},
+                },
+                "required": ["person_id", "assignment_node", "body_md", "status"],
+            },
+            handler=formative["assessments.submit"],
+            mutates=True,
+        ),
+        ToolDef(
+            name="assessments.save_criterion_feedback",
+            description=(
+                "Save formative, criterion-level feedback (a rubric level, rationale, quoted "
+                "evidence spans and one next step per criterion). Never grades and never "
+                "releases feedback to the student"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "submission_id": {"type": "string"},
+                    "criteria": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "criterion_id": {"type": "string"},
+                                "ai_score": {"type": "integer"},
+                                "ai_rationale": {"type": "string"},
+                                "ai_evidence_spans": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "quote": {"type": "string"},
+                                            "start": {"type": "integer"},
+                                            "end": {"type": "integer"},
+                                        },
+                                        "required": ["quote"],
+                                    },
+                                },
+                                "next_step": {"type": "string"},
+                            },
+                            "required": ["criterion_id", "ai_score", "ai_rationale",
+                                         "ai_evidence_spans", "next_step"],
+                        },
+                    },
+                    "requester_id": {"type": "string"},
+                },
+                "required": ["submission_id", "criteria"],
+            },
+            handler=formative["assessments.save_criterion_feedback"],
+            mutates=True,
+        ),
+        ToolDef(
+            name="assessments.release_feedback",
+            description=(
+                "Release (optionally edited) or suppress criterion feedback on a submission"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "submission_id": {"type": "string"},
+                    "decision": {"type": "string", "enum": ["release", "suppress"]},
+                    "criterion_ids": {"type": "array", "items": {"type": "string"}},
+                    "edits": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "criterion_id": {"type": "string"},
+                                "ai_score": {"type": "integer"},
+                                "ai_rationale": {"type": "string"},
+                                "next_step": {"type": "string"},
+                            },
+                            "required": ["criterion_id"],
+                        },
+                    },
+                    "reviewer_id": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["submission_id"],
+            },
+            handler=formative["assessments.release_feedback"],
+            mutates=True,
+            requires_approval=True,
+        ),
+        ToolDef(
+            name="assessments.get_improvement",
+            description=(
+                "Student x criterion improvement trajectories for a course, with plateaued, "
+                "regressed and ready_for_summative flags"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "course_id": {"type": "string"},
+                    "student_id": {"type": "string"},
+                    "criterion_id": {"type": "string"},
+                    "requester_id": {"type": "string"},
+                },
+                "required": ["course_id", "requester_id"],
+            },
+            handler=formative["assessments.get_improvement"],
+        ),
+        ToolDef(
+            name="assessments.weaknesses",
+            description=(
+                "Criteria a student is below target on in at least 2 of their last N scored "
+                "submissions in a course (deterministic weakness detector)"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "student_id": {"type": "string"},
+                    "course_id": {"type": "string"},
+                    "window": {"type": "integer"},
+                },
+                "required": ["student_id", "course_id"],
+            },
+            handler=formative["assessments.weaknesses"],
+        ),
+        ToolDef(
+            name="assessments.propose_alignment",
+            description=(
+                "Context for aligning an assignment to course outcomes (syllabus, ranked "
+                "candidate outcomes, existing criteria); with the agent's 3-6 drafted criteria "
+                "it also returns them validated as a proposal with outcome links"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "assignment_node": {"type": "string"},
+                    "max_outcomes": {"type": "integer"},
+                    "criteria": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "key": {"type": "string"},
+                                "description": {"type": "string"},
+                                "levels": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "score": {"type": "integer"},
+                                            "label": {"type": "string"},
+                                            "descriptor": {"type": "string"},
+                                        },
+                                        "required": ["score", "label", "descriptor"],
+                                    },
+                                },
+                                "outcome_nodes": {"type": "array", "items": {"type": "string"}},
+                            },
+                            "required": ["key", "description", "levels"],
+                        },
+                    },
+                },
+                "required": ["assignment_node"],
+            },
+            handler=formative["assessments.propose_alignment"],
+        ),
+        ToolDef(
+            name="assessments.apply_alignment",
+            description=(
+                "Store the criteria faculty accepted or edited from an alignment proposal: "
+                "upserts rubric_criteria (with outcome_nodes) on the assignment's rubric, "
+                "creating the rubric if needed, and links the assignment to those outcomes"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "assignment_node": {"type": "string"},
+                    "criteria": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "key": {"type": "string"},
+                                "description": {"type": "string"},
+                                "levels": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "score": {"type": "integer"},
+                                            "label": {"type": "string"},
+                                            "descriptor": {"type": "string"},
+                                        },
+                                        "required": ["score", "label", "descriptor"],
+                                    },
+                                },
+                                "outcome_nodes": {"type": "array", "items": {"type": "string"}},
+                            },
+                            "required": ["key"],
+                        },
+                    },
+                    "requester_id": {"type": "string"},
+                },
+                "required": ["assignment_node", "criteria", "requester_id"],
+            },
+            handler=formative["assessments.apply_alignment"],
+            mutates=True,
+            requires_approval=True,
+        ),
+        ToolDef(
+            name="assessments.record_practice_attempt",
+            description=(
+                "Record a student's attempt at their own practice set as private evidence and "
+                "return per-item correctness from the stored answer key"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "person_id": {"type": "string"},
+                    "practice_set_id": {"type": "string"},
+                    "answers": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "question_id": {"type": "string"},
+                                "answer": {"type": "string"},
+                            },
+                            "required": ["question_id", "answer"],
+                        },
+                    },
+                },
+                "required": ["person_id", "practice_set_id", "answers"],
+            },
+            handler=formative["assessments.record_practice_attempt"],
+            mutates=True,
+        ),
+        ToolDef(
+            name="assessments.grading_status",
+            description=(
+                "Grading pipeline status per assignment: final submissions, draft grades "
+                "awaiting commit, committed grades"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "course_id": {"type": "string"},
+                    "assignment_id": {"type": "string"},
+                },
+            },
+            handler=formative["assessments.grading_status"],
         ),
     ]

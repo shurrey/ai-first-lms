@@ -13,6 +13,7 @@ from typing import Any
 
 import asyncpg
 
+from data_mcp.rubric_criteria import backfill_rubric_criteria
 from data_mcp.settings import settings
 
 # ── Deterministic UUID generation ──────────────────────────────────────────
@@ -580,6 +581,7 @@ async def seed(conn: asyncpg.Connection, rng: random.Random) -> dict[str, Any]:
                 faculty_torres,
             )
 
+    summary["rubric_criteria_backfilled"] = await backfill_rubric_criteria(conn)
     return summary
 
 

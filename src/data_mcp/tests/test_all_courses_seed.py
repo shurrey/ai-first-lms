@@ -172,7 +172,8 @@ def test_demo_accounts_match_spec(seeded) -> None:  # noqa: ANN001
             await conn.close()
 
     accounts = {a["name"]: a for a in _run(_accounts())}
-    assert accounts["Emma Smith"]["courses"] == "BIO 150, CS 101, MATH 201"
+    # The formative seed enrolls Emma in ENG 102 for spec.md §7.9 (§4.3 lists three courses).
+    assert accounts["Emma Smith"]["courses"] == "BIO 150, CS 101, ENG 102, MATH 201"
     assert "ENG 102" in accounts["Noah Brown"]["courses"]
     assert accounts["Dr. Maria Torres"]["roles"] == "faculty, program_lead"
     assert accounts["Dr. Sarah Chen"]["courses"] == "MATH 201"
@@ -225,6 +226,7 @@ def test_reseed_is_deterministic(seeded) -> None:  # noqa: ANN001
     assert again["total_edges"] == seeded["total_edges"]
     assert again["total_evidence"] == seeded["total_evidence"]
     assert again["scenario_data"] == seeded["scenario_data"]
+    assert again["formative"] == seeded["formative"]
 
 
 # ── Provenance history (spec §6.3, §6.6) ──
@@ -237,7 +239,7 @@ _PROVENANCE_SNAPSHOT = {
                           FROM human_decisions ORDER BY id""",
     # evidence ids come from the DB default, so compare the link by its content.
     "outcome_links": """SELECT ai_action_id, delta, observed_at FROM outcome_links
-                        ORDER BY ai_action_id, observed_at""",
+                        ORDER BY ai_action_id, observed_at, delta::text""",
 }
 
 
@@ -255,16 +257,21 @@ def test_provenance_covers_both_courses_and_all_action_types(seeded) -> None:  #
     for r in rows:
         by_course.setdefault(r["slug"], set()).add(r["action_type"])
     expected = {"grade_draft", "generation", "attestation", "recommendation", "profile_update"}
-    assert by_course == {"cs101": expected, "eng102": expected}
-    assert seeded["provenance"]["ai_actions"] == sum(r["n"] for r in rows)
+    assert by_course == {
+        "cs101": expected | {"criterion_feedback"},
+        "eng102": expected | {"criterion_feedback", "practice_item"},
+    }
+    seeded_totals = {k: seeded["provenance"][k] + seeded["formative"][k]
+                     for k in ("ai_actions", "human_decisions", "outcome_links")}
+    assert seeded_totals["ai_actions"] == sum(r["n"] for r in rows)
     totals = _run(_fetch(
         """SELECT (SELECT count(*) FROM human_decisions) AS d,
                   (SELECT count(*) FROM outcome_links) AS o,
                   (SELECT count(DISTINCT ai_action_id) FROM human_decisions) AS decided,
                   (SELECT count(*) FROM ai_actions) AS a"""
     ))[0]
-    assert totals["d"] == seeded["provenance"]["human_decisions"]
-    assert totals["o"] == seeded["provenance"]["outcome_links"] > 0
+    assert totals["d"] == seeded_totals["human_decisions"]
+    assert totals["o"] == seeded_totals["outcome_links"] > seeded["formative"]["outcome_links"]
     assert totals["decided"] > totals["a"] / 2
 
 
@@ -365,6 +372,7 @@ _VISIBILITY_BY_SOURCE = """
     LEFT JOIN submissions s
            ON ev.kind = 'artifact_submission'
           AND s.person_id = ev.person_id AND s.assignment_node = ev.node_id
+          AND (ev.payload->>'submission_id' IS NULL OR s.id::text = ev.payload->>'submission_id')
     LEFT JOIN grades g ON g.submission_id = s.id
     GROUP BY 1, 2, 3"""
 
@@ -383,12 +391,19 @@ def test_only_committed_grade_evidence_is_course_visible(seeded) -> None:  # noq
 
 @db
 def test_seeded_outcome_links_reference_course_visible_evidence(seeded) -> None:  # noqa: ANN001
+    """Grade outcomes cite only course evidence; a revision's per-criterion delta cites the
+    learner's own revision, which stays private until its grade is committed (§12.5)."""
     rows = _run(_fetch(
-        """SELECT ev.visibility, count(*) AS n FROM outcome_links o
-           JOIN evidence ev ON ev.id = o.evidence_id GROUP BY 1"""
+        """SELECT a.action_type, ev.visibility, count(*) AS n FROM outcome_links o
+           JOIN ai_actions a ON a.id = o.ai_action_id
+           JOIN evidence ev ON ev.id = o.evidence_id GROUP BY 1, 2"""
     ))
-    assert {r["visibility"]: r["n"] for r in rows} == {
-        "course": seeded["provenance"]["outcome_links"]}
+    counts = {(r["action_type"], r["visibility"]): r["n"] for r in rows}
+    assert counts[("grade_draft", "course")] == seeded["provenance"]["outcome_links"]
+    assert set(counts) == {("grade_draft", "course"), ("criterion_feedback", "private"),
+                           ("criterion_feedback", "course")}
+    assert sum(n for (t, _), n in counts.items() if t == "criterion_feedback") == (
+        seeded["formative"]["outcome_links"])
 
 
 @db
@@ -414,7 +429,8 @@ def test_essay3_is_ready_to_grade_in_cs101(seeded) -> None:  # noqa: ANN001
     cs101 = seeded["course_ids"]["cs101"]
     assignment = _run(_fetch(
         """SELECT id, title, metadata FROM nodes
-           WHERE kind = 'assessment_item' AND title LIKE 'Essay 3%' AND metadata->>'course_id' = $1""",
+           WHERE kind = 'assessment_item' AND title LIKE 'Essay 3%'
+             AND metadata->>'course_id' = $1""",
         cs101,
     ))
     assert len(assignment) == 1
@@ -537,3 +553,261 @@ def test_engagement_continues_through_october(seeded) -> None:  # noqa: ANN001
     ))
     assert rows[0]["students"] >= 25
     assert seeded["scenario_data"]["october_engagement_events"] > 0
+
+
+# ── Formative loop (spec.md §7.8) ──
+
+async def _tool(name: str, args: dict, server_name: str = "assessments") -> dict:
+    from mcp.types import CallToolRequest
+
+    from data_mcp.mcp_base import create_mcp_server
+    from data_mcp.mcp_servers.assessments.tools import get_tools as assessments_tools
+    from data_mcp.mcp_servers.content.tools import get_tools as content_tools
+
+    tools = assessments_tools if server_name == "assessments" else content_tools
+    pool = await asyncpg.create_pool(DB_URL, min_size=1, max_size=2)
+    try:
+        server = create_mcp_server(server_name, tools(pool))
+        result = await server.request_handlers[CallToolRequest](CallToolRequest(
+            method="tools/call", params={"name": name, "arguments": args}))
+        return json.loads(result.root.content[0].text)
+    finally:
+        await pool.close()
+
+
+def _person_id(email: str) -> str:
+    return str(_run(_fetch("SELECT id FROM persons WHERE email = $1", email))[0]["id"])
+
+
+@db
+def test_every_v1_rubric_criterion_has_a_rubric_criteria_row(seeded) -> None:  # noqa: ANN001
+    missing = _run(_fetch(
+        """SELECT r.id, c->>'name' AS name FROM rubrics r,
+                  jsonb_array_elements(r.criteria) c
+           WHERE NOT EXISTS (
+             SELECT 1 FROM rubric_criteria rc WHERE rc.rubric_id = r.id
+               AND rc.key = COALESCE(c->>'key',
+                   btrim(regexp_replace(lower(c->>'name'), '[^a-z0-9]+', '_', 'g'), '_')))"""
+    ))
+    assert missing == []
+    assert seeded["rubric_criteria_backfilled"] > 0
+
+
+@db
+def test_eng102_essay_rubric_is_aligned_to_eng102_outcomes(seeded) -> None:  # noqa: ANN001
+    formative = seeded["formative"]
+    rows = _run(_fetch(
+        """SELECT rc.key, o.title, o.metadata->>'course_id' AS course
+           FROM rubric_criteria rc JOIN nodes o ON o.id = ANY(rc.outcome_nodes)
+           WHERE rc.rubric_id = $1 ORDER BY rc.key""",
+        uuid.UUID(formative["eng102_rubric_id"]),
+    ))
+    assert [r["key"] for r in rows] == ["analysis", "evidence", "thesis", "writing_mechanics"]
+    assert {r["course"] for r in rows} == {seeded["course_ids"]["eng102"]}
+    cs_keys = _run(_fetch(
+        "SELECT key FROM rubric_criteria WHERE rubric_id = $1 ORDER BY key",
+        uuid.UUID(formative["cs101_rubric_id"]),
+    ))
+    assert [r["key"] for r in cs_keys] == ["correctness", "decomposition", "explanation", "style"]
+    syllabi = _run(_fetch(
+        """SELECT n.metadata->>'slug' AS slug
+           FROM content_items ci JOIN nodes n ON n.id = ci.node_id
+           WHERE ci.kind = 'syllabus' ORDER BY 1"""
+    ))
+    assert [r["slug"] for r in syllabi] == ["cs101", "eng102"]
+
+
+@db
+def test_unreleased_drafts_have_no_evidence(seeded) -> None:  # noqa: ANN001
+    rows = _run(_fetch(
+        """SELECT s.id FROM submissions s
+           WHERE s.status = 'draft'
+             AND EXISTS (SELECT 1 FROM criterion_scores cs WHERE cs.submission_id = s.id)
+             AND NOT EXISTS (SELECT 1 FROM criterion_scores cs
+                             WHERE cs.submission_id = s.id AND cs.released_at IS NOT NULL)
+             AND EXISTS (SELECT 1 FROM evidence ev
+                         WHERE ev.payload->>'submission_id' = s.id::text)"""
+    ))
+    assert rows == []
+
+
+@db
+def test_uncommitted_finals_have_no_evidence(seeded) -> None:  # noqa: ANN001
+    rows = _run(_fetch(
+        """SELECT s.id FROM submissions s
+           WHERE s.status = 'final'
+             AND NOT EXISTS (SELECT 1 FROM grades g
+                             WHERE g.submission_id = s.id AND NOT g.is_draft)
+             AND EXISTS (SELECT 1 FROM evidence ev
+                         WHERE ev.payload->>'submission_id' = s.id::text)"""
+    ))
+    assert rows == []
+
+
+@db
+def test_revision_links_cite_only_scores_the_learner_has_seen(seeded) -> None:  # noqa: ANN001
+    rows = _run(_fetch(
+        """SELECT cs.released_at IS NOT NULL
+                  OR EXISTS (SELECT 1 FROM grades g
+                             WHERE g.submission_id = s.id AND NOT g.is_draft) AS visible,
+                  count(*) AS n
+           FROM outcome_links o
+           JOIN submissions s ON s.id::text = o.delta->>'submission_id'
+           JOIN criterion_scores cs ON cs.submission_id = s.id
+                AND cs.criterion_id::text = o.delta->>'criterion_id'
+           GROUP BY 1"""
+    ))
+    assert {r["visible"]: r["n"] for r in rows} == {True: seeded["formative"]["outcome_links"]}
+
+
+@db
+def test_revision_links_carry_the_scores_the_learner_sees(seeded) -> None:  # noqa: ANN001
+    rows = _run(_fetch(
+        """SELECT o.delta, COALESCE(cs.final_score, cs.ai_score) AS shown,
+                  COALESCE(ps.final_score, ps.ai_score) AS shown_before
+           FROM outcome_links o
+           JOIN criterion_scores cs ON cs.submission_id::text = o.delta->>'submission_id'
+                AND cs.criterion_id::text = o.delta->>'criterion_id'
+           JOIN criterion_scores ps ON ps.submission_id::text = o.delta->>'parent_id'
+                AND ps.criterion_id::text = o.delta->>'criterion_id'"""
+    ))
+    assert len(rows) == seeded["formative"]["outcome_links"]
+    wrong = []
+    for r in rows:
+        d = json.loads(r["delta"]) if isinstance(r["delta"], str) else r["delta"]
+        if (d["after"], d["before"], d["delta"]) != (
+                r["shown"], r["shown_before"], r["shown"] - r["shown_before"]):
+            wrong.append(d)
+    assert wrong == []
+
+
+@db
+def test_emmas_eng102_draft_is_not_dated_in_the_future(seeded) -> None:  # noqa: ANN001
+    submitted = _run(_fetch(
+        "SELECT submitted_at FROM submissions WHERE person_id = $1 AND assignment_node = $2",
+        uuid.UUID(_person_id("emma.smith@student.edu")),
+        uuid.UUID(seeded["formative"]["eng102_assignment_id"]),
+    ))
+    assert [s["submitted_at"].date().isoformat() < "2026-10-03" for s in submitted] == [True]
+
+
+@db
+def test_eng102_histories_show_improvement_plateau_and_regression(seeded) -> None:  # noqa: ANN001
+    chains = _run(_fetch(
+        """SELECT person_id, array_agg(status || version ORDER BY version) AS versions
+           FROM submissions WHERE assignment_node = $1 GROUP BY person_id""",
+        uuid.UUID(seeded["formative"]["eng102_assignment_id"]),
+    ))
+    full = [c for c in chains if c["versions"] == ["draft1", "draft2", "final3"]]
+    assert len(full) == 10
+    result = _run(_tool("assessments.get_improvement", {
+        "course_id": seeded["course_ids"]["eng102"],
+        "requester_id": _person_id("e.watson@university.edu"),
+    }))
+    assert result["view"] == "detail"
+    flags = {t["flag"] for s in result["students"] for t in s["trajectories"]}
+    assert {"plateaued", "regressed"} <= flags
+    improved = [t for s in result["students"] for t in s["trajectories"]
+                if t["delta"] is not None and t["delta"] > 0]
+    assert improved
+
+
+@db
+def test_seeded_plateau_student_has_an_evidence_weakness_and_private_practice(
+    seeded,  # noqa: ANN001
+) -> None:
+    practice = seeded["formative"]["practice_set_id"]
+    student = _run(_fetch("SELECT subject_person FROM ai_actions WHERE id = $1",
+                          uuid.UUID(practice)))[0]["subject_person"]
+    result = _run(_tool("assessments.weaknesses", {
+        "student_id": str(student), "course_id": seeded["course_ids"]["eng102"]}))
+    assert "evidence" in [w["key"] for w in result["weaknesses"]]
+    attempts = _run(_fetch(
+        "SELECT visibility FROM evidence WHERE payload->>'practice_set_id' = $1", practice))
+    assert attempts and {a["visibility"] for a in attempts} == {"private"}
+
+
+@db
+def test_emma_has_an_eng102_draft_awaiting_dr_watsons_release(seeded) -> None:  # noqa: ANN001
+    emma = _person_id("emma.smith@student.edu")
+    subs = _run(_fetch(
+        "SELECT status, version FROM submissions WHERE person_id = $1 AND assignment_node = $2",
+        uuid.UUID(emma), uuid.UUID(seeded["formative"]["eng102_assignment_id"]),
+    ))
+    assert [(s["status"], s["version"]) for s in subs] == [("draft", 1)]
+    args = {"person_id": emma, "assignment_node": seeded["formative"]["eng102_assignment_id"]}
+    mine = _run(_tool("assessments.list_submission_history",
+                      {**args, "requester_id": emma}))["submissions"][0]
+    assert mine["feedback_status"] == "awaiting_release"
+    assert all(c["ai_score"] is None for c in mine["criteria"])
+    staff = _run(_tool("assessments.list_submission_history", {
+        **args, "requester_id": _person_id("e.watson@university.edu")}))["submissions"][0]
+    evidence = next(c for c in staff["criteria"] if c["key"] == "evidence")
+    assert evidence["ai_score"] == 2
+    assert evidence["ai_evidence_spans"] and evidence["next_step"]
+
+
+@db
+def test_cs101_drafts_cover_every_feedback_state(seeded) -> None:  # noqa: ANN001
+    result = _run(_tool("assessments.list_submission_history", {
+        "assignment_node": seeded["formative"]["cs101_assignment_id"],
+        "course_id": seeded["course_ids"]["cs101"],
+        "requester_id": _person_id("m.torres@university.edu")}))
+    states = sorted(s["feedback_status"] for s in result["submissions"])
+    assert states == ["awaiting_release", "awaiting_release", "pending", "released"]
+
+
+@db
+def test_committed_formative_grades_derive_from_final_scores(seeded) -> None:  # noqa: ANN001
+    from data_mcp.rubric_criteria import GRADE_SCORES_SQL
+
+    async def _check() -> list[tuple[dict, dict]]:
+        conn = await asyncpg.connect(DB_URL)
+        try:
+            rows = await conn.fetch(
+                """SELECT g.submission_id, g.scores FROM grades g
+                   JOIN submissions s ON s.id = g.submission_id
+                   WHERE s.assignment_node = $1 AND NOT g.is_draft""",
+                uuid.UUID(seeded["formative"]["eng102_assignment_id"]),
+            )
+            return [(json.loads(r["scores"]),
+                     json.loads(await conn.fetchval(GRADE_SCORES_SQL, r["submission_id"])))
+                    for r in rows]
+        finally:
+            await conn.close()
+
+    pairs = _run(_check())
+    assert len(pairs) == 7 and all(stored == derived for stored, derived in pairs)
+
+
+@db
+def test_only_committed_final_criterion_scores_are_course_visible(seeded) -> None:  # noqa: ANN001
+    rows = _run(_fetch(
+        """SELECT ev.visibility, ev.criterion_score_id IS NOT NULL AS scored,
+                  cs.final_score IS NOT NULL AS committed, count(*) AS n
+           FROM evidence ev
+           JOIN submissions s ON s.id::text = ev.payload->>'submission_id'
+           LEFT JOIN criterion_scores cs ON cs.id = ev.criterion_score_id
+           WHERE s.assignment_node = ANY($1::uuid[])
+           GROUP BY 1, 2, 3""",
+        [uuid.UUID(seeded["formative"]["eng102_assignment_id"]),
+         uuid.UUID(seeded["formative"]["cs101_assignment_id"])],
+    ))
+    groups = {(r["visibility"], r["scored"], r["committed"]) for r in rows}
+    assert groups == {("course", True, True), ("private", False, False)}
+
+
+@db
+def test_seeded_practice_sets_list_their_items(seeded) -> None:  # noqa: ANN001
+    rows = _run(_fetch(
+        """SELECT a.output, (SELECT json_object_agg(q.id, q.stem) FROM questions q
+                             WHERE q.metadata->>'practice_set_id' = a.id::text) AS stems
+           FROM ai_actions a WHERE a.action_type = 'practice_item'"""
+    ))
+    assert rows
+    for r in rows:
+        output = json.loads(r["output"]) if isinstance(r["output"], str) else r["output"]
+        items = output["items"]
+        stems = json.loads(r["stems"])
+        assert [i["stem"] for i in items] == [stems[q] for q in output["question_ids"]]
+        assert all(i["type"] and i["answer_key"] for i in items)

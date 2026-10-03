@@ -23,7 +23,9 @@ import asyncpg
 from argon2 import PasswordHasher
 
 from data_mcp.embeddings.pipeline import embed_missing_nodes
+from data_mcp.rubric_criteria import backfill_rubric_criteria
 from data_mcp.seed.demo_accounts import fetch_demo_accounts, format_demo_accounts
+from data_mcp.seed.formative import seed_formative
 from data_mcp.seed.provenance import seed_provenance
 from data_mcp.seed.scenario_data import module_body, seed_scenario_data
 from data_mcp.settings import settings
@@ -507,6 +509,10 @@ async def seed(
         summary["scenario_data"] = await seed_scenario_data(
             conn, random.Random(rng.getrandbits(64)), summary["course_ids"],
         )
+        summary["formative"] = await seed_formative(
+            conn, random.Random(rng.getrandbits(64)), summary["course_ids"],
+        )
+        summary["rubric_criteria_backfilled"] = await backfill_rubric_criteria(conn)
         # content.search's semantic fallback skips nodes without an embedding.
         summary["embedded_nodes"] = await embed_missing_nodes(conn)
         summary.update(await _restore_skill_rows(conn, skill_rows))
@@ -1282,6 +1288,16 @@ async def main(seed_value: int = 42) -> None:
             f"(rubric {scenario['essay3_rubric_id']}), "
             f"{scenario['october_engagement_events']} later engagement events"
         )
+        formative = summary["formative"]
+        print(
+            f"  Formative loop: {formative['eng102_histories']} ENG 102 draft-revision-final "
+            f"histories, {formative['submissions']} submissions, "
+            f"{formative['ai_actions']} AI actions; CS 101 assignment "
+            f"{formative['cs101_assignment_id']}"
+        )
+        if formative["emma_enrolled_in_eng102_by_seed"]:
+            print("  Emma Smith was enrolled in ENG 102 for the formative demo (spec.md §7.9)")
+        print(f"  Rubric criteria backfilled: {summary['rubric_criteria_backfilled']}")
         print(f"  Skill documents preserved: {summary['skills_preserved']}")
         if summary["skills_dropped"]:
             print(
