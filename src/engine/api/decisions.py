@@ -10,9 +10,9 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from engine.auth.deps import CurrentUser
@@ -51,11 +51,15 @@ class HumanDecisionOut(BaseModel):
     decided_at: datetime
 
 
-def _recorder(request: Request) -> ProvenanceRecorder:
+def get_recorder(request: Request) -> ProvenanceRecorder:
+    """503 when the engine was started without a database."""
     recorder = getattr(request.app.state, "provenance", None)
     if recorder is None:
         raise HTTPException(status_code=503, detail="Provenance is unavailable.")
     return recorder  # type: ignore[no-any-return]
+
+
+Recorder = Annotated[ProvenanceRecorder, Depends(get_recorder)]
 
 
 def _check_scope(ctx: AuthContext, action: StoredAction) -> None:
@@ -79,7 +83,7 @@ def _check_scope(ctx: AuthContext, action: StoredAction) -> None:
 async def record_human_decision(
     ai_action_id: str, body: DecisionBody, request: Request, ctx: CurrentUser
 ) -> HumanDecisionOut:
-    recorder = _recorder(request)
+    recorder = get_recorder(request)
     action = await recorder.store.get_action(ai_action_id)
     if action is None:
         raise HTTPException(status_code=404, detail="No such generated item.")

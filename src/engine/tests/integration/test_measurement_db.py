@@ -10,7 +10,7 @@ import json
 import os
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 import asyncpg
@@ -21,7 +21,7 @@ from engine.app import create_app
 from engine.auth.config import CSRF_COOKIE, CSRF_HEADER
 from engine.auth.directory import PgScopeDirectory
 from engine.auth.repository import create_pool
-from engine.measurement import ActionQuery, PgMeasurementStore, criterion_uuid
+from engine.measurement import ActionQuery, LinkRecord, PgMeasurementStore, criterion_uuid
 from engine.tests.auth_fakes import DEMO_PASSWORD, build_auth_world
 
 DSN = os.environ.get("ENGINE_TEST_DATABASE_URL")
@@ -246,3 +246,120 @@ async def test_learner_release_reads_committed_grades_and_released_feedback(pool
                                uuid.UUID(seed.course))
             await conn.execute("DELETE FROM grades WHERE submission_id = $1", submission)
             await conn.execute("DELETE FROM submissions WHERE id = $1", submission)
+
+
+async def _submission(conn: asyncpg.Connection, seed: Seed, status: str) -> uuid.UUID:
+    return await conn.fetchval(
+        "INSERT INTO submissions (person_id, assignment_node, body_md, status, course_node)"
+        " VALUES ($1, $2, 'essay', $3, $2) RETURNING id", uuid.UUID(seed.student),
+        uuid.UUID(seed.course), status)
+
+
+async def _drop_submissions(pool: asyncpg.Pool, seed: Seed, ids: list[uuid.UUID]) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM outcome_links WHERE ai_action_id IN"
+                           " (SELECT id FROM ai_actions WHERE course_node = $1)",
+                           uuid.UUID(seed.course))
+        await conn.execute("DELETE FROM evidence WHERE person_id = $1 AND id <> $2",
+                           uuid.UUID(seed.student), uuid.UUID(seed.evidence))
+        await conn.execute("DELETE FROM criterion_scores WHERE submission_id = ANY($1)", ids)
+        await conn.execute("DELETE FROM grades WHERE submission_id = ANY($1)", ids)
+        await conn.execute("DELETE FROM ai_actions WHERE course_node = $1 AND target_id ="
+                           " ANY($2)", uuid.UUID(seed.course), ids)
+        await conn.execute("DELETE FROM submissions WHERE id = ANY($1)", ids)
+
+
+async def test_find_actions_leaves_out_private_types_and_draft_feedback(pool, seed):
+    async with pool.acquire() as conn:
+        draft, final = await _submission(conn, seed, "draft"), await _submission(conn, seed,
+                                                                                  "final")
+        feedback = {}
+        for name, sub in (("draft", draft), ("final", final)):
+            feedback[name] = str(await conn.fetchval(
+                "INSERT INTO ai_actions (agent, action_type, subject_person, course_node,"
+                " target_type, target_id, output, created_at) VALUES ('feedback',"
+                " 'criterion_feedback', $1, $2, 'submissions', $3, '{}'::jsonb, $4)"
+                " RETURNING id", uuid.UUID(seed.student), uuid.UUID(seed.course), sub,
+                T0 + timedelta(hours=5)))
+        practice = str(await conn.fetchval(
+            "INSERT INTO ai_actions (agent, action_type, subject_person, course_node, output,"
+            " created_at) VALUES ('content_generator', 'practice_item', $1, $2, '{}'::jsonb,"
+            " $3) RETURNING id", uuid.UUID(seed.student), uuid.UUID(seed.course),
+            T0 + timedelta(hours=6)))
+    try:
+        store = PgMeasurementStore(pool)
+        query = ActionQuery(end=T0 + timedelta(days=30), course_ids=frozenset({seed.course}))
+        every = {a.id for a in await store.find_actions(query)}
+        staff = {a.id for a in await store.find_actions(replace(
+            query, exclude_types=frozenset({"practice_item"}),
+            draft_feedback_courses=frozenset({seed.course})))}
+        others = {a.id for a in await store.find_actions(replace(
+            query, exclude_types=frozenset({"practice_item"}),
+            draft_feedback_courses=frozenset()))}
+        one = await store.find_actions(replace(query, ids=frozenset({practice})))
+
+        assert {practice, feedback["draft"], feedback["final"]} <= every
+        assert practice not in staff and {feedback["draft"], feedback["final"]} <= staff
+        assert feedback["final"] in others and not {practice, feedback["draft"]} & others
+        assert [a.id for a in one] == [practice]
+    finally:
+        await _drop_submissions(pool, seed, [draft, final])
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM ai_actions WHERE id = $1", uuid.UUID(practice))
+
+
+async def test_learner_link_targets_are_released_or_committed_observations(pool, seed):
+    async with pool.acquire() as conn:
+        draft, final = await _submission(conn, seed, "draft"), await _submission(conn, seed,
+                                                                                  "final")
+        await conn.execute("INSERT INTO grades (submission_id, scores, feedback, is_draft)"
+                           " VALUES ($1, '{}'::jsonb, '{}'::jsonb, false)", final)
+        crit = {k: await conn.fetchval(
+            "INSERT INTO rubric_criteria (rubric_id, key, description, levels)"
+            " VALUES ($1, $2, $2, '[]'::jsonb) RETURNING id", uuid.UUID(seed.rubric), k)
+            for k in ("released", "held", "graded", "ungraded")}
+
+        async def score(sub: uuid.UUID, key: str, *, released: bool,
+                        final_score: int | None = None) -> uuid.UUID:
+            return await conn.fetchval(
+                "INSERT INTO criterion_scores (submission_id, criterion_id, ai_score,"
+                " final_score, released_at) VALUES ($1, $2, 3, $3, $4) RETURNING id",
+                sub, crit[key], final_score, T0 if released else None)
+
+        scores = {"released": await score(draft, "released", released=True),
+                  "held": await score(draft, "held", released=False),
+                  "graded": await score(final, "graded", released=False, final_score=4)}
+        ungraded_final = await _submission(conn, seed, "final")
+        scores["ungraded"] = await score(ungraded_final, "ungraded", released=False,
+                                         final_score=4)
+
+        async def evidence(visibility: str, score_id: uuid.UUID | None) -> str:
+            return str(await conn.fetchval(
+                "INSERT INTO evidence (person_id, node_id, kind, score, source, visibility,"
+                " criterion_score_id) VALUES ($1, $2, 'artifact_submission', 0.5, 'test',"
+                " $3, $4) RETURNING id", uuid.UUID(seed.student), uuid.UUID(seed.course),
+                visibility, score_id))
+
+        ev = {"plain": await evidence("course", None),
+              "private": await evidence("private", None),
+              "held": await evidence("course", scores["held"]),
+              "released": await evidence("course", scores["released"])}
+    try:
+        store = PgMeasurementStore(pool)
+        links = [LinkRecord(seed.edited, T0, evidence_id=e) for e in ev.values()]
+        pairs = {"released": draft, "held": draft, "graded": final,
+                 "ungraded": ungraded_final}
+        links += [LinkRecord(seed.edited, T0, delta={"criterion_id": str(crit[k]),
+                                                     "submission_id": str(sub)})
+                  for k, sub in pairs.items()]
+
+        targets = await store.learner_link_targets(links)
+
+        assert targets.evidence == {ev["plain"]: None, ev["released"]: 3.0}
+        assert targets.scores == {(str(draft), str(crit["released"])): 3.0,
+                                  (str(final), str(crit["graded"])): 4.0}
+    finally:
+        await _drop_submissions(pool, seed, [draft, final, ungraded_final])
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM rubric_criteria WHERE id = ANY($1)",
+                               list(crit.values()))

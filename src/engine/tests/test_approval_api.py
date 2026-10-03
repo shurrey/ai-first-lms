@@ -13,6 +13,9 @@ from engine.models.turn import Turn
 from engine.tests.auth_fakes import CS101
 from engine.tests.object_fakes import InMemoryObjectDirectory
 
+COMMIT = {"grade_id": "g1", "final_scores": {"thesis": 3, "evidence": 3},
+          "holistic_md": "A clear thesis; the new source strengthens the evidence."}
+
 
 @pytest.fixture
 def auth_app(auth_world):
@@ -34,7 +37,8 @@ def app(auth_app, auth_world, monkeypatch):
 
     monkeypatch.setattr(runner_mod, "_call_mcp_tool", fake_mcp)
     auth_app.state.tool_gateway.drafts.remember(
-        "grade", "g1", auth_world.people["faculty"].id, {"submission_id": "sub1"})
+        "grade", "g1", auth_world.people["faculty"].id,
+        {"submission_id": "sub1", "scores": {"thesis": 3, "evidence": 2}})
     return auth_app
 
 
@@ -73,17 +77,14 @@ def _create_pending_approval(app, turn_id: str = "", course_id: str = CS101.cour
     return req.approval_id
 
 
-async def test_approve_returns_202(app, client, ids):
+async def test_commit_with_final_scores_and_closing_comment_returns_202(app, client, ids):
     approval_id = _create_pending_approval(app)
     resp = await client.post("/api/approval", json={
-        **ids,
-        "approval_id": approval_id,
-        "decision": "approve",
+        **ids, "approval_id": approval_id, "decision": "edit", "edited_payload": COMMIT,
     })
     assert resp.status_code == 202
-    data = resp.json()
-    assert data["status"] == "accepted"
-    assert data["decision"] == "approve"
+    assert resp.json() == {"status": "accepted", "approval_id": approval_id,
+                           "decision": "edit"}
 
 
 async def test_reject_returns_202(app, client, ids):
@@ -98,16 +99,24 @@ async def test_reject_returns_202(app, client, ids):
     assert resp.json()["decision"] == "reject"
 
 
-async def test_edit_returns_202(app, client, ids):
+@pytest.mark.parametrize(("decision", "edited"), [
+    ("approve", None),
+    ("edit", {"grade_id": "g1"}),
+    ("edit", {**COMMIT, "final_scores": {"thesis": 3}}),
+    ("edit", {**COMMIT, "final_scores": {"thesis": 3, "evidence": "3"}}),
+    ("edit", {**COMMIT, "final_scores": {"thesis": 3, "evidence": 3, "style": 2}}),
+    ("edit", {**COMMIT, "holistic_md": "   "}),
+    ("edit", {key: v for key, v in COMMIT.items() if key != "holistic_md"}),
+], ids=["plain-approve", "no-inputs", "missing-criterion", "non-integer", "unknown-criterion",
+        "blank-comment", "no-comment"])
+async def test_commit_without_every_final_score_and_a_comment_is_422(
+        app, client, ids, decision, edited):
     approval_id = _create_pending_approval(app)
     resp = await client.post("/api/approval", json={
-        **ids,
-        "approval_id": approval_id,
-        "decision": "edit",
-        "edited_payload": {"grade_id": "g1"},
+        **ids, "approval_id": approval_id, "decision": decision, "edited_payload": edited,
     })
-    assert resp.status_code == 202
-    assert resp.json()["decision"] == "edit"
+    assert resp.status_code == 422, resp.text
+    assert app.state.approval_gate.get_pending(approval_id) is not None
 
 
 @pytest.mark.parametrize("edited", [
@@ -159,17 +168,13 @@ async def test_double_resolve_returns_404(app, client, ids):
     approval_id = _create_pending_approval(app)
     # First resolve
     resp1 = await client.post("/api/approval", json={
-        **ids,
-        "approval_id": approval_id,
-        "decision": "approve",
+        **ids, "approval_id": approval_id, "decision": "edit", "edited_payload": COMMIT,
     })
     assert resp1.status_code == 202
 
     # Second resolve should fail (already resolved)
     resp2 = await client.post("/api/approval", json={
-        **ids,
-        "approval_id": approval_id,
-        "decision": "approve",
+        **ids, "approval_id": approval_id, "decision": "edit", "edited_payload": COMMIT,
     })
     assert resp2.status_code == 404
 

@@ -81,6 +81,20 @@ def test_committed_grade_is_marked_committed():
     assert [c["name"] for c in artifact["data"]["criteria"]] == ["Thesis", "Evidence"]
 
 
+def test_committed_grade_shows_the_instructors_final_scores_and_comment():
+    calls = [_draft_grade(), ToolOutput(
+        "assessments.commit_grade",
+        {"grade_id": "grade-sub-1", "final_scores": {"Thesis": 8, "Evidence": 3},
+         "holistic_md": "Tighten the thesis."},
+        {"committed": True, "committed_at": "2026-10-02T10:00:00Z"})]
+
+    [artifact] = tool_artifacts("grading_assistant", calls)
+
+    assert artifact["data"]["total_points"] == 11
+    assert artifact["data"]["holistic_md"] == "Tighten the thesis."
+    assert artifact["data"]["feedback"] == {"Thesis": "Clear."}
+
+
 def test_draft_message_and_send_become_one_sent_message():
     calls = [
         ToolOutput("communications.draft_message", {

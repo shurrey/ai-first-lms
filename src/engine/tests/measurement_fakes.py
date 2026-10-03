@@ -11,7 +11,9 @@ from engine.measurement import (
     DecisionRecord,
     LearnerRelease,
     LinkRecord,
+    LinkTargets,
     Program,
+    ReleasedCriterion,
 )
 
 
@@ -25,6 +27,10 @@ class InMemoryMeasurementStore:
     programs: dict[str, Program] = field(default_factory=dict)
     committed_grades: set[str] = field(default_factory=set)
     released_actions: set[str] = field(default_factory=set)
+    released_criteria: dict[str, dict[str, ReleasedCriterion]] = field(default_factory=dict)
+    draft_submissions: set[str] = field(default_factory=set)
+    visible_evidence: dict[str, float | None] = field(default_factory=dict)
+    visible_scores: dict[tuple[str, str], float | None] = field(default_factory=dict)
 
     def _latest(self, action_id: str) -> str | None:
         mine = sorted((d for d in self.decisions if d.ai_action_id == action_id),
@@ -44,6 +50,14 @@ class InMemoryMeasurementStore:
             latest = self._latest(a.id)
             if (latest or "none") != q.decision:
                 return False
+        if q.ids is not None and a.id not in q.ids:
+            return False
+        if a.action_type in q.exclude_types:
+            return False
+        if (q.draft_feedback_courses is not None and a.action_type == "criterion_feedback"
+                and a.target_type == "submissions" and a.target_id in self.draft_submissions
+                and a.course_node not in q.draft_feedback_courses):
+            return False
         if q.start is not None and a.created_at < q.start:
             return False
         if a.created_at >= q.end:
@@ -90,4 +104,13 @@ class InMemoryMeasurementStore:
         actions = list(actions)
         return LearnerRelease(
             frozenset(a.target_id for a in actions if a.target_id in self.committed_grades),
-            frozenset(a.id for a in actions if a.id in self.released_actions))
+            frozenset(a.id for a in actions if a.id in self.released_actions),
+            {a.id: self.released_criteria[a.id] for a in actions
+             if a.id in self.released_criteria})
+
+    async def learner_link_targets(self, links: Iterable[LinkRecord]) -> LinkTargets:
+        links = list(links)
+        return LinkTargets(
+            {link.evidence_id: self.visible_evidence[link.evidence_id] for link in links
+             if link.evidence_id in self.visible_evidence},
+            dict(self.visible_scores))

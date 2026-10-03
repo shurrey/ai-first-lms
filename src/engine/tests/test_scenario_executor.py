@@ -119,6 +119,25 @@ def test_default_approval_answers_unscripted_requests():
     assert [a["decision"] for a in api.approvals] == ["edit", "approve", "approve"]
 
 
+def test_scripted_grade_commit_sends_the_drafted_scores_as_the_instructors_edit():
+    preview = {"arguments": {"grade_id": "g1"},
+               "artifact": {"grade": {"grade_id": "g1", "scores": {"thesis": 3, "evidence": 2}},
+                            "requires": {"final_scores": ["thesis", "evidence"]}}}
+    events = [{"event": "agent_start", "payload": {}},
+              {"event": "approval_request", "payload": {
+                  "approval_id": "ap1", "artifact_type": "grade_commit", "preview": preview}},
+              _final("rubric_grades")]
+
+    result, api = _run(events, user_turns=[{"message": "go", "approvals": [
+        {"decision": "approve", "commit_comment": "Confirmed."}]}])
+
+    assert result.errors == []
+    [sent] = api.approvals
+    assert sent["decision"] == "edit"
+    assert sent["edited_payload"] == {"grade_id": "g1", "final_scores": {"thesis": 3, "evidence": 2},
+                                      "holistic_md": "Confirmed."}
+
+
 def test_unscripted_approval_is_rejected_and_fails_the_scenario():
     events = [{"event": "agent_start", "payload": {}},
               {"event": "approval_request", "payload": {"approval_id": "ap1"}},

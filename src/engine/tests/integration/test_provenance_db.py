@@ -169,8 +169,10 @@ async def test_grading_flow_records_the_instructors_criterion_change(pool, seed,
     request = gate.get_pending(approval_id)
     assert request is not None
     approver = auth_context(world, "faculty")
-    args = await gateway.authorize_approver(request, approver, request.tool_arguments)
-    gate.resolve(ApprovalDecision(approval_id, "approve"), approver=approver,
+    edit = {"grade_id": grade_id, "final_scores": {"thesis": 3, "evidence": 3},
+            "holistic_md": "Fine."}
+    args = await gateway.authorize_approver(request, approver, edit)
+    gate.resolve(ApprovalDecision(approval_id, "edit", edit), approver=approver,
                  tool_arguments=args)
     assert (await commit).success
 

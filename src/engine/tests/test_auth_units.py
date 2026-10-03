@@ -275,3 +275,9 @@ def test_capabilities_returns_independent_copies():
 )
 def test_course_slug(title, metadata_slug, expected):
     assert course_slug(title, metadata_slug) == expected
+
+
+def test_only_admins_hold_the_access_log_capability():
+    assert has_capability("admin", "access_log")
+    assert not any(has_capability(role, "access_log")
+                   for role in ("student", "faculty", "program_lead", "advisor"))

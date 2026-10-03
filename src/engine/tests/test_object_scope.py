@@ -949,3 +949,23 @@ async def test_faculty_cannot_list_submissions_in_another_course(world):
 
     assert result.outcome == "denied_scope"
     assert mcp.calls_to("assessments.list_submission_history") == []
+
+
+async def test_requester_id_is_always_the_caller_when_the_contract_declares_it(world):
+    from engine.guardrails.tool_roles import ToolRoles
+
+    tool = "assessments.list_submission_history"
+    mcp = FakeMcp({tool: {"submissions": []}})
+    gateway = _history_gateway(world, mcp)
+    roles = gateway._tool_roles[tool]
+    gateway._tool_roles[tool] = ToolRoles(tool, roles.allowed_roles,
+                                          input_keys=roles.input_keys | {"requester_id"})
+    ctx = GatewayContext(auth=auth_context(world, "faculty"), session_id="sess-1",
+                         turn_id="turn-1", step_id="s1", course_id=CS101.course_id)
+    faculty = world.people["faculty"].id
+
+    for args in ({"course_id": CS101.course_id},
+                 {"course_id": CS101.course_id, "requester_id": "someone-else"}):
+        assert (await gateway.invoke(ctx, "grading_assistant", tool, args)).success
+
+    assert [c["requester_id"] for c in mcp.calls_to(tool)] == [faculty, faculty]

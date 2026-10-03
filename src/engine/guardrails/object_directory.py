@@ -19,6 +19,14 @@ class ObjectDirectory(Protocol):
 
     async def question_bank_course(self, bank_id: str) -> str | None: ...
 
+    async def criterion_course(self, criterion_id: str) -> str | None:
+        """The course of the assignment whose rubric holds the criterion."""
+        ...
+
+    async def node_course(self, node_id: str) -> str | None:
+        """A course node itself, else the node's metadata.course_id (assignments, outcomes)."""
+        ...
+
 
 def _uuid(value: str) -> str | None:
     try:
@@ -51,3 +59,27 @@ class PgObjectDirectory:
             "SELECT course_node FROM question_banks WHERE id = $1::uuid", bid
         )
         return str(course) if course else None
+
+    async def criterion_course(self, criterion_id: str) -> str | None:
+        cid = _uuid(criterion_id)
+        if cid is None:
+            return None
+        course = await self._pool.fetchval(
+            "SELECT a.metadata->>'course_id' FROM rubric_criteria rc "
+            "JOIN nodes a ON a.metadata->>'rubric_id' = rc.rubric_id::text "
+            "WHERE rc.id = $1::uuid AND a.metadata ? 'course_id' "
+            "ORDER BY a.id LIMIT 1",
+            cid,
+        )
+        return _uuid(course) if course else None
+
+    async def node_course(self, node_id: str) -> str | None:
+        nid = _uuid(node_id)
+        if nid is None:
+            return None
+        course = await self._pool.fetchval(
+            "SELECT CASE WHEN kind = 'course' THEN id::text ELSE metadata->>'course_id' END "
+            "FROM nodes WHERE id = $1::uuid",
+            nid,
+        )
+        return _uuid(course) if course else None

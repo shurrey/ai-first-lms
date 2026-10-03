@@ -5,9 +5,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, Field
 
+from engine.auth.capabilities import has_capability
 from engine.auth.deps import CurrentUser
 from engine.auth.directory import ScopeDirectory
 from engine.auth.models import AuthContext
@@ -19,10 +20,15 @@ from engine.auth.scope import (
     require_course_staff,
     require_student_view,
 )
+from engine.formative.flow import tool_error
 
 logger = logging.getLogger(__name__)
 
 APPROVE_KEY = "rest:approve-credential:"  # one approval per pending row, so one decision
+REJECT_KEY = "rest:reject-credential:"
+REJECT_TOOL = "assessments.reject_credential"
+BADGE_APPROVE = "badge_approve"
+_TOOL_STATUS = {"validation_error": 422, "conflict": 409, "not_found": 404, "forbidden": 403}
 
 router = APIRouter()
 
@@ -32,6 +38,10 @@ OUT_OF_SCOPE = "Not in your courses."
 async def _pending_in_scope(
     ctx: AuthContext, directory: ScopeDirectory, pending_id: str
 ) -> bool:
+    """Whether the caller may decide this pending credential: the badge_approve
+    capability, and staff of its course."""
+    if not has_capability(ctx.active_role, BADGE_APPROVE):
+        return False
     if ctx.active_role == "admin":
         return True
     course_id = await directory.pending_credential_course(pending_id)
@@ -101,6 +111,40 @@ async def approve_credential(
     })
     await _record_approval(request, ctx, pending_id, result)
     return result
+
+
+class RejectRequest(BaseModel):
+    reviewer_id: str
+    reason: str | None = Field(default=None, max_length=2000)
+
+
+@router.post("/api/reject-credential/{pending_id}")
+async def reject_credential(
+    pending_id: str, body: RejectRequest, request: Request, ctx: CurrentUser,
+    directory: Directory,
+) -> dict[str, Any]:
+    """Close a pending credential without issuing it; the click is the decision, recorded as
+    human_decisions(rejected, reason) on its badge recommendation."""
+    from engine.agents.runner import _call_mcp_json
+
+    _require_self_reviewer(ctx, body.reviewer_id)
+    if not await _pending_in_scope(ctx, directory, pending_id):
+        raise forbidden()
+    args: dict[str, Any] = {"pending_id": pending_id, "reviewer_id": ctx.person_id}
+    if body.reason:
+        args["reason"] = body.reason
+    refused = tool_error(await _call_mcp_json(REJECT_TOOL, args))
+    if refused is not None:
+        status = _TOOL_STATUS.get(refused.code or "")
+        logger.warning("Credential reject %s failed: %s", pending_id, refused.message)
+        if status is None:
+            raise HTTPException(status_code=502, detail="The credential could not be rejected.")
+        raise HTTPException(status_code=status, detail=refused.message)
+    recorder = getattr(request.app.state, "provenance", None)
+    if recorder is not None:
+        await recorder.credential_decided_safely(pending_id, ctx.person_id, "rejected",
+                                                 REJECT_KEY + pending_id, reason=body.reason)
+    return {"pending_id": pending_id, "status": "rejected"}
 
 
 class BulkApproveRequest(BaseModel):

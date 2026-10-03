@@ -234,12 +234,51 @@ async def test_a_draft_does_not_list_another_learners_submission(rig, world):
     assert {s["id"] for s in action.sources} == {SUB, RUBRIC}
 
 
+def _commit(grade_id: str, thesis: int, **extra: Any) -> dict[str, Any]:
+    return {"grade_id": grade_id, "final_scores": {"thesis": thesis, "evidence": 3},
+            "holistic_md": "Solid essay.", **extra}
+
+
+async def test_the_instructors_final_scores_are_diffed_per_criterion(rig, world):
+    """§6.4: the AI drafts thesis=2; the instructor commits thesis=3 and rewrites its
+    feedback."""
+    await rig.call("assessments.draft_grade", _draft(2), call_id="tu1")
+    edit = _commit(G1, 3, feedback={"thesis": "Clear, arguable thesis."},
+                   holistic_md="Strong revision. Keep naming your sources.")
+    result = await rig.gated("assessments.commit_grade", {"grade_id": G1}, "edit",
+                             call_id="tu2", edited=edit)
+    assert result.success
+    assert rig.mcp.calls_to("assessments.commit_grade") == [edit]
+
+    [draft] = rig.store.of_type("grade_draft")
+    [decision] = rig.store.decisions_on(draft.id)
+    assert decision.decision == "edited"
+    assert decision.decided_by == world.people["faculty"].id
+    assert decision.diff is not None
+    assert decision.diff["criteria"] == {"thesis": {"before": 2, "after": 3, "delta": 1}}
+    assert decision.diff["feedback"]["thesis"]["chars_after"] == len("Clear, arguable thesis.")
+    assert decision.diff["holistic_md"]["chars_before"] == len("Solid essay.")
+
+
+async def test_confirming_every_score_and_feedback_is_accepted(rig):
+    await rig.call("assessments.draft_grade", _draft(2), call_id="tu1")
+    await rig.gated("assessments.commit_grade", {"grade_id": G1}, "edit", call_id="tu2",
+                    edited=_commit(G1, 2, holistic_md="My own closing comment."))
+
+    [draft] = rig.store.of_type("grade_draft")
+    [decision] = rig.store.decisions_on(draft.id)
+    assert decision.decision == "accepted"
+    assert decision.diff is not None and decision.diff["criteria"] == {}
+    assert decision.diff["holistic_md"] is not None
+
+
 async def test_instructor_change_to_one_criterion_shows_in_the_diff(rig, world):
-    """§6.6: the AI drafts thesis=2; the instructor has it redrafted at 3 and commits."""
+    """§6.6: the AI drafts thesis=2, then a redraft at 3; the instructor commits the
+    redraft unchanged."""
     await rig.call("assessments.draft_grade", _draft(2), call_id="tu1")
     await rig.call("assessments.draft_grade", _draft(3), call_id="tu2")
-    result = await rig.gated("assessments.commit_grade", {"grade_id": G2}, "approve",
-                             call_id="tu3")
+    result = await rig.gated("assessments.commit_grade", {"grade_id": G2}, "edit",
+                             call_id="tu3", edited=_commit(G2, 3))
     assert result.success
 
     first, second = rig.store.of_type("grade_draft")
@@ -267,8 +306,8 @@ async def test_a_rejected_draft_stays_rejected_after_a_redraft_is_committed(rig)
     await rig.call("assessments.draft_grade", _draft(2), call_id="tu1")
     await rig.gated("assessments.commit_grade", {"grade_id": G1}, "reject", call_id="tu2")
     await rig.call("assessments.draft_grade", _draft(3), call_id="tu3")
-    result = await rig.gated("assessments.commit_grade", {"grade_id": G2}, "approve",
-                             call_id="tu4")
+    result = await rig.gated("assessments.commit_grade", {"grade_id": G2}, "edit",
+                             call_id="tu4", edited=_commit(G2, 3))
     assert result.success
 
     first, second = rig.store.of_type("grade_draft")
@@ -623,6 +662,63 @@ async def test_failed_rest_badge_approval_writes_no_decision(authed_client, auth
     await client.post(f"/api/approve-credential/{PENDING}",
                       json={"reviewer_id": auth_world.people["faculty"].id})
     assert store.decisions_on(action) == []
+
+
+async def test_rest_badge_reject_records_a_rejection_with_its_reason(authed_client, auth_world,
+                                                                     store, monkeypatch):
+    action = await _action(store, "recommendation", target_type="pending_credentials",
+                           target_id=PENDING)
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def call_mcp(tool: str, args: dict[str, Any]) -> dict[str, Any]:
+        calls.append((tool, args))
+        return {"rejected": True}
+
+    monkeypatch.setattr(runner_mod, "_call_mcp_json", call_mcp)
+    client = await authed_client("faculty")
+    faculty = auth_world.people["faculty"].id
+    resp = await client.post(f"/api/reject-credential/{PENDING}",
+                             json={"reviewer_id": faculty, "reason": "Needs a mastery check."})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"pending_id": PENDING, "status": "rejected"}
+    assert calls == [("assessments.reject_credential",
+                      {"pending_id": PENDING, "reviewer_id": faculty,
+                       "reason": "Needs a mastery check."})]
+    assert [(d.decision, d.decided_by, d.reason) for d in store.decisions_on(action)] == [
+        ("rejected", faculty, "Needs a mastery check.")]
+
+
+@pytest.mark.parametrize(("reply", "status"), [
+    ({"error": "Already reviewed", "code": "conflict"}, 409),
+    ({"error": "Pending credential not found", "code": "not_found"}, 404),
+    ({"error": "Unknown tool: assessments.reject_credential"}, 502),
+])
+async def test_failed_rest_badge_reject_maps_the_error_and_writes_no_decision(
+        authed_client, auth_world, store, monkeypatch, reply, status):
+    action = await _action(store, "recommendation", target_type="pending_credentials",
+                           target_id=PENDING)
+
+    async def call_mcp(tool: str, args: dict[str, Any]) -> dict[str, Any]:
+        return reply
+
+    monkeypatch.setattr(runner_mod, "_call_mcp_json", call_mcp)
+    client = await authed_client("faculty")
+    resp = await client.post(f"/api/reject-credential/{PENDING}",
+                             json={"reviewer_id": auth_world.people["faculty"].id})
+    assert resp.status_code == status
+    assert store.decisions_on(action) == []
+
+
+async def test_rest_badge_reject_needs_the_caller_as_reviewer_and_a_short_reason(
+        authed_client, auth_world, store):
+    client = await authed_client("faculty")
+    url = f"/api/reject-credential/{PENDING}"
+    other = await client.post(url, json={"reviewer_id": auth_world.people["chen"].id})
+    assert other.status_code == 403
+    long = await client.post(url, json={"reviewer_id": auth_world.people["faculty"].id,
+                                        "reason": "x" * 2001})
+    assert long.status_code == 422
 
 
 # --- podcast -----------------------------------------------------------------------------

@@ -319,3 +319,77 @@ async def test_podcast_audio_read_by_another_logs_a_profile_read(
     assert (await (await authed_client("advisor")).get("/audio/pod1.txt")).status_code == 200
     assert [(e.resource, e.subject_id, e.purpose) for e in access_log.entries] == [
         ("profile", emma, "podcast_audio")]
+
+
+# --- GET /api/access-log (admin) -------------------------------------------------------------
+
+
+def _log_reads(auth_world: AuthWorld, access_log: InMemoryAccessLog) -> tuple[str, str]:
+    emma, faculty = auth_world.people["student"].id, auth_world.people["faculty"].id
+    access_log.names[faculty] = "Dr. Torres"
+    access_log.entries += [
+        AccessEntry(faculty, emma, "transcript", EMMA_CS101_SESSION, "transcript"),
+        AccessEntry(faculty, emma, "profile", None, "goals"),
+        AccessEntry(faculty, auth_world.people["noah"].id, "profile", None, "goals"),
+        AccessEntry(faculty, emma, "submission", None, "submission"),
+    ]
+    return emma, faculty
+
+
+async def test_admin_reads_a_learners_access_log_newest_first(authed_client, auth_world,
+                                                               access_log):
+    emma, faculty = _log_reads(auth_world, access_log)
+    client = await authed_client("admin")
+    before = len(access_log.entries)
+
+    resp = await client.get("/api/access-log", params={"subject_id": emma})
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert [e["resource"] for e in body["entries"]] == ["submission", "profile", "transcript"]
+    assert body["entries"][-1] == {
+        "id": "0", "actor": {"id": faculty, "display_name": "Dr. Torres"}, "subject_id": emma,
+        "resource": "transcript", "resource_id": EMMA_CS101_SESSION, "purpose": "transcript",
+        "created_at": body["entries"][-1]["created_at"]}
+    assert body["next_before"] is None
+    assert len(access_log.entries) == before
+
+
+async def test_access_log_filters_by_resource_and_pages_with_next_before(authed_client,
+                                                                        auth_world, access_log):
+    emma, _ = _log_reads(auth_world, access_log)
+    client = await authed_client("admin")
+
+    profile = await client.get("/api/access-log",
+                               params={"subject_id": emma, "resource": "profile"})
+    assert [e["purpose"] for e in profile.json()["entries"]] == ["goals"]
+
+    first = (await client.get("/api/access-log",
+                              params={"subject_id": emma, "limit": 2})).json()
+    second = (await client.get("/api/access-log", params={
+        "subject_id": emma, "limit": 2, "before": first["next_before"]})).json()
+    assert [e["id"] for e in first["entries"]] == ["3", "1"]
+    assert first["next_before"] is not None
+    assert [e["id"] for e in second["entries"]] == ["0"]
+    assert second["next_before"] is None
+
+
+@pytest.mark.parametrize("params", [
+    {"subject_id": "not-a-uuid"},
+    {},
+    {"subject_id": "0f6e2c4a-5b1d-4c7e-9a3f-2d8b6e1c4a70", "resource": "ai_actions"},
+    {"subject_id": "0f6e2c4a-5b1d-4c7e-9a3f-2d8b6e1c4a70", "before": "garbage"},
+    {"subject_id": "0f6e2c4a-5b1d-4c7e-9a3f-2d8b6e1c4a70", "limit": 0},
+    {"subject_id": "0f6e2c4a-5b1d-4c7e-9a3f-2d8b6e1c4a70", "from": "yesterday"},
+])
+async def test_bad_access_log_queries_are_422(authed_client, params):
+    client = await authed_client("admin")
+    assert (await client.get("/api/access-log", params=params)).status_code == 422
+
+
+@pytest.mark.parametrize("role", ["student", "faculty", "advisor", "program_lead"])
+async def test_only_admins_read_the_access_log(authed_client, auth_world, role):
+    client = await authed_client(role)
+    resp = await client.get("/api/access-log",
+                            params={"subject_id": auth_world.people["student"].id})
+    assert resp.status_code == 403

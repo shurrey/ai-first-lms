@@ -301,19 +301,22 @@ _OUTPUT_KEYS: Mapping[str, dict[str, tuple[str, _Wrap]]] = (
 
 
 def _rubric_grades(tool_outputs: list[ToolOutput]) -> list[dict[str, Any]]:
-    """One artifact per draft grade, with the rubric's levels and the drafted level selected."""
+    """One artifact per draft grade, with the rubric's levels and the drafted level selected.
+    A committed grade shows the instructor's final scores, feedback and closing comment."""
     rubric: dict[str, Any] = {}
     for call in results_of(tool_outputs, "assessments.get_rubric"):
         rubric = call.value
     committed = {
-        call.args.get("grade_id")
+        call.args.get("grade_id"): call.args
         for call in results_of(tool_outputs, "assessments.commit_grade")
         if call.value.get("committed")
     }
     artifacts = []
     for call in results_of(tool_outputs, "assessments.draft_grade"):
-        scores = call.args.get("scores") if isinstance(call.args.get("scores"), dict) else {}
         grade_id = call.value.get("grade_id")
+        final = committed.get(grade_id, {})
+        args = {**call.args, **_instructor_inputs(call.args, final)}
+        scores = args.get("scores") if isinstance(args.get("scores"), dict) else {}
         criteria = [_graded_criterion(c, scores) for c in _as_dicts(rubric.get("criteria"))]
         if not criteria:
             criteria = [{"name": str(name), "levels": [], "score": _points(score)}
@@ -323,16 +326,30 @@ def _rubric_grades(tool_outputs: list[ToolOutput]) -> list[dict[str, Any]]:
             "title": str(rubric.get("title") or "Draft grade"),
             "criteria": criteria,
             "grade_id": grade_id,
-            "submission_id": call.args.get("submission_id"),
-            "feedback": call.args.get("feedback") or {},
+            "submission_id": args.get("submission_id"),
+            "feedback": args.get("feedback") or {},
             "status": "committed" if grade_id in committed else "draft",
         }
-        if isinstance(call.args.get("holistic_md"), str):
-            data["holistic_md"] = call.args["holistic_md"]
+        if isinstance(args.get("holistic_md"), str):
+            data["holistic_md"] = args["holistic_md"]
         if points:
             data["total_points"] = sum(points)
         artifacts.append(data)
     return artifacts
+
+
+def _instructor_inputs(draft: dict[str, Any], commit: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    final, feedback = commit.get("final_scores"), commit.get("feedback")
+    if isinstance(final, dict):
+        drafted = draft.get("scores") if isinstance(draft.get("scores"), dict) else {}
+        out["scores"] = {**drafted, **final}
+    if isinstance(feedback, dict):
+        drafted = draft.get("feedback") if isinstance(draft.get("feedback"), dict) else {}
+        out["feedback"] = {**drafted, **feedback}
+    if isinstance(commit.get("holistic_md"), str):
+        out["holistic_md"] = commit["holistic_md"]
+    return out
 
 
 def _points(score: Any) -> float | None:

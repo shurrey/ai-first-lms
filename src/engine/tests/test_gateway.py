@@ -230,7 +230,8 @@ async def test_student_identity_args_are_forced_to_self(gateway, world, executor
 
     assert result.outcome == "ok"
     assert executor.calls == [("roster.get_student_context",
-                               {"person_id": emma.id, "course_id": CS101.course_id})]
+                               {"person_id": emma.id, "course_id": CS101.course_id,
+                                "requester_id": emma.id})]
 
 
 async def test_student_gets_self_when_the_contract_declares_an_omitted_subject_id(
@@ -255,6 +256,10 @@ def test_input_keys_are_parsed_from_the_contract():
     roles = get_tool_roles()
     assert {"node_id", "person_id"} <= roles["graph.prerequisites"].input_keys
     assert "person_id" not in roles["content.search"].input_keys
+
+
+def test_student_context_takes_the_caller_as_requester():
+    assert "requester_id" in get_tool_roles()["roster.get_student_context"].input_keys
 
 
 async def test_requester_id_is_always_the_caller(gateway, world, executor):
@@ -385,7 +390,7 @@ async def test_provenance_row_has_overwritten_redacted_args(gateway, world, turn
         "turn-1", "tutor", "roster.get_student_context", "ok",
     )
     assert row.args == {"person_id": emma.id, "course_id": CS101.course_id,
-                        "note": "reach me at [REDACTED]"}
+                        "requester_id": emma.id, "note": "reach me at [REDACTED]"}
     assert isinstance(row.latency_ms, int)
 
 

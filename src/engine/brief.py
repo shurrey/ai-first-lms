@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from engine.guardrails.injection import INJECTION_GUARDRAIL_INSTRUCTION, guard_prompt_data
+from engine.guardrails.private_evidence import withhold_private
 from engine.http import make_anthropic_client
 
 logger = logging.getLogger(__name__)
@@ -132,19 +133,26 @@ async def _call_mcp(server: str, tool: str, args: dict[str, Any]) -> dict[str, A
         return {"error": str(exc)}
 
 
+async def _student_context(person_id: str, course_id: str, *, requester_id: str
+                           ) -> dict[str, Any]:
+    """roster.get_student_context as `requester_id` (the viewer). Private evidence, such as
+    practice attempts (spec.md §12.5), is dropped unless the viewer is the learner."""
+    ctx = await _call_mcp("roster", "roster.get_student_context", {
+        "person_id": person_id, "course_id": course_id, "requester_id": requester_id})
+    return withhold_private(ctx, person_id, requester_id)
+
+
 class StudentBriefGatherer:
     """Gathers brief data for a student persona."""
 
     async def gather(
         self, person_id: str, course_id: str, scope: BriefScope = _UNSCOPED
     ) -> dict[str, Any]:
-        student_ctx = await _call_mcp(
-            "roster", "roster.get_student_context",
-            {"person_id": person_id, "course_id": course_id},
-        )
+        student_ctx = await _student_context(person_id, course_id, requester_id=person_id)
+        # As the learner: the server returns private (practice) evidence only to its owner.
         evidence = await _call_mcp(
             "assessments", "assessments.list_recent_evidence",
-            {"person_id": person_id, "course_id": course_id},
+            {"person_id": person_id, "course_id": course_id, "requester_id": person_id},
         )
         modules = await _call_mcp(
             "content", "content.list_modules",
@@ -843,9 +851,7 @@ class BriefGenerator:
         # Get evidence for each student
         student_grades = []
         for student in students_to_query:
-            ctx = await _call_mcp("roster", "roster.get_student_context", {
-                "person_id": student["id"], "course_id": course_id,
-            })
+            ctx = await _student_context(student["id"], course_id, requester_id=person_id)
             evidence = ctx.get("recent_evidence", [])
             grades: dict[str, float | None] = {}
             for ev in evidence:
@@ -865,10 +871,10 @@ class BriefGenerator:
             })
 
         # Get assignment list
-        assignments_ctx = await _call_mcp("roster", "roster.get_student_context", {
-            "person_id": students_to_query[0]["id"] if students_to_query else person_id,
-            "course_id": course_id,
-        })
+        assignments_ctx = await _student_context(
+            students_to_query[0]["id"] if students_to_query else person_id, course_id,
+            requester_id=person_id,
+        )
         assignment_titles = list({
             ev.get("title", ev.get("kind", ""))
             for ev in assignments_ctx.get("recent_evidence", [])
