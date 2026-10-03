@@ -300,11 +300,13 @@ separate compose project (`lms-llm-fixtures`) with fresh volumes and a fresh see
 `LLM_FIXTURE_DIR` and `LLM_FIXTURE_ALLOW=1`, runs the live Chat UI specs and then
 `scripts/demo all --check`. It never touches the demo database. See `src/platform/llm-fixtures/README.md` for the exact steps.
 
-A recorded set replays only on the day it was recorded: several MCP tools filter on `now()`
-against the seed's absolute dates (fixed clock: T-P-106). Until that lands,
-`src/platform/llm-fixtures/recordings/` is git-ignored, nothing in it is committed, and CI's
-`e2e-live-replay` job runs only when the CI workflow is started by hand with the run id of a
-same-day **Record LLM Fixtures** run.
+Several tools and prompts depend on "now" (upcoming assignments, evidence windows, "this
+month"), and the seed's dates are absolute. The fixtures overlay therefore sets `LMS_AS_OF`
+(default `2026-10-15`) for the seed, every MCP server and the orchestrator, and they all use it
+in place of the real clock, so a set recorded on one day replays on any later day. Record and
+replay with the same `LMS_AS_OF`. The recordings in `src/platform/llm-fixtures/recordings/` stay
+git-ignored until a set replays green (T-P-106); until then CI's `e2e-live-replay` job runs only
+manually, replaying a Record LLM Fixtures run's artifact.
 
 Re-record after changing a prompt, a manifest, a tool schema, the seed or a scenario.
 
@@ -314,9 +316,9 @@ Workflows live in `.github/workflows/`:
 
 | Workflow | Trigger | What it runs |
 |----------|---------|--------------|
-| `ci.yaml` | every push and PR to `main`; manual (`workflow_dispatch`, needs `fixtures_run_id`) | ruff S608 (string-built SQL), `verify=False` grep, language lint (`src/platform/ci/language_lint.py` and its tests), pytest for engine (DB-backed tests against an alembic-built Postgres service) / agents / data_mcp (Postgres service container) / scenario executor, Playwright `*.smoke.spec.ts` for both the Ultra UI and the Chat UI (mocked API; `playwright-smoke` passes only when both do), `docker compose config`; on a manual run only, `e2e-live-replay` (full stack replaying the `llm-fixtures` artifact of the Record LLM Fixtures run given as `fixtures_run_id` through the live Chat UI specs and `scripts/demo all --check`) |
+| `ci.yaml` | every push and PR to `main`; manual (`workflow_dispatch`) | ruff S608 (string-built SQL), `verify=False` grep, language lint (`src/platform/ci/language_lint.py` and its tests), pytest for engine (DB-backed tests against an alembic-built Postgres service) / agents / data_mcp (Postgres service container) / scenario executor, Playwright `*.smoke.spec.ts` for both the Ultra UI and the Chat UI (mocked API; `playwright-smoke` passes only when both do), `docker compose config`, `e2e-live-replay` on a manual run only (full stack replaying the `llm-fixtures` artifact of the Record LLM Fixtures run named by `fixtures_run_id` through the live Chat UI specs and `scripts/demo all --check`; `continue-on-error` until a recording under `LMS_AS_OF` replays green) |
 | `contract-invariants.yaml` | every push and PR to `main` | `src/platform/ci/scripts/check_contracts.py`, including the migrations-vs-schema check against a Postgres service container, then `pytest src/platform/ci/tests` |
-| `record-llm-fixtures.yaml` | manual (`workflow_dispatch`) | `run-live-e2e record`; uploads the recorded fixtures as the `llm-fixtures` artifact for a same-day manual CI run to replay; needs `ANTHROPIC_API_KEY` as a repo secret |
+| `record-llm-fixtures.yaml` | manual (`workflow_dispatch`) | `run-live-e2e record`; uploads the recorded fixtures as the `llm-fixtures` artifact, for a manual `ci.yaml` run to replay; needs `ANTHROPIC_API_KEY` as a repo secret |
 | `scenario-tests.yaml` | manual (`workflow_dispatch`) | full `docker compose up` plus all scenarios; needs `ANTHROPIC_API_KEY` as a repo secret |
 
 Jobs that need `SEED_DEMO_PASSWORD` take it from the `SEED_DEMO_PASSWORD` repo secret when one is set, otherwise generate a random one at job start. Never put a literal value in a workflow; `src/platform/ci/tests/test_workflows.py` fails if one appears.

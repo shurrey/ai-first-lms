@@ -1,0 +1,4 @@
+# Recordings are not committed until a set replays green (T-P-106); the root .gitignore ignores
+# recordings/. Replay's miss dumps and record's partial writes are never committed.
+recordings/misses/
+recordings/*.tmp

@@ -6,9 +6,11 @@ course_id: "cs101"
 
 user_turns:
   - message: "For the students struggling with Chapter 5 in my course, create a tailored study guide and send it with a supportive note."
+    # At least one gated communications.send_message; how many is up to the model.
     approvals:
       - decision: approve
-      - decision: approve
+    default_approval:
+      decision: approve
 
 expected:
   final_event: final

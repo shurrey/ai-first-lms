@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       fixtures_run_id:
-        description: Run id of a same-day Record LLM Fixtures run whose llm-fixtures artifact e2e-live-replay replays
+        description: Run id of a Record LLM Fixtures run whose llm-fixtures artifact e2e-live-replay replays
         required: true
 
 concurrency:
@@ -201,15 +201,15 @@ jobs:
             exit 1
           fi
 
-  # Full stack with the orchestrator answering from recorded LLM fixtures (no API key), then the
-  # live Chat UI scenario specs and scripts/demo all --check. See src/platform/llm-fixtures/README.md.
-  # Manual only: a recording replays only on the day it was made (T-P-106), so fixtures are not
-  # committed and come from a same-day Record LLM Fixtures run. Run it on push/PR once T-P-106 lands.
+  # Full stack with the orchestrator answering from recorded LLM fixtures (no API key) under a
+  # fixed LMS_AS_OF, then the live Chat UI scenario specs and scripts/demo all --check. See
+  # src/platform/llm-fixtures/README.md. Manual only until a recorded set that replays green is
+  # committed (T-P-106); the fixtures come from a Record LLM Fixtures run's artifact.
   e2e-live-replay:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    # Scenario 10 and others fail on the live runner (T-E-134).
+    # Scenario 10 does not replay green yet (T-E-134).
     continue-on-error: true
     permissions:
       contents: read

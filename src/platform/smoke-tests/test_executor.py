@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import httpx
@@ -31,6 +32,7 @@ from src.platform.scenarios.models import (  # noqa: E402
 SCENARIOS_DIR = ROOT / "src" / "platform" / "scenarios"
 SEEDED_STUDENT = "emma.smith@student.edu"
 SEEDED_FACULTY = "m.torres@university.edu"
+BIO150_FACULTY = "m.patel@university.edu"
 TEST_PASSWORD = "not-the-demo-password-1234"
 CSRF = "csrf-abc"
 
@@ -157,9 +159,36 @@ def test_repo_scenarios_log_in_as_seeded_people():
     scenarios = load_all_scenarios(SCENARIOS_DIR)
     assert [s.id for s in scenarios] == list(range(1, 12))
     for s in scenarios:
-        assert s.login_as in {SEEDED_STUDENT, SEEDED_FACULTY}, s.id
+        assert s.login_as in {SEEDED_STUDENT, SEEDED_FACULTY, BIO150_FACULTY}, s.id
         expected_role = "student" if s.login_as == SEEDED_STUDENT else "faculty"
         assert s.active_role == expected_role, s.id
+
+
+@pytest.mark.parametrize("scenario_id", [2, 6])
+def test_biology_scenarios_run_in_bio150_as_its_instructor(scenario_id):
+    s = next(s for s in load_all_scenarios(SCENARIOS_DIR) if s.id == scenario_id)
+    assert (s.login_as, s.course_id) == (BIO150_FACULTY, "bio150")
+
+
+def test_accessibility_scenario_names_the_seeded_biology_course():
+    s = next(s for s in load_all_scenarios(SCENARIOS_DIR) if s.id == 6)
+    assert "General Biology" in s.user_turns[0].message
+    assert "Intro to Biology" not in s.user_turns[0].message
+
+
+def test_repo_scenario_caps_are_60s_single_agent_and_120s_multi_agent():
+    # A scenario whose SPEC-v1 §9 plan may use a second agent (e.g. 8) can take the 120 s cap
+    # while still requiring only one invocation.
+    for s in load_all_scenarios(SCENARIOS_DIR):
+        assert s.expected.max_wall_time_ms in (60_000, 120_000), s.id
+        if s.expected.min_agent_invocations > 1:
+            assert s.expected.max_wall_time_ms == 120_000, s.id
+
+
+def test_grading_scenario_has_no_xfail_and_targets_dr_torres_in_cs101():
+    s = next(s for s in load_all_scenarios(SCENARIOS_DIR) if s.id == 3)
+    assert s.xfail is None
+    assert (s.login_as, s.course_id) == (SEEDED_FACULTY, "cs101")
 
 
 class FakeApi:
@@ -172,7 +201,11 @@ class FakeApi:
         login_role: str = "student",
         events: list[dict] | None = None,
         session_status: int = 200,
+        approval_delay_s: float = 0.0,
+        logout_delay_s: float = 0.0,
     ):
+        self.approval_delay_s = approval_delay_s
+        self.logout_delay_s = logout_delay_s
         self.login_status = login_status
         self.login_role = login_role
         self.session_status = session_status
@@ -229,6 +262,7 @@ class FakeApi:
             body = "".join(f"data: {json.dumps(e)}\n\n" for e in self.events)
             return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
         if path == "/api/approval":
+            time.sleep(self.approval_delay_s)
             body = json.loads(request.content)
             if not body.get("approval_id"):
                 return httpx.Response(422, json={"detail": "approval_id required"})
@@ -241,6 +275,7 @@ class FakeApi:
                 },
             )
         if path == "/api/auth/logout":
+            time.sleep(self.logout_delay_s)
             return httpx.Response(204)
         return httpx.Response(404)
 
@@ -351,3 +386,50 @@ def test_password_is_read_from_environment(monkeypatch):
     _executor(api, password=None).run(_scenario())
 
     assert api.body("/api/auth/login")["password"] == "from-env-password-99"
+
+
+def test_clarify_fails_the_scenario_with_the_question_and_skips_later_turns():
+    api = FakeApi(
+        events=[
+            {"event": "reasoning", "payload": {"step": "interpret"}},
+            {"event": "clarify", "payload": {"question": "Which course?", "reason": "r"}},
+            {"event": "reasoning", "payload": {"step": "clarify"}},
+        ]
+    )
+    result = _executor(api).run(
+        _scenario(user_turns=[{"message": "Draft it"}, {"message": "Second turn"}])
+    )
+
+    assert result.status == "fail"
+    assert any("clarifying question" in e and "Which course?" in e for e in result.errors)
+    assert api.paths().count("POST /api/converse") == 1
+
+
+def test_time_answering_approvals_is_not_counted_against_the_cap():
+    api = FakeApi(
+        approval_delay_s=0.3,
+        events=[
+            {"event": "agent_start", "payload": {}},
+            {"event": "approval_request", "payload": {"approval_id": "a1"}},
+            {"event": "final", "payload": {}},
+        ],
+    )
+    scenario = _scenario(
+        user_turns=[{"message": "Send it", "approvals": [{"decision": "approve"}]}],
+        expected={"final_event": "final", "min_agent_invocations": 1,
+                  "max_wall_time_ms": 200},
+    )
+    result = _executor(api).run(scenario)
+
+    assert result.errors == []
+    assert result.wall_time_ms < 200
+
+
+def test_logout_time_is_not_counted_against_the_cap():
+    api = FakeApi(logout_delay_s=0.3)
+    scenario = _scenario(
+        expected={"final_event": "final", "min_agent_invocations": 1, "max_wall_time_ms": 200}
+    )
+    result = _executor(api).run(scenario)
+
+    assert result.errors == []

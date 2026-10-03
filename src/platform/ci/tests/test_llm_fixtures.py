@@ -20,6 +20,7 @@ def _ignored(rel: str) -> bool:
 def test_recordings_are_git_ignored():
     assert _ignored(f"{FIXTURES}/recordings/abc.json")
     assert _ignored(f"{FIXTURES}/recordings/misses/abc.json")
+    assert _ignored(f"{FIXTURES}/recordings/abc.json.tmp")
 
 
 @pytest.mark.parametrize("name", ["README.md", "compose.yaml", "run-live-e2e"])
@@ -37,6 +38,29 @@ def test_e2e_live_replay_runs_only_on_manual_dispatch():
     downloads = [s for s in job["steps"] if str(s.get("uses", "")).startswith(
         "actions/download-artifact")]
     assert downloads and downloads[0]["with"]["path"] == f"{FIXTURES}/recordings"
+
+
+def _overlay() -> dict:
+    return yaml.safe_load((REPO / FIXTURES / "compose.yaml").read_text())
+
+
+def test_overlay_pins_lms_as_of_for_seed_engine_and_every_mcp_server():
+    base = yaml.safe_load((REPO / "docker-compose.yaml").read_text())["services"]
+    pinned = {"orchestrator", "db-seed"} | {name for name in base if name.startswith("mcp-")}
+    services = _overlay()["services"]
+    for name in sorted(pinned):
+        assert services[name]["environment"]["LMS_AS_OF"] == "${LMS_AS_OF:-2026-10-15}", name
+
+
+def test_run_live_e2e_defaults_lms_as_of_to_the_overlay_value():
+    script = (REPO / FIXTURES / "run-live-e2e").read_text()
+    default = _overlay()["services"]["orchestrator"]["environment"]["LMS_AS_OF"]
+    assert f'export LMS_AS_OF="{default}"' in script
+
+
+def test_fixture_overlay_fixes_the_pseudonym_salt():
+    env = _overlay()["services"]["orchestrator"]["environment"]
+    assert env["PII_PSEUDONYM_SALT"] == "llm-fixtures"
 
 
 def test_fixture_overlay_confirms_fixture_mode_to_the_engine():

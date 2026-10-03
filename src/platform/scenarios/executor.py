@@ -19,7 +19,11 @@ ScenarioStatus = Literal["pass", "fail", "xfail", "xpass"]
 
 @dataclass
 class ScenarioResult:
-    """`passed` is False only for status "fail"; a failing xfail scenario does not fail a run."""
+    """`passed` is False only for status "fail"; a failing xfail scenario does not fail a run.
+
+    `wall_time_ms` runs from each message's send to its last event, summed over turns, minus
+    the time spent answering approval requests; the session brief is not included.
+    """
 
     scenario_id: int
     scenario_name: str
@@ -148,12 +152,7 @@ class ScenarioExecutor:
 
     def run(self, scenario: Scenario) -> ScenarioResult:
         """Run a single scenario end-to-end."""
-        events: list[dict[str, Any]] = []
-        errors: list[str] = []
-        agent_invocations = 0
-        artifacts: list[str] = []
-
-        start_time = time.monotonic()
+        log = _TurnLog()
 
         try:
             with httpx.Client(
@@ -170,144 +169,175 @@ class ScenarioExecutor:
                     session_data = resp.json()
                     session_id = session_data.get("session_id", session_data.get("id"))
                     self._drain_brief(client, session_id, session_data.get("brief_turn_id"),
-                                      errors)
-                    # The scenario's wall time covers its turns, not the session brief.
-                    start_time = time.monotonic()
-
+                                      log.errors)
                     for turn in scenario.user_turns:
-                        approval_index = 0
-
-                        resp = client.post(
-                            "/api/converse",
-                            json={"session_id": session_id, "message": turn.message},
-                            headers=self._csrf_headers(client),
-                        )
-                        resp.raise_for_status()
-                        turn_data = resp.json()
-                        turn_id = turn_data.get("turn_id", turn_data.get("id"))
-
-                        with client.stream(
-                            "GET",
-                            "/api/stream",
-                            params={"session_id": session_id, "turn_id": turn_id},
-                            timeout=httpx.Timeout(
-                                connect=10,
-                                read=scenario.expected.max_wall_time_ms / 1000 + 5,
-                                write=10,
-                                pool=10,
-                            ),
-                        ) as stream:
-                            stream.raise_for_status()
-                            for line in stream.iter_lines():
-                                if not line.startswith("data: "):
-                                    continue
-                                raw = line[6:]
-                                try:
-                                    event = json.loads(raw)
-                                except json.JSONDecodeError:
-                                    errors.append(f"Unparseable SSE data line: {raw[:200]}")
-                                    continue
-
-                                events.append(event)
-                                event_type = event.get("event", "")
-
-                                if event_type == "agent_start":
-                                    agent_invocations += 1
-
-                                if event_type in ("agent_result", "final"):
-                                    payload = event.get("payload") or {}
-                                    for artifact in payload.get("artifacts") or []:
-                                        artifacts.append(artifact.get("type", "unknown"))
-
-                                if event_type == "approval_request":
-                                    approval = _approval_for(turn, approval_index)
-                                    if approval is None:
-                                        errors.append(
-                                            "Unexpected approval_request (no scripted approval"
-                                            f" at index {approval_index}); rejected it"
-                                        )
-                                        approval = ApprovalAction(decision="reject")
-                                    client.post(
-                                        "/api/approval",
-                                        json={
-                                            "session_id": session_id,
-                                            "turn_id": turn_id,
-                                            "approval_id": event.get("payload", {}).get(
-                                                "approval_id"
-                                            ),
-                                            "decision": approval.decision,
-                                            "edited_payload": approval.edits,
-                                        },
-                                        headers=self._csrf_headers(client),
-                                    ).raise_for_status()
-                                    approval_index += 1
-
-                                if event_type in ("final", "error"):
-                                    break
+                        self._run_turn(client, scenario, session_id, turn, log)
+                        if log.clarified:
+                            break
                 finally:
-                    self._logout(client, errors)
+                    self._logout(client, log.errors)
 
         except Exception as e:
-            errors.append(f"Executor error: {type(e).__name__}: {e}")
+            log.errors.append(f"Executor error: {type(e).__name__}: {e}")
 
-        wall_time_ms = (time.monotonic() - start_time) * 1000
+        return _validate(scenario, log)
 
-        # 3. Validate against expected
-        passed = True
+    def _run_turn(self, client: httpx.Client, scenario: Scenario, session_id: str,
+                  turn: UserTurn, log: _TurnLog) -> None:
+        """Sends one message and follows its stream to `final`, `error` or `clarify`.
 
-        # Check final event
-        if events:
-            last_event_type = events[-1].get("event", "")
-            if last_event_type != scenario.expected.final_event:
-                errors.append(
-                    f"Expected final event '{scenario.expected.final_event}', got '{last_event_type}'"
-                )
-                passed = False
-        else:
-            errors.append("No events received")
-            passed = False
-
-        # Check artifacts
-        for expected_type in scenario.expected.artifacts_of_type:
-            if expected_type not in artifacts:
-                errors.append(f"Missing expected artifact type: {expected_type}")
-                passed = False
-
-        # Check agent invocations
-        if agent_invocations < scenario.expected.min_agent_invocations:
-            errors.append(
-                f"Expected >= {scenario.expected.min_agent_invocations} agent invocations, got {agent_invocations}"
+        Adds the turn's time from send to its last event, minus the time spent answering
+        approval requests, to `log.active_ms`, even when a request raises.
+        """
+        approval_index = 0
+        sent_at = time.monotonic()
+        approval_wait_s = 0.0
+        try:
+            resp = client.post(
+                "/api/converse",
+                json={"session_id": session_id, "message": turn.message},
+                headers=self._csrf_headers(client),
             )
-            passed = False
+            resp.raise_for_status()
+            turn_data = resp.json()
+            turn_id = turn_data.get("turn_id", turn_data.get("id"))
 
-        # Check wall time
-        if wall_time_ms > scenario.expected.max_wall_time_ms:
+            with client.stream(
+                "GET",
+                "/api/stream",
+                params={"session_id": session_id, "turn_id": turn_id},
+                timeout=httpx.Timeout(
+                    connect=10,
+                    read=scenario.expected.max_wall_time_ms / 1000 + 5,
+                    write=10,
+                    pool=10,
+                ),
+            ) as stream:
+                stream.raise_for_status()
+                for line in stream.iter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    raw = line[6:]
+                    try:
+                        event = json.loads(raw)
+                    except json.JSONDecodeError:
+                        log.errors.append(f"Unparseable SSE data line: {raw[:200]}")
+                        continue
+
+                    log.events.append(event)
+                    event_type = event.get("event", "")
+                    payload = event.get("payload") or {}
+
+                    if event_type == "agent_start":
+                        log.agent_invocations += 1
+
+                    if event_type in ("agent_result", "final"):
+                        for artifact in payload.get("artifacts") or []:
+                            log.artifacts.append(artifact.get("type", "unknown"))
+
+                    if event_type == "approval_request":
+                        requested_at = time.monotonic()
+                        self._answer_approval(client, session_id, turn_id, turn,
+                                              approval_index, payload, log.errors)
+                        approval_wait_s += time.monotonic() - requested_at
+                        approval_index += 1
+
+                    if event_type == "clarify":
+                        # Scenarios are scripted to be answerable without a follow-up.
+                        log.clarified = True
+                        log.errors.append(
+                            "The turn asked a clarifying question instead of answering: "
+                            f"{payload.get('question')!r}"
+                        )
+                        break
+
+                    if event_type in ("final", "error"):
+                        break
+        finally:
+            log.active_ms += (time.monotonic() - sent_at - approval_wait_s) * 1000
+
+    def _answer_approval(self, client: httpx.Client, session_id: str, turn_id: str,
+                         turn: UserTurn, index: int, payload: dict[str, Any],
+                         errors: list[str]) -> None:
+        approval = _approval_for(turn, index)
+        if approval is None:
             errors.append(
-                f"Wall time {wall_time_ms:.0f}ms exceeded max {scenario.expected.max_wall_time_ms}ms"
+                f"Unexpected approval_request (no scripted approval at index {index}); "
+                "rejected it"
             )
-            passed = False
+            approval = ApprovalAction(decision="reject")
+        client.post(
+            "/api/approval",
+            json={
+                "session_id": session_id,
+                "turn_id": turn_id,
+                "approval_id": payload.get("approval_id"),
+                "decision": approval.decision,
+                "edited_payload": approval.edits,
+            },
+            headers=self._csrf_headers(client),
+        ).raise_for_status()
 
-        if errors:
-            passed = False
 
-        status: ScenarioStatus
-        if scenario.xfail is None:
-            status = "pass" if passed else "fail"
-        else:
-            status = "xpass" if passed else "xfail"
+@dataclass
+class _TurnLog:
+    events: list[dict[str, Any]] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    artifacts: list[str] = field(default_factory=list)
+    agent_invocations: int = 0
+    # Send-to-last-event time summed over turns, excluding approval round trips.
+    active_ms: float = 0.0
+    clarified: bool = False
 
-        return ScenarioResult(
-            scenario_id=scenario.id,
-            scenario_name=scenario.name,
-            passed=status != "fail",
-            status=status,
-            xfail_reason=scenario.xfail,
-            wall_time_ms=wall_time_ms,
-            agent_invocations=agent_invocations,
-            artifacts=artifacts,
-            events=events,
-            errors=errors,
+
+def _validate(scenario: Scenario, log: _TurnLog) -> ScenarioResult:
+    errors = log.errors
+    expected = scenario.expected
+
+    if log.events:
+        last_event_type = log.events[-1].get("event", "")
+        if last_event_type != expected.final_event:
+            errors.append(
+                f"Expected final event '{expected.final_event}', got '{last_event_type}'"
+            )
+    else:
+        errors.append("No events received")
+
+    for expected_type in expected.artifacts_of_type:
+        if expected_type not in log.artifacts:
+            errors.append(f"Missing expected artifact type: {expected_type}")
+
+    if log.agent_invocations < expected.min_agent_invocations:
+        errors.append(
+            f"Expected >= {expected.min_agent_invocations} agent invocations, "
+            f"got {log.agent_invocations}"
         )
+
+    if log.active_ms > expected.max_wall_time_ms:
+        errors.append(
+            f"Wall time {log.active_ms:.0f}ms (approval waits excluded) exceeded max "
+            f"{expected.max_wall_time_ms}ms"
+        )
+
+    passed = not errors
+    status: ScenarioStatus
+    if scenario.xfail is None:
+        status = "pass" if passed else "fail"
+    else:
+        status = "xpass" if passed else "xfail"
+
+    return ScenarioResult(
+        scenario_id=scenario.id,
+        scenario_name=scenario.name,
+        passed=status != "fail",
+        status=status,
+        xfail_reason=scenario.xfail,
+        wall_time_ms=log.active_ms,
+        agent_invocations=log.agent_invocations,
+        artifacts=log.artifacts,
+        events=log.events,
+        errors=errors,
+    )
 
 
 def _approval_for(turn: UserTurn, index: int) -> ApprovalAction | None:

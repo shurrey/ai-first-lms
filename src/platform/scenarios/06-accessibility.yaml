@@ -1,11 +1,13 @@
 id: 6
 name: "Accessibility: WCAG compliance check"
-login_as: "m.torres@university.edu"
+# SPEC-v1 §9 says "Intro to Biology"; the seeded course is BIO 150 — General Biology,
+# taught by Dr. Patel, so the message names it by its seeded title.
+login_as: "m.patel@university.edu"
 active_role: faculty
-course_id: "cs101"
+course_id: "bio150"
 
 user_turns:
-  - message: "Is my Intro to Biology course WCAG compliant?"
+  - message: "Is my General Biology course WCAG compliant?"
 
 expected:
   final_event: final

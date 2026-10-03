@@ -1,6 +1,6 @@
 # Records the LLM fixtures that ci.yaml's e2e-live-replay job replays. Manual only: it makes
-# real model calls with the ANTHROPIC_API_KEY repo secret. Replay the same day by running CI
-# manually with this run's id as fixtures_run_id; fixtures are not committed until T-P-106.
+# real model calls with the ANTHROPIC_API_KEY repo secret. Replay it by running CI manually with
+# this run's id as fixtures_run_id; fixtures are committed once a set replays green (T-P-106).
 name: Record LLM Fixtures
 
 on:

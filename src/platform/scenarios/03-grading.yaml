@@ -3,12 +3,14 @@ name: "Grading: rubric-based scoring with approval"
 login_as: "m.torres@university.edu"
 active_role: faculty
 course_id: "cs101"
-xfail: "Needs assessments.list_submission_history (T-D-104, tasks/open/T-D-104.md) to find the Essay 3 submissions."
 
 user_turns:
   - message: "Grade submissions for Essay 3 with my rubric."
     approvals:
       - decision: approve
+    # One gated assessments.commit_grade per drafted submission.
+    default_approval:
+      decision: approve
 
 expected:
   final_event: final
