@@ -1,5 +1,7 @@
 # Recorded LLM fixtures
 
+> **Policy:** record once, when all project work is done. Until then, `recordings/` is git-ignored and the `e2e-live-replay` CI job is manual-only.
+
 `recordings/` holds the orchestrator's recorded Anthropic responses, one JSON file per request
 (engine side: `src/engine/llm_fixture.py`). With them, the full stack runs the live Chat UI
 scenario specs and `scripts/demo all --check` with no API key and no model cost. CI's
@@ -14,7 +16,7 @@ uses the `LMS_AS_OF` it was recorded with; `run-live-e2e` exports the same defau
 
 | File | Purpose |
 |------|---------|
-| `recordings/*.json` | Committed. Fixtures, keyed by a hash of the normalised request (model, system, messages, tools). The n-th identical request in a run is `<key>.<n>.json` (the first is `<key>.json`), so replay serves repeated requests, such as each session's opening brief, in recorded order. A request its caller cancelled while recording (the agent backstop: the rest of the turn's wall-time budget) is saved with `"cancelled": true` and no response; replay never answers it, so the same timeout fires again |
+| `recordings/*.json` | Not committed until the single final recording, made once when the project is done (recordings made earlier go stale as prompts change). Fixtures, keyed by a hash of the normalised request (model, system, messages, tools). The n-th identical request in a run is `<key>.<n>.json` (the first is `<key>.json`), so replay serves repeated requests, such as each session's opening brief, in recorded order. A request its caller cancelled while recording (the agent backstop: the rest of the turn's wall-time budget) is saved with `"cancelled": true` and no response; replay never answers it, so the same timeout fires again |
 | `recordings/misses/` | Git-ignored (`.gitignore` here). Written by replay: the normalised request for each miss, to diff against the nearest recording |
 | `compose.yaml` | Overlay on `docker-compose.yaml`: sets `LLM_FIXTURE_DIR=/app/llm-fixtures` and `LLM_FIXTURE_ALLOW=1`, bind-mounts `recordings/` there, sets `LMS_AS_OF` on the seed, MCP servers and orchestrator, and fixes `PII_PSEUDONYM_SALT` (learner pseudonyms in tool results are part of each request key; an unset salt is random per process) |
 | `run-live-e2e` | `record`, `replay` or `fill`: fresh stack, then the live specs, then `scripts/demo all --check` |

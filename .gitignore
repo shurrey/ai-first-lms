@@ -51,5 +51,5 @@ certs/*
 *.pem
 
 # Recorded LLM fixtures are committed; replay misses and partial writes are not.
-src/platform/llm-fixtures/recordings/misses/
-src/platform/llm-fixtures/recordings/*.json.tmp
+# Recorded once, when the project is done; until then nothing here is committed.
+src/platform/llm-fixtures/recordings/

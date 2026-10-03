@@ -201,7 +201,9 @@ jobs:
   # src/platform/llm-fixtures/README.md. Manual only until a recorded set that replays green is
   # committed (T-P-106); the fixtures come from a Record LLM Fixtures run's artifact.
   # Replays the committed recordings in src/platform/llm-fixtures/recordings; no API key.
+  # Manual only: recordings are made once, when the project is done, so they match the final code.
   e2e-live-replay:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
