@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { TORRES } from "./fixtures/fake-api";
+import { TORRES, api, fulfill } from "./fixtures/fake-api";
 import { selectCourse, setupMockAPI } from "./fixtures/setup";
 
 const SESSION_ID = "ap-session";
@@ -84,23 +84,55 @@ test("a create_question approval shows the question to save", async ({ page }) =
   expect(errors).toEqual([]);
 });
 
-test("a commit_grade approval (grade_commit) shows the gate, not a schema error", async ({ page }) => {
+test("a grade_commit approval asks for the instructor's scores and comment, and sends them as an edit", async ({ page }) => {
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await setupMockAPI(page, {
     me: TORRES, sessionId: SESSION_ID, turnId: TURN_ID,
     sseEvents: [approvalEvent("grade_commit", {
       tool: "assessments.commit_grade",
-      arguments: { submission_id: "s-1" },
-      artifact: { grade: { scores: { thesis: 2 }, feedback: { thesis: "State the claim in one sentence." } } },
+      arguments: { grade_id: "g-1" },
+      artifact: {
+        grade: { grade_id: "g-1", submission_id: "s-1", scores: { thesis: 2, evidence: 3 },
+          feedback: { thesis: "State the claim in one sentence." } },
+        requires: { final_scores: ["thesis", "evidence"], holistic_md: true },
+      },
     })],
+  });
+  let refuse = true;
+  const posted: Record<string, unknown>[] = [];
+  await page.route(api("/api/approval"), (route) => {
+    if (route.request().method() === "OPTIONS") return fulfill(route, 204);
+    posted.push(route.request().postDataJSON());
+    const status = refuse ? 422 : 202;
+    refuse = false;
+    return fulfill(route, status,
+      status === 422 ? { detail: "The final score for thesis must be a whole number." } : { status: "accepted" });
   });
   await page.goto("/");
   await selectCourse(page);
   await ask(page);
 
   const gate = page.getByRole("region", { name: "Approval needed" });
-  await expect(gate.getByRole("button", { name: "Approve" })).toBeVisible();
+  await expect(gate.getByRole("button", { name: "Approve" })).toHaveCount(0);
+  await expect(gate.getByText("(generated draft: 2)")).toBeVisible();
   await expect(page.locator("main").getByText(/^Error: /)).toHaveCount(0);
+
+  await gate.getByRole("button", { name: "Commit with my scores" }).click();
+  await expect(gate.getByRole("alert")).toContainText("Enter a whole-number final score for thesis.");
+  await expect(gate.getByRole("alert")).toContainText("Write a closing comment.");
+  expect(posted).toEqual([]);
+
+  await gate.getByRole("spinbutton", { name: /thesis/ }).fill("3");
+  await gate.getByRole("spinbutton", { name: /evidence/ }).fill("3");
+  await gate.getByLabel("Closing comment (required)").fill("Clear claim; strong cases.");
+  await gate.getByRole("button", { name: "Commit with my scores" }).click();
+  await expect(gate.getByRole("alert")).toContainText("Not accepted: The final score for thesis must be a whole number.");
+  await gate.getByRole("button", { name: "Commit with my scores" }).click();
+  await expect.poll(() => posted.length).toBe(2);
+  expect(posted[1]).toMatchObject({
+    approval_id: "ap-1", decision: "edit",
+    edited_payload: { grade_id: "g-1", final_scores: { thesis: 3, evidence: 3 }, holistic_md: "Clear claim; strong cases." },
+  });
   expect(errors).toEqual([]);
 });

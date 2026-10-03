@@ -1,9 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import { useId, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
-import { submitApproval, type ApprovalDecision } from "@/lib/api";
+import { ApiError, submitApproval, type ApprovalDecision } from "@/lib/api";
+import {
+  commitPayload,
+  commitPayloadProblems,
+  gradeCommitRequirement,
+  type CommitValues,
+  type GradeCommitRequirement,
+} from "@/lib/grade-commit";
 import { useSession } from "@/lib/session-context";
 import { useTurn } from "@/lib/turn-context";
 
@@ -55,6 +62,28 @@ export function ApprovalGate({
       onDecided?.(params.decision);
     },
   });
+
+  const commit = gradeCommitRequirement(preview);
+  const failure = mutation.isError
+    ? mutation.error instanceof ApiError && mutation.error.status === 422
+      ? `Not accepted: ${mutation.error.message}`
+      : "Failed to submit decision. Try again."
+    : null;
+
+  if (commit) {
+    return (
+      <div className="space-y-3 rounded-lg border border-yellow-200 bg-yellow-50 p-3 dark:border-yellow-800 dark:bg-yellow-950">
+        <p className="text-sm font-medium">{action}</p>
+        <GradeCommitForm
+          requirement={commit}
+          busy={mutation.isPending}
+          onCommit={(payload) => mutation.mutate({ decision: "edit", editedPayload: payload })}
+          onReject={() => mutation.mutate({ decision: "reject" })}
+        />
+        {failure && <p role="alert" className="text-xs text-destructive">{failure}</p>}
+      </div>
+    );
+  }
 
   const handleApprove = () => {
     mutation.mutate({ decision: "approve" });
@@ -134,11 +163,109 @@ export function ApprovalGate({
         </Button>
       </div>
 
-      {mutation.isError && (
-        <p className="text-xs text-destructive">
-          Failed to submit decision. Try again.
+      {failure && (
+        <p role="alert" className="text-xs text-destructive">
+          {failure}
         </p>
       )}
     </div>
+  );
+}
+
+const inputClass =
+  "mt-1 w-full rounded border border-input bg-background p-1.5 text-xs outline-none focus:ring-2 focus:ring-ring/50";
+
+/** A grade commits only with the instructor's own score on every criterion and a closing
+ * comment; the generated draft scores are shown for reference, never sent. */
+function GradeCommitForm({
+  requirement,
+  busy,
+  onCommit,
+  onReject,
+}: {
+  requirement: GradeCommitRequirement;
+  busy: boolean;
+  onCommit: (payload: Record<string, unknown>) => void;
+  onReject: () => void;
+}) {
+  const [values, setValues] = useState<CommitValues>(() => ({
+    finalScores: Object.fromEntries(requirement.keys.map((k) => [k, ""])),
+    holisticMd: "",
+  }));
+  const [problems, setProblems] = useState<string[]>([]);
+  const commentId = useId();
+
+  const submit = () => {
+    const found = commitPayloadProblems(requirement, values);
+    setProblems(found);
+    if (found.length === 0) onCommit(commitPayload(requirement, values));
+  };
+
+  return (
+    <form
+      className="space-y-2"
+      onSubmit={(e) => {
+        e.preventDefault();
+        submit();
+      }}
+      noValidate
+    >
+      <fieldset>
+        <legend className="text-xs font-semibold">Your final score for each criterion</legend>
+        <ul className="mt-1 grid gap-2 sm:grid-cols-2">
+          {requirement.keys.map((key) => (
+            <li key={key}>
+              <label className="text-xs">
+                {key.replace(/_/g, " ")}
+                <span className="ml-1 text-muted-foreground">
+                  (generated draft: {String(requirement.draftScores[key] ?? "none")})
+                </span>
+                <input
+                  type="number"
+                  min={0}
+                  step={1}
+                  required
+                  inputMode="numeric"
+                  value={values.finalScores[key] ?? ""}
+                  onChange={(e) =>
+                    setValues((v) => ({ ...v, finalScores: { ...v.finalScores, [key]: e.target.value } }))
+                  }
+                  className={inputClass}
+                />
+              </label>
+            </li>
+          ))}
+        </ul>
+      </fieldset>
+      <label htmlFor={commentId} className="block text-xs">
+        Closing comment (required)
+      </label>
+      <textarea
+        id={commentId}
+        required
+        rows={3}
+        value={values.holisticMd}
+        onChange={(e) => setValues((v) => ({ ...v, holisticMd: e.target.value }))}
+        className={inputClass}
+      />
+      {problems.length > 0 && (
+        <div role="alert" className="rounded border border-destructive/60 p-2 text-xs">
+          <p className="font-semibold">Can&apos;t commit yet:</p>
+          <ul className="list-disc pl-5">
+            {problems.map((p) => (
+              <li key={p}>{p}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <div className="flex gap-2">
+        <Button size="sm" type="submit" disabled={busy}>
+          Commit with my scores
+        </Button>
+        <Button size="sm" type="button" variant="destructive" onClick={onReject} disabled={busy}>
+          Reject
+        </Button>
+      </div>
+    </form>
   );
 }
