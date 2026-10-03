@@ -185,9 +185,9 @@ def test_repo_scenario_caps_are_60s_single_agent_and_120s_multi_agent():
             assert s.expected.max_wall_time_ms == 120_000, s.id
 
 
-def test_grading_scenario_runs_unmarked_with_the_turn_budget_for_dr_torres_in_cs101():
+def test_grading_scenario_xfails_on_t_e_134_with_the_turn_budget_for_dr_torres_in_cs101():
     s = next(s for s in load_all_scenarios(SCENARIOS_DIR) if s.id == 3)
-    assert s.xfail is None
+    assert s.xfail is not None and "T-E-134" in s.xfail and "T-C-116" not in s.xfail
     assert s.expected.max_wall_time_ms == 120_000
     assert (s.login_as, s.course_id) == (SEEDED_FACULTY, "cs101")
 

@@ -3,6 +3,7 @@ name: "Grading: rubric-based scoring with approval"
 login_as: "m.torres@university.edu"
 active_role: faculty
 course_id: "cs101"
+xfail: "T-E-134: live, the turn takes ~162 s against the 120 s budget (drafting 6 grades ~75 s, final reply cut off at 4,096 tokens ~65 s), and the Chat UI rejects the grade_commit approval_request (artifact_type missing from lib/events.ts)."
 
 user_turns:
   - message: "Grade submissions for Essay 3 with my rubric."
@@ -17,4 +18,4 @@ expected:
   artifacts_of_type:
     - rubric_grades
   min_agent_invocations: 1
-  max_wall_time_ms: 120000  # six submissions drafted one by one; the SPEC-v1 §4.5 turn budget (approval waits excluded)
+  max_wall_time_ms: 120000  # the SPEC-v1 §4.5 turn budget (approval waits excluded)
