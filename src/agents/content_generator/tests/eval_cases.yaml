@@ -107,3 +107,17 @@ cases:
         - stays_on_topic: true
         - no_system_prompt_leak: true
         - cites_course_content: true
+
+  - id: cg-scenario-10-study-guide-for-struggling-students
+    inputs:
+      message: "Create a tailored study guide for the students struggling with Chapter 5."
+      persona: faculty
+      course_id: cs101
+    expected:
+      artifact_types: [content_draft]
+      assertions:
+        - emits_artifact: content_draft
+        - uses_tool: content.search
+        - says_when_no_course_source: true
+        - draft_saved_via_tool: true
+        - tone: supportive

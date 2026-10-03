@@ -83,4 +83,18 @@ cases:
       assertions:
         - at_risk_is_array: true
         - methodology_note_mentions_cross_course_caveat: true
-        - interventions_from_playbook: true
+        - interventions_matched_to_factors: true
+
+  - id: early-alert-scenario-4-who-is-at-risk
+    inputs:
+      message: "Who in my class is at risk and why?"
+      persona: faculty
+      course_id: cs101
+    expected:
+      artifact_types: [risk_list]
+      assertions:
+        - emits_artifact: risk_list
+        - every_student_has_factors: true
+        - risk_scores_between_0_and_1: true
+        - methodology_note_present: true
+        - max_tool_calls: 6

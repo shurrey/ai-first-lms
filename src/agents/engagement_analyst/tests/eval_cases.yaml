@@ -53,3 +53,16 @@ cases:
       assertions:
         - shows_query_used: true
         - has_narrative: true
+
+  - id: ea-scenario-9-engagement-this-month
+    inputs:
+      message: "Show me engagement trends in CS 101 this month."
+      persona: faculty
+      course_id: cs101
+    expected:
+      artifact_types: [chart]
+      assertions:
+        - emits_artifact: chart
+        - uses_tool: analytics.trend
+        - chart_type: line
+        - shows_query_used: true

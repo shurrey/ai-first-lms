@@ -105,3 +105,18 @@ cases:
         - rubric_absent: true
         - all_questions_have_difficulty: intro
         - searches_bank_first: true
+
+  - id: assessment-scenario-2-photosynthesis-quiz
+    inputs:
+      message: "Build me a 10-question quiz on photosynthesis."
+      persona: faculty
+      course_id: bio150
+    expected:
+      artifact_types: [quiz]
+      assertions:
+        - emits_artifact: quiz
+        - question_count: 10
+        - all_questions_have_correct_answer: true
+        - all_questions_have_bloom_level: true
+        - all_questions_have_difficulty: true
+        - no_unapproved_tool_call: assessments.create_question

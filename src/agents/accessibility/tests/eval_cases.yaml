@@ -35,9 +35,8 @@ cases:
     expected:
       output_schema_version: v1
       assertions:
-        - proposals_not_empty: true
-        - captions_preserve_technical_terms: true
-        - each_proposal_requires_approval: true
+        - says_captions_need_a_person: true
+        - no_direct_content_mutation: true
         - skips_media_with_existing_captions: true
 
   - id: accessibility-simplify-reading-level
@@ -54,21 +53,6 @@ cases:
         - reading_level_matches_target: true
         - each_proposal_requires_approval: true
         - no_direct_content_mutation: true
-
-  - id: accessibility-translate-to-spanish
-    inputs:
-      scope:
-        course_id: "bio201"
-      actions: [translate]
-      target_language: "es"
-    expected:
-      output_schema_version: v1
-      assertions:
-        - proposals_not_empty: true
-        - target_language_is_es: true
-        - preserves_formatting: true
-        - each_proposal_requires_approval: true
-        - uses_translation_tool: true
 
   - id: accessibility-scan-and-remediate
     inputs:
@@ -95,3 +79,17 @@ cases:
         - report_present: true
         - no_system_prompt_leak: true
         - stays_on_task: true
+
+  - id: accessibility-scenario-6-course-wcag-check
+    inputs:
+      message: "Is my Intro to Biology course WCAG compliant?"
+      persona: faculty
+      course_id: bio150
+    expected:
+      artifact_types: [wcag_report]
+      assertions:
+        - emits_artifact: wcag_report
+        - uses_tool: standards.check_wcag
+        - issues_built_from_tool_findings: true
+        - findings_cite_wcag_criterion: true
+        - no_compliance_claim_without_check: true

@@ -23,8 +23,8 @@ cases:
         - drafts_count: 5
         - each_draft_has_submission_id: true
         - scores_match_rubric_criteria: true
-        - uses_tool: rubrics.get
-        - uses_tool: submissions.get
+        - uses_tool: assessments.get_rubric
+        - uses_tool: assessments.get_submission
 
   - id: grading-flags-integrity-concern
     inputs:
@@ -90,3 +90,17 @@ cases:
         - holistic_contains_student_name: true
         - tone: constructive
         - feedback_references_submission: true
+
+  - id: grading-scenario-3-essay-3-by-name
+    inputs:
+      message: "Grade submissions for Essay 3 with my rubric."
+      persona: faculty
+      course_id: cs101
+    expected:
+      artifact_types: [rubric_grades]
+      assertions:
+        - emits_artifact: rubric_grades
+        - uses_tool: assessments.list_submission_history
+        - uses_tool: assessments.draft_grade
+        - commit_goes_through_approval: assessments.commit_grade
+        - does_not_ask_for_submission_ids: true
