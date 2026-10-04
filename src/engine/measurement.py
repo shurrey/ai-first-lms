@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Callable, Iterable, Iterator
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Protocol
 
 import asyncpg
 
+from engine.formative.policy import show_scores_on_drafts
+from engine.formative.store import FAILED, PgFormativeStore
 from engine.guardrails.pii import pseudonym, scan_and_redact_result
 from engine.provenance import as_uuid
 
@@ -24,6 +26,11 @@ OTHER_DECISIONS = frozenset({"overridden", "dismissed", "disputed", "snoozed"})
 _NO_FINAL_SCORES = frozenset({"dismissed", "disputed", "snoozed"})
 # Action types whose decisions are on instructor-facing feedback drafts (§6.5).
 FEEDBACK_TYPES = frozenset({"grade_draft", "criterion_feedback"})
+# Generated items only their subject learner sees (§12.5); others get PracticeCounts.
+PRIVATE_TYPES = frozenset({"practice_item"})
+PRACTICE = "practice_item"
+# Evidence visibilities a learner-view outcome link may cite.
+SHARED_EVIDENCE = frozenset({"course", "program"})
 MOST_EDITED_LIMIT = 10
 TITLED_SOURCES = frozenset({"node", "content_item", "rubric"})
 
@@ -80,19 +87,42 @@ class Program:
 
 
 @dataclass(frozen=True)
+class ReleasedCriterion:
+    """A released `criterion_scores` row: the feedback as the learner was given it."""
+
+    ai_score: int | None
+    ai_rationale: str | None
+    evidence_spans: list[Any]
+    hide_score: bool = False  # draft in a course with feedback.show_scores_on_drafts=false
+
+
+@dataclass(frozen=True)
 class LearnerRelease:
     """Which feedback has reached its learner: committed grades (`grades.id`) and released
     criterion feedback (ai_action ids with a `criterion_scores.released_at`, which the
-    release flow sets under either `feedback.release_mode`)."""
+    release flow sets under either `feedback.release_mode`). `released_criteria` holds the
+    released rows per action and criterion id."""
 
     committed_grades: frozenset[str] = frozenset()
     released_actions: frozenset[str] = frozenset()
+    released_criteria: dict[str, dict[str, ReleasedCriterion]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class LinkTargets:
+    """The observed ("after") sides of outcome links that their learner can see, each mapped
+    to the criterion score the learner sees there now: evidence ids (None when the evidence
+    scores no criterion), and (submission_id, criterion_id) criterion scores."""
+
+    evidence: Mapping[str, float | None] = field(default_factory=dict)
+    scores: Mapping[tuple[str, str], float | None] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class ActionQuery:
     """`None` sets mean unrestricted; an empty set matches nothing. `end` is exclusive.
-    `before` is the (created_at, id) of the last row of the previous page."""
+    `before` is the (created_at, id) of the last row of the previous page.
+    `draft_feedback_courses` limits criterion_feedback on draft submissions to those courses."""
 
     end: datetime
     start: datetime | None = None
@@ -103,6 +133,9 @@ class ActionQuery:
     decision: str | None = None  # latest decision value, or "none"
     limit: int | None = None
     before: tuple[datetime, str] | None = None
+    ids: frozenset[str] | None = None
+    exclude_types: frozenset[str] = frozenset()
+    draft_feedback_courses: frozenset[str] | None = None
 
 
 class MeasurementStore(Protocol):
@@ -132,6 +165,10 @@ class MeasurementStore(Protocol):
     async def program(self, program_id: str) -> Program | None: ...
 
     async def learner_release(self, actions: Iterable[ActionRecord]) -> LearnerRelease: ...
+
+    async def learner_link_targets(self, links: Iterable[LinkRecord]) -> LinkTargets:
+        """Which of these links' observations their learner can see (see `learner_links`)."""
+        ...
 
 
 # --- Postgres ------------------------------------------------------------------------------
@@ -197,11 +234,21 @@ class PgMeasurementStore:
               AND ($6::timestamptz IS NULL OR a.created_at >= $6)
               AND a.created_at < $7
               AND ($8::timestamptz IS NULL OR (a.created_at, a.id) < ($8, $9::uuid))
+              AND ($11::uuid[] IS NULL OR a.id = ANY($11::uuid[]))
+              AND NOT (a.action_type = ANY($12::text[]))
+              AND ($13::uuid[] IS NULL OR a.action_type <> 'criterion_feedback'
+                   OR a.course_node = ANY($13::uuid[])
+                   OR NOT EXISTS (SELECT 1 FROM submissions s
+                                  WHERE a.target_type = 'submissions' AND s.id = a.target_id
+                                    AND s.status = 'draft'))
             ORDER BY a.created_at DESC, a.id DESC
             LIMIT $10
             """,
             courses, subjects, query.agent, query.action_type, query.decision, query.start,
             query.end, before_at, as_uuid(before_id) if before_id else None, query.limit,
+            None if query.ids is None else _uuids(query.ids), sorted(query.exclude_types),
+            None if query.draft_feedback_courses is None
+            else _uuids(query.draft_feedback_courses),
         )
         return [_action(r) for r in rows]
 
@@ -304,43 +351,271 @@ class PgMeasurementStore:
             "SELECT id FROM grades WHERE id = ANY($1::uuid[]) AND NOT is_draft",
             grades) if grades else []
         released = await self._pool.fetch(
-            "SELECT DISTINCT ai_action_id FROM criterion_scores"
-            " WHERE ai_action_id = ANY($1::uuid[]) AND released_at IS NOT NULL",
-            feedback) if feedback else []
+            """
+            SELECT cs.ai_action_id, cs.criterion_id, cs.ai_score, cs.ai_rationale,
+                   cs.ai_evidence_spans, s.status,
+                   COALESCE(s.course_node::text, a.metadata->>'course_id') AS course_id
+            FROM criterion_scores cs
+            JOIN submissions s ON s.id = cs.submission_id
+            LEFT JOIN nodes a ON a.id = s.assignment_node
+            WHERE cs.ai_action_id = ANY($1::uuid[]) AND cs.released_at IS NOT NULL
+            """, feedback) if feedback else []
+        hides = _DraftScoreHiding(self._pool)
+        by_action: dict[str, dict[str, ReleasedCriterion]] = {}
+        for r in released:
+            hide = r["status"] == "draft" and await hides.hidden(r["course_id"])
+            spans = _json(r["ai_evidence_spans"])
+            by_action.setdefault(str(r["ai_action_id"]), {})[str(r["criterion_id"])] = \
+                ReleasedCriterion(r["ai_score"], r["ai_rationale"],
+                                  spans if isinstance(spans, list) else [], hide)
         return LearnerRelease(frozenset(str(r["id"]) for r in committed),
-                              frozenset(str(r["ai_action_id"]) for r in released))
+                              frozenset(by_action), by_action)
+
+    async def learner_link_targets(self, links: Iterable[LinkRecord]) -> LinkTargets:
+        links = list(links)
+        evidence = _uuids(link.evidence_id for link in links if link.evidence_id)
+        pairs = sorted({pair for link in links if (pair := _score_pair(link)) is not None})
+        hides = _DraftScoreHiding(self._pool)
+        seen_evidence: dict[str, float | None] = {}
+        if evidence:
+            rows = await self._pool.fetch(
+                """
+                SELECT e.id, e.visibility, cs.id AS score_id, cs.ai_score,
+                       cs.released_at IS NOT NULL AS released, cs.final_score, s.status,
+                       COALESCE(s.course_node::text, a.metadata->>'course_id') AS course_id,
+                       EXISTS (SELECT 1 FROM grades g WHERE g.submission_id = cs.submission_id
+                               AND NOT g.is_draft) AS committed
+                FROM evidence e
+                LEFT JOIN criterion_scores cs ON cs.id = e.criterion_score_id
+                LEFT JOIN submissions s ON s.id = cs.submission_id
+                LEFT JOIN nodes a ON a.id = s.assignment_node
+                WHERE e.id = ANY($1::uuid[])
+                """, evidence)
+            for r in rows:
+                if r["visibility"] not in SHARED_EVIDENCE:
+                    continue
+                if r["score_id"] is None:
+                    seen_evidence[str(r["id"])] = None
+                elif await _score_visible(r, hides):
+                    seen_evidence[str(r["id"])] = _seen_score(r)
+        seen_scores: dict[tuple[str, str], float | None] = {}
+        if pairs:
+            rows = await self._pool.fetch(
+                """
+                SELECT cs.submission_id, cs.criterion_id, cs.ai_score,
+                       cs.released_at IS NOT NULL AS released, cs.final_score, s.status,
+                       COALESCE(s.course_node::text, a.metadata->>'course_id') AS course_id,
+                       EXISTS (SELECT 1 FROM grades g WHERE g.submission_id = cs.submission_id
+                               AND NOT g.is_draft) AS committed
+                FROM criterion_scores cs
+                JOIN submissions s ON s.id = cs.submission_id
+                LEFT JOIN nodes a ON a.id = s.assignment_node
+                JOIN unnest($1::uuid[], $2::uuid[]) AS p(submission_id, criterion_id)
+                  ON p.submission_id = cs.submission_id AND p.criterion_id = cs.criterion_id
+                """, [p[0] for p in pairs], [p[1] for p in pairs])
+            for r in rows:
+                if await _score_visible(r, hides):
+                    seen_scores[(str(r["submission_id"]), str(r["criterion_id"]))] = (
+                        _seen_score(r))
+        return LinkTargets(seen_evidence, seen_scores)
+
+
+class _DraftScoreHiding:
+    """feedback.show_scores_on_drafts per course, read once per course."""
+
+    def __init__(self, pool: asyncpg.Pool) -> None:
+        self._settings = PgFormativeStore(pool)
+        self._hidden: dict[str, bool] = {}
+
+    async def hidden(self, course_id: Any) -> bool:
+        course = as_uuid(course_id) or ""
+        if course not in self._hidden:
+            self._hidden[course] = not await show_scores_on_drafts(self._settings,
+                                                                   course or None)
+        return self._hidden[course]
+
+
+async def _score_visible(row: asyncpg.Record, hides: _DraftScoreHiding) -> bool:
+    """A committed grade's final score, or a released AI score whose course shows it."""
+    if row["final_score"] is not None:
+        return bool(row["committed"])
+    if not row["released"]:
+        return False
+    return not (row["status"] == "draft" and await hides.hidden(row["course_id"]))
+
+
+def _seen_score(row: asyncpg.Record) -> float | None:
+    """The score of a row `_score_visible` passed."""
+    return _num(row["final_score"] if row["committed"] and row["final_score"] is not None
+                else row["ai_score"])
+
+
+def _score_pair(link: LinkRecord) -> tuple[str, str] | None:
+    """(submission_id, criterion_id) of a rescore link: one with no evidence or attestation."""
+    if link.evidence_id or link.attestation_id:
+        return None
+    delta = link.delta or {}
+    submission, criterion = as_uuid(delta.get("submission_id")), as_uuid(
+        delta.get("criterion_id"))
+    return (submission, criterion) if submission and criterion else None
 
 
 # --- aggregation ---------------------------------------------------------------------------
+
+
+def is_failed_run(action: ActionRecord) -> bool:
+    """A feedback run that saved nothing (engine.formative.store.FAILED); not a draft anyone
+    could decide on, so it is left out of the rates."""
+    return action.action_type == "criterion_feedback" and action.output.get(FAILED) is True
 
 
 def latest_decision(decisions: list[DecisionRecord] | None) -> DecisionRecord | None:
     return decisions[-1] if decisions else None
 
 
-def visible_to_learner(action: ActionRecord, latest: DecisionRecord | None,
-                       release: LearnerRelease) -> bool:
-    """Whether the learner-facing log (the subject, or their advisor) may list `action`.
-    Grade drafts appear once their grade is committed, criterion feedback once released;
-    rejected ones never do. Other action types are always visible."""
+def _criterion_rejected(criterion_id: str, decisions: list[DecisionRecord]) -> bool:
+    """Whether the latest decision on this criterion is a rejection. A decision naming no
+    criterion in `diff.criterion_id` applies to every criterion of the action."""
+    mine = [d for d in decisions
+            if (d.diff or {}).get("criterion_id") in (None, criterion_id)]
+    return bool(mine) and mine[-1].decision == REJECTED
+
+
+def _edited_next_step(criterion_id: str, decisions: list[DecisionRecord]) -> str | None:
+    for d in reversed(decisions):
+        if d.decision != EDITED or (d.diff or {}).get("criterion_id") not in (None, criterion_id):
+            continue
+        edited = ((d.diff or {}).get("fields") or {}).get("next_step")
+        if isinstance(edited, dict) and isinstance(edited.get("after"), str):
+            return edited["after"]
+    return None
+
+
+def learner_feedback_output(action: ActionRecord, decisions: list[DecisionRecord],
+                            release: LearnerRelease) -> dict[str, Any] | None:
+    """A criterion_feedback action's output as its learner was given it, or None when no
+    criterion of it reached them. Only released, unrejected criteria are kept, carrying the
+    released score, rationale and spans and the instructor's edited next step; engine
+    annotations (dropped spans) are left out."""
+    if action.id not in release.released_actions:
+        return None
+    items = action.output.get("criteria")
+    if not isinstance(items, list):
+        latest = latest_decision(decisions)
+        return None if latest is not None and latest.decision == REJECTED else action.output
+    rows = release.released_criteria.get(action.id)
+    kept = []
+    for item in items:
+        cid = item.get("criterion_id") if isinstance(item, dict) else None
+        if not isinstance(cid, str) or _criterion_rejected(cid, decisions):
+            continue
+        if rows is None:
+            kept.append(item)
+            continue
+        row = rows.get(cid)
+        if row is None:
+            continue
+        kept.append({**item, "ai_score": None if row.hide_score else row.ai_score,
+                     "ai_rationale": row.ai_rationale, "evidence_spans": row.evidence_spans,
+                     "next_step": _edited_next_step(cid, decisions) or item.get("next_step")})
+    if not kept:
+        return None
+    output = {k: v for k, v in action.output.items() if k != "dropped_spans"}
+    return {**output, "criteria": kept}
+
+
+def learner_action(action: ActionRecord, decisions: list[DecisionRecord],
+                   release: LearnerRelease) -> ActionRecord | None:
+    """`action` as the learner-facing log (the subject, or their advisor) may list it, or
+    None when hidden. Grade drafts appear once their grade is committed and criterion
+    feedback per released criterion (`learner_feedback_output`); rejected ones never do.
+    Other action types are always visible."""
     if action.action_type not in FEEDBACK_TYPES:
-        return True
+        return action
+    if action.action_type == "criterion_feedback":
+        output = learner_feedback_output(action, decisions, release)
+        return None if output is None else replace(action, output=output)
+    latest = latest_decision(decisions)
     if latest is not None and latest.decision == REJECTED:
-        return False
-    if action.action_type == "grade_draft":
-        return action.target_type == "grades" and action.target_id in release.committed_grades
-    return action.id in release.released_actions
+        return None
+    if action.target_type == "grades" and action.target_id in release.committed_grades:
+        return action
+    return None
+
+
+def _shown_criteria(action: ActionRecord) -> dict[str, float | None] | None:
+    """Criterion id -> score shown by the learner-view output of a criterion_feedback action,
+    for the criteria it scores; None when the action does not list criteria."""
+    items = action.output.get("criteria")
+    if action.action_type != "criterion_feedback" or not isinstance(items, list):
+        return None
+    return {cid: _num(item.get("ai_score")) for item in items if isinstance(item, dict)
+            and item.get("ai_score") is not None
+            and (cid := as_uuid(item.get("criterion_id"))) is not None}
+
+
+def _as_shown(link: LinkRecord, before: float | None, after: float | None) -> LinkRecord:
+    """`link` with its criterion before/after (and change, under either key) set to the
+    scores the learner sees now, which may differ from those stored when it was linked."""
+    delta = dict(link.delta or {})
+    change = after - before if before is not None and after is not None else None
+    delta.update(before=before, after=after)
+    for key in ("change", "delta"):
+        if key in delta:
+            delta[key] = change
+    return replace(link, delta=delta)
+
+
+def learner_links(action: ActionRecord, links: list[LinkRecord], targets: LinkTargets
+                  ) -> list[LinkRecord]:
+    """The links of a learner-view `action` whose observation the learner can see: an
+    attestation, evidence in `targets`, or a criterion score in `targets`. A link on a
+    criterion the learner-view output does not score is left out. A criterion link's before
+    and after are replaced by the scores the learner sees now (see `_as_shown`)."""
+    shown = _shown_criteria(action)
+    kept = []
+    for link in links:
+        seen: float | None = None
+        if link.attestation_id:
+            visible = True
+        elif link.evidence_id:
+            evidence = as_uuid(link.evidence_id)
+            visible = evidence in targets.evidence
+            seen = targets.evidence.get(evidence or "")
+        else:
+            pair = _score_pair(link)
+            visible = pair is not None and pair in targets.scores
+            seen = targets.scores.get(pair) if pair is not None else None
+        criterion = as_uuid((link.delta or {}).get("criterion_id"))
+        if not visible or (shown is not None and criterion is not None
+                           and criterion not in shown):
+            continue
+        if criterion is not None and not link.attestation_id:
+            link = _as_shown(link, shown.get(criterion) if shown else None, seen)
+        kept.append(link)
+    return kept
+
+
+def practice_counts(actions: Iterable[ActionRecord],
+                    decisions: dict[str, list[DecisionRecord]]) -> dict[str, int]:
+    """PracticeCounts: practice sets generated, and those whose learner's latest decision
+    is Start (accepted) or Not helpful (dismissed)."""
+    sets = [a for a in actions if a.action_type == PRACTICE]
+    latest = [latest_decision(decisions.get(a.id)) for a in sets]
+    return {"generated": len(sets),
+            "started": sum(1 for d in latest if d is not None and d.decision == ACCEPTED),
+            "dismissed": sum(1 for d in latest if d is not None and d.decision == "dismissed")}
 
 
 async def learner_visible(store: MeasurementStore, actions: list[ActionRecord]
                           ) -> list[ActionRecord]:
-    """`actions` filtered by `visible_to_learner`, order kept."""
+    """`actions` through `learner_action`, hidden ones dropped, order kept."""
     if not any(a.action_type in FEEDBACK_TYPES for a in actions):
         return actions
     decisions = await store.decisions_for([a.id for a in actions])
     release = await store.learner_release(actions)
-    return [a for a in actions
-            if visible_to_learner(a, latest_decision(decisions.get(a.id)), release)]
+    shown = (learner_action(a, decisions.get(a.id, []), release) for a in actions)
+    return [a for a in shown if a is not None]
 
 
 def _num(value: Any) -> float | None:
@@ -470,6 +745,7 @@ def summarize(actions: list[ActionRecord], decisions: dict[str, list[DecisionRec
     Criterion means count an unchanged criterion as a 0 delta. Learning deltas are over
     feedback drafts' outcome links, in the units of the observation that was linked.
     """
+    actions = [a for a in actions if not is_failed_run(a)]
     by_kind: dict[tuple[str, str], list[str | None]] = {}
     for action in actions:
         latest = latest_decision(decisions.get(action.id))

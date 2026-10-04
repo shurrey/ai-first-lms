@@ -10,7 +10,8 @@ import asyncpg
 
 from common import clock
 from data_mcp.mcp_base import ToolDef
-from data_mcp.mcp_servers._helpers import parse_json_column, resolve_concept_id
+from data_mcp.mcp_servers._args import uuid_arg
+from data_mcp.mcp_servers._helpers import parse_json_column, resolve_concept_id, validation_error
 
 
 def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
@@ -64,23 +65,32 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
             return result
 
     async def get_student_context(args: dict[str, Any]) -> dict[str, Any]:
-        person_id = uuid.UUID(args["person_id"])
-        course_id = uuid.UUID(args["course_id"])
+        """Private evidence (practice, drafts; spec.md §12.5) is in `recent_evidence` only when
+        requester_id is the learner; any other or absent requester gets course/program rows."""
+        try:
+            person_id = uuid_arg(args, "person_id", required=True)
+            course_id = uuid_arg(args, "course_id", required=True)
+            requester_id = uuid_arg(args, "requester_id", required=False)
+        except ValueError as exc:
+            return validation_error(str(exc))
+        include_private = requester_id is not None and requester_id == person_id
         now = clock.now()
         async with pool.acquire() as conn:
-            # Recent evidence
             ev_rows = await conn.fetch(
-                """SELECT e.node_id, e.kind, e.score, e.observed_at, n.title
+                """SELECT e.node_id, e.kind, e.score, e.observed_at, n.title, e.source,
+                          e.visibility::text AS visibility
                    FROM evidence e
                    JOIN nodes n ON n.id = e.node_id
                    WHERE e.person_id = $1 AND e.observed_at <= $2
+                     AND ($3::bool OR e.visibility::text <> 'private')
                    ORDER BY e.observed_at DESC, n.title, e.kind, e.score LIMIT 10""",
-                person_id, now,
+                person_id, now, include_private,
             )
             recent_evidence = [
                 {"node_id": str(r["node_id"]), "kind": r["kind"],
                  "score": r["score"], "title": r["title"],
-                 "observed_at": r["observed_at"].isoformat()}
+                 "observed_at": r["observed_at"].isoformat(),
+                 "source": r["source"], "visibility": r["visibility"]}
                 for r in ev_rows
             ]
 
@@ -448,7 +458,10 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
         ToolDef(
             name="roster.get_student_context",
             description="Get student context: recent evidence, modules, upcoming assignments",
-            input_schema={"type": "object", "properties": {"person_id": {"type": "string"}, "course_id": {"type": "string"}}, "required": ["person_id", "course_id"]},
+            input_schema={"type": "object", "properties": {
+                "person_id": {"type": "string"}, "course_id": {"type": "string"},
+                "requester_id": {"type": "string"},
+            }, "required": ["person_id", "course_id"]},
             handler=get_student_context,
         ),
         ToolDef(

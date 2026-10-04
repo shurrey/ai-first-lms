@@ -101,7 +101,8 @@ async def test_gated_and_approved_calls_keep_their_approval_record(pool, turn_id
     gateway = ToolGateway(mcp, directory=world.directory,
                           objects=InMemoryObjectDirectory({"s1": CS101.course_id}),
                           turns=PgTurnRepository(pool), approvals=gate, approval_timeout=5)
-    gateway.drafts.remember("grade", "g1", world.people["faculty"].id, {"submission_id": "s1"})
+    gateway.drafts.remember("grade", "g1", world.people["faculty"].id,
+                            {"submission_id": "s1", "scores": {"c1": 2}})
     ctx = GatewayContext(auth=auth_context(world, "faculty"), turn_id=turn_id, step_id="s1",
                          course_id=CS101.course_id, emit=emit)
     call = asyncio.create_task(
@@ -110,7 +111,9 @@ async def test_gated_and_approved_calls_keep_their_approval_record(pool, turn_id
         assert not call.done(), call.result()
         await asyncio.sleep(0.01)
     approval_id = events[0]["payload"]["approval_id"]
-    gate.resolve(ApprovalDecision(approval_id, "approve"), approver=auth_context(world, "faculty"))
+    edit = {"grade_id": "g1", "final_scores": {"c1": 3}, "holistic_md": "Good."}
+    gate.resolve(ApprovalDecision(approval_id, "edit", edit),
+                 approver=auth_context(world, "faculty"), tool_arguments=edit)
     await call
 
     rows = await pool.fetch("SELECT outcome, args FROM tool_calls WHERE turn_id = $1 ORDER BY id",

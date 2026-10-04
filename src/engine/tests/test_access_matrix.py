@@ -14,9 +14,11 @@ from typing import Any
 
 import pytest
 
+from engine.app import create_app
 from engine.auth.directory import SessionOwner
 from engine.auth.scope import can_view_student
 from engine.tests.auth_fakes import CS101, ENG102, MATH201
+from engine.tests.object_fakes import InMemoryAccessLog
 
 ACTORS: dict[str, tuple[str, str]] = {
     "student": ("student", "student"),
@@ -58,9 +60,18 @@ COURSE_MATRIX: dict[str, dict[str, tuple[int, int]]] = {
     "pending_credentials": _STAFF,
     "credential_evidence": _STAFF,
     "approve_credential": _STAFF,
+    "reject_credential": _STAFF,
 }
 
-ADMIN_ONLY = ("settings_get", "settings_post")
+ADMIN_ONLY = ("settings_get", "settings_post", "access_log")
+SUBJECT = "0f6e2c4a-5b1d-4c7e-9a3f-2d8b6e1c4a70"
+
+
+@pytest.fixture
+def auth_app(auth_world):
+    """With an access log, so GET /api/access-log can answer."""
+    return create_app(auth_service=auth_world.service, scope_directory=auth_world.directory,
+                      access_log=InMemoryAccessLog())
 
 
 def _pending_id(course_id: str) -> str:
@@ -100,6 +111,11 @@ async def _call(client, endpoint: str, *, person: str, course: str, me: str):  #
         case "approve_credential":
             return await client.post(f"/api/approve-credential/{_pending_id(course)}",
                                      json={"reviewer_id": me})
+        case "reject_credential":
+            return await client.post(f"/api/reject-credential/{_pending_id(course)}",
+                                     json={"reviewer_id": me, "reason": "Not yet"})
+        case "access_log":
+            return await client.get("/api/access-log", params={"subject_id": SUBJECT})
         case "settings_get":
             return await client.get("/api/settings")
         case "settings_post":

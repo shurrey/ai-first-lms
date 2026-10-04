@@ -199,13 +199,14 @@ async def test_dispatch_no_plan():
     assert len(result.get("agent_results", [])) == 0
 
 
-async def test_dispatch_refuses_a_background_agent_even_when_the_persona_has_it():
+@pytest.mark.parametrize("agent", ["learning_analyst", "feedback"])
+async def test_dispatch_refuses_a_background_agent_even_when_the_persona_has_it(agent):
     runner = StubAgentRunner()
     set_agent_runner(runner)
     state = {
         "session_id": "s1", "turn_id": "t1", "current_message": "x", "persona": "student",
         "plan": {"strategy": "react", "steps": [
-            {"step_id": "s1", "agent": "learning_analyst", "input_summary": "x",
+            {"step_id": "s1", "agent": agent, "input_summary": "x",
              "depends_on": []}]},
         "agent_results": [], "events_emitted": [],
     }

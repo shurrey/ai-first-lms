@@ -189,11 +189,23 @@ async def test_draft_grade_invalid_submission(server, seeded_ids) -> None:
     assert "error" in result
 
 
-async def test_commit_grade(server, seeded_ids) -> None:
+async def _instructor_inputs(pool, submission_id: str) -> dict:
+    """A valid final score for every criterion of the submission's rubric, plus a comment."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT rc.key, rc.levels FROM rubric_criteria rc
+               JOIN nodes a ON a.metadata->>'rubric_id' = rc.rubric_id::text
+               JOIN submissions s ON s.assignment_node = a.id WHERE s.id = $1""",
+            uuid.UUID(submission_id),
+        )
+    scores = {r["key"]: json.loads(r["levels"])[0].get("score", 1) for r in rows}
+    return {"final_scores": scores or {"total": 80}, "holistic_md": "Clear, well argued."}
+
+
+async def test_commit_grade(server, seeded_ids, pool) -> None:
     """Create a draft grade then commit it."""
     if not seeded_ids["submission_id"] or not seeded_ids["faculty_id"]:
         pytest.skip("Missing seeded submission or faculty")
-    # First create a fresh draft grade to commit
     draft_result = await _call(server, "assessments.draft_grade", {
         "submission_id": seeded_ids["submission_id"],
         "scores": {"total": 88},
@@ -203,23 +215,22 @@ async def test_commit_grade(server, seeded_ids) -> None:
     })
     assert "grade_id" in draft_result
 
-    # Now commit it
     commit_result = await _call(server, "assessments.commit_grade", {
         "grade_id": draft_result["grade_id"],
+        **await _instructor_inputs(pool, seeded_ids["submission_id"]),
     })
-    assert commit_result.get("committed") is True
+    assert commit_result.get("committed") is True, commit_result
     assert "committed_at" in commit_result
 
 
 async def test_commit_grade_not_found(server) -> None:
     result = await _call(server, "assessments.commit_grade", {
-        "grade_id": str(uuid.uuid4()),
+        "grade_id": str(uuid.uuid4()), "final_scores": {"total": 1}, "holistic_md": "x",
     })
-    assert "error" in result
+    assert result["code"] == "not_found"
 
 
-async def test_commit_grade_already_committed(server, seeded_ids) -> None:
-    """Committing an already-committed grade returns an error."""
+async def test_commit_grade_already_committed(server, seeded_ids, pool) -> None:
     if not seeded_ids["submission_id"] or not seeded_ids["faculty_id"]:
         pytest.skip("Missing seeded submission or faculty")
     draft_result = await _call(server, "assessments.draft_grade", {
@@ -229,12 +240,12 @@ async def test_commit_grade_already_committed(server, seeded_ids) -> None:
         "graded_by": seeded_ids["faculty_id"],
     })
     grade_id = draft_result["grade_id"]
+    inputs = await _instructor_inputs(pool, seeded_ids["submission_id"])
 
-    # Commit once
-    await _call(server, "assessments.commit_grade", {"grade_id": grade_id})
-    # Try to commit again
-    result = await _call(server, "assessments.commit_grade", {"grade_id": grade_id})
-    assert "error" in result
+    first = await _call(server, "assessments.commit_grade", {"grade_id": grade_id, **inputs})
+    assert first.get("committed") is True, first
+    result = await _call(server, "assessments.commit_grade", {"grade_id": grade_id, **inputs})
+    assert result["code"] == "conflict"
 
 
 # ── list_recent_evidence ─────────────────────────────────────────────────────
@@ -299,7 +310,7 @@ async def test_list_recent_evidence_window_follows_lms_as_of(server, pool, monke
     monkeypatch.setenv("LMS_AS_OF", "2026-09-25")
     try:
         result = await _call(server, "assessments.list_recent_evidence", {
-            "person_id": str(person), "since_days": 10,
+            "person_id": str(person), "since_days": 10, "requester_id": str(person),
         })
     finally:
         async with pool.acquire() as conn:
@@ -332,7 +343,7 @@ async def test_list_recent_evidence_breaks_ties_by_node_then_payload(server, poo
     monkeypatch.setenv("LMS_AS_OF", "2026-09-25")
     try:
         result = await _call(server, "assessments.list_recent_evidence", {
-            "person_id": str(person), "since_days": 10,
+            "person_id": str(person), "since_days": 10, "requester_id": str(person),
         })
     finally:
         async with pool.acquire() as conn:
@@ -350,7 +361,7 @@ async def history(pool):
     course comes only from its assignment's metadata (course_node is NULL, as in older rows)."""
     ids = {k: uuid.uuid4() for k in (
         "student", "other", "course", "assignment", "legacy_assignment", "rubric",
-        "thesis", "evidence", "v1", "v2", "legacy", "others_sub",
+        "thesis", "evidence", "v1", "v2", "legacy", "others_sub", "staff",
     )}
     async with pool.acquire() as conn:
         for key in ("student", "other"):
@@ -361,6 +372,14 @@ async def history(pool):
         await conn.execute(
             "INSERT INTO nodes (id, kind, title) VALUES ($1, 'course', 'History Test Course')",
             ids["course"],
+        )
+        await conn.execute(
+            "INSERT INTO persons (id, roles, display_name, email) VALUES ($1, '{faculty}', $2, $3)",
+            ids["staff"], "History staff", f"history-{ids['staff']}@university.edu",
+        )
+        await conn.execute(
+            "INSERT INTO enrollments (person_id, course_node, role) VALUES ($1, $2, 'faculty')",
+            ids["staff"], ids["course"],
         )
         for key, rubric in (("assignment", str(ids["rubric"])), ("legacy_assignment", None)):
             meta = {"course_id": str(ids["course"]), "due_at": "2026-09-25T23:59:00+00:00"}
@@ -409,13 +428,15 @@ async def history(pool):
             [ids["assignment"], ids["legacy_assignment"], ids["course"]],
         )
         await conn.execute(
-            "DELETE FROM persons WHERE id = ANY($1::uuid[])", [ids["student"], ids["other"]],
+            "DELETE FROM persons WHERE id = ANY($1::uuid[])",
+            [ids["student"], ids["other"], ids["staff"]],
         )
 
 
 async def test_list_submission_history_by_assignment(server, history) -> None:
     result = await _call(server, "assessments.list_submission_history", {
         "person_id": history["student"], "assignment_node": history["assignment"],
+        "requester_id": history["staff"],
     })
     subs = result["submissions"]
     assert [s["id"] for s in subs] == [history["v2"], history["v1"]]
@@ -429,6 +450,19 @@ async def test_list_submission_history_by_assignment(server, history) -> None:
     }
     assert {c["criterion_id"] for c in v1["criteria"]} == {history["thesis"], history["evidence"]}
     assert all(c["ai_score"] is None for c in v1["criteria"])
+    assert (v2["feedback_status"], v1["feedback_status"]) == ("none", "pending")
+
+
+@pytest.mark.parametrize("requester", [None, "student", "other"])
+async def test_list_submission_history_masks_unreleased_feedback_from_non_staff(
+    server, history, requester,
+) -> None:
+    args = {"person_id": history["student"], "assignment_node": history["assignment"]}
+    if requester:
+        args["requester_id"] = history[requester]
+    result = await _call(server, "assessments.list_submission_history", args)
+    v2 = result["submissions"][0]
+    assert [c["ai_score"] for c in v2["criteria"]] == [None, None]
 
 
 async def test_list_submission_history_by_course_includes_rows_without_course_node(

@@ -33,10 +33,19 @@ from engine.guardrails.approval import (
     artifact_type_for,
 )
 from engine.guardrails.budget import ActiveClock, BudgetExceededError, BudgetTracker
+from engine.guardrails.grade_commit import (
+    COMMIT_TOOL,
+    INSTRUCTOR_INPUTS,
+    CommitIncompleteError,
+    check_commit,
+    criterion_keys,
+    without_instructor_inputs,
+)
 from engine.guardrails.injection import source_for_tool, wrap_tool_value, wrap_user_content
 from engine.guardrails.object_directory import ObjectDirectory
 from engine.guardrails.objects import DraftLedger, identity_paths, parse_object
 from engine.guardrails.pii import scan_and_redact, scan_and_redact_result
+from engine.guardrails.private_evidence import withhold_private_in_result
 from engine.guardrails.registry import get_manifest_registry, get_tool_roles
 from engine.guardrails.tool_roles import ToolRoles
 from engine.logging_config import get_logger
@@ -58,7 +67,22 @@ COURSE_ARG = "course_id"
 _CROSS_COURSE_ROLES = frozenset({"advisor", "admin"})
 APPROVER_ARGS = ("reviewer_id", GRADER_ARG)  # set to the approving person on resume
 
-SUBMISSION_TOOLS = frozenset({"assessments.get_submission", "assessments.draft_grade"})
+LEARNER_BACKGROUND_TOOLS = frozenset({"assessments.save_criterion_feedback"})
+# Agents that run only in a background flow (spec.md §7.3), never for a chat turn.
+BACKGROUND_AGENTS = frozenset({"feedback"})
+# Tools a bound feedback run may call only for the submission it reviews.
+BOUND_SUBMISSION_TOOLS = frozenset({"assessments.get_submission",
+                                    "assessments.save_criterion_feedback"})
+GRADING_STATUS_TOOL = "assessments.grading_status"
+# Tools keyed by ids the gateway resolves to a course: tool -> (argument, id kind).
+COURSE_OBJECT_TOOLS = {
+    "content.generate_practice": ("criterion_id", "criterion"),
+    "assessments.propose_alignment": ("assignment_node", "node"),
+    "graph.subgraph_for_outcomes": ("outcome_ids", "node"),
+}
+SUBMISSION_TOOLS = frozenset({"assessments.get_submission", "assessments.draft_grade",
+                              "assessments.save_criterion_feedback",
+                              "assessments.release_feedback"})
 # Non-admin staff callers must name the course: the server filters by it and nothing else ties
 # the call to a course the caller teaches.
 SUBMISSION_LIST_TOOL = "assessments.list_submission_history"
@@ -118,6 +142,8 @@ _ACTIONS = {
 
 Executor = Callable[[str, dict[str, Any]], Awaitable[str]]
 EventSink = Callable[[dict[str, Any]], Awaitable[None]]
+# (context, tool, arguments) -> arguments to run; may only drop or correct content, never ids.
+ArgFilter = Callable[["GatewayContext", str, dict[str, Any]], dict[str, Any]]
 
 
 class TurnStatusSink(Protocol):
@@ -158,6 +184,14 @@ class EditRejected(ToolDenied):  # noqa: N818
 
 
 @dataclass(frozen=True)
+class BackgroundFeedback:
+    """The one submission a background feedback run reviews, and its assignment."""
+
+    submission_id: str
+    assignment_id: str
+
+
+@dataclass(frozen=True)
 class GatewayContext:
     """Who is asking and where; `auth` None means no signed-in requester (every call is denied)."""
 
@@ -172,6 +206,10 @@ class GatewayContext:
     provenance: ProvenanceTrail | None = None  # the agent run's model, prompt hash, sources
     # Shared list receiving the id of every ai_actions row written for this context's calls.
     ai_action_ids: list[str] | None = None
+    # Applied after the scope checks, before approval and execution.
+    arg_filter: ArgFilter | None = None
+    # Set only by the formative flow's background run on a learner's own submission.
+    background_feedback: BackgroundFeedback | None = None
 
 
 @dataclass(frozen=True)
@@ -269,10 +307,15 @@ class ToolGateway:
         try:
             manifest = self._check_allow_list(agent, tool)
             auth = self._check_permission(ctx, tool)
+            self._check_background(ctx, agent, tool, current)
             purpose = _purpose(agent, tool)
             current = await self._apply_identity(auth, tool, current, purpose)
             current = self._bind_student_session(auth, tool, current, ctx.session_id)
             await self._check_objects(auth, tool, current, ctx.session_id, purpose)
+            if tool == COMMIT_TOOL:
+                current = without_instructor_inputs(current)
+            if ctx.arg_filter is not None:
+                current = self._filtered(ctx, tool, current)
         except ToolDenied as denied:
             result = self._denied(ctx, agent, tool, current, denied, start)
             await self._record(ctx, agent, tool, result)
@@ -299,6 +342,7 @@ class ToolGateway:
             raise
         outcome: ToolCallOutcome = "error" if _looks_like_error(raw) else "ok"
         if outcome == "ok":
+            raw = withhold_private_in_result(tool, current, raw, auth.person_id)
             self.drafts.record_result(tool, auth.person_id, current, raw)
         text, summary, value = self._guard_result(ctx, manifest, tool, raw)
         result = ToolResult(text, outcome, current, (time.monotonic() - start) * 1000,
@@ -308,6 +352,14 @@ class ToolGateway:
         if outcome == "ok":
             await self._provenance_succeeded(ctx, agent, tool, proposed, result, raw, call_id)
         return result
+
+    @staticmethod
+    def _filtered(ctx: GatewayContext, tool: str, args: dict[str, Any]) -> dict[str, Any]:
+        assert ctx.arg_filter is not None
+        out = ctx.arg_filter(ctx, tool, dict(args))
+        if identity_paths(out) != identity_paths(args):
+            raise ScopeDenied("An argument filter can't change which record this applies to.")
+        return out
 
     # --- provenance write points (spec.md §6.4) ------------------------------------------
 
@@ -462,7 +514,23 @@ class ToolGateway:
         if not await self._covers_course(approver, course):
             record_access(approver, request.requester_id, course, f"approve:{tool}", False)
             raise ScopeDenied("Only staff of this course can approve this action.")
+        if tool == COMMIT_TOOL:
+            try:
+                out = check_commit(out, await self._commit_criteria(out))
+            except CommitIncompleteError as incomplete:
+                raise EditRejected(str(incomplete)) from None
         return out
+
+    async def _commit_criteria(self, args: dict[str, Any]) -> list[str]:
+        """The criteria a commit of this draft must score; [] when neither the draft nor its
+        rubric names any."""
+        draft = self.drafts.get("grade", args.get("grade_id"))
+        if draft is None:
+            return []
+        rubric_id = draft.args.get("rubric_id")
+        rubric = (await self._read("assessments.get_rubric", {"rubric_id": rubric_id})
+                  if isinstance(rubric_id, str) and rubric_id else None)
+        return criterion_keys(draft.args.get("scores"), rubric)
 
     async def _approval_course(
         self, request: ApprovalRequest, args: dict[str, Any]
@@ -491,6 +559,27 @@ class ToolGateway:
             log.warning("object_directory_unavailable", object="submission")
             return None
         return await self._objects.submission_course(submission_id)
+
+    async def _check_course_objects(self, auth: AuthContext, tool: str, args: dict[str, Any],
+                                    purpose: str) -> None:
+        """Every id in COURSE_OBJECT_TOOLS[tool] must resolve to a course the caller may act
+        in; an id that resolves to nothing is refused for everyone but admin."""
+        if auth.active_role == "admin":
+            return
+        arg, kind = COURSE_OBJECT_TOOLS[tool]
+        value = args.get(arg)
+        ids = value if isinstance(value, list) else [value]
+        if not ids or not all(isinstance(v, str) and v for v in ids):
+            raise ScopeDenied(f"{arg} must name {kind} ids.")
+        if self._objects is None:
+            log.warning("object_directory_unavailable", object=kind)
+            raise ScopeDenied(UNRESOLVED)
+        for item in ids:
+            course = (await self._objects.criterion_course(item) if kind == "criterion"
+                      else await self._objects.node_course(item))
+            if course is None:
+                raise ScopeDenied(UNRESOLVED)
+            await self._check_course(auth, course, purpose)
 
     async def _bank_course(self, bank_id: Any) -> str | None:
         if not isinstance(bank_id, str) or not bank_id:
@@ -521,6 +610,8 @@ class ToolGateway:
         roles = (self._tool_roles or get_tool_roles()).get(request.tool_name)
         declared = roles.input_keys if roles else frozenset()
         unknown = set(args) - declared - set(request.original_arguments)
+        if request.tool_name == COMMIT_TOOL:
+            unknown -= INSTRUCTOR_INPUTS
         if declared and unknown:
             raise EditRejected(f"An edit can't add {', '.join(sorted(unknown))}.")
 
@@ -565,6 +656,9 @@ class ToolGateway:
         out: dict[str, Any] = {
             "grade": {"grade_id": draft.object_id,
                       **{k: draft.args[k] for k in keys if k in draft.args}},
+            # What the approver's edit must carry (POST /api/approval rejects it otherwise).
+            "requires": {"final_scores": await self._commit_criteria(args),
+                         "holistic_md": True},
         }
         submission = await self._read("assessments.get_submission",
                                       {"submission_id": draft.args.get("submission_id")})
@@ -734,7 +828,25 @@ class ToolGateway:
         if ctx.auth is None:
             raise PermissionDenied("Tools need a signed-in requester.")
         self._check_role(ctx.auth, tool)
+        # A chat turn could otherwise overwrite feedback awaiting instructor review.
+        if ctx.background_feedback is None and tool in LEARNER_BACKGROUND_TOOLS:
+            raise PermissionDenied("Feedback is generated after you submit, not in chat.")
         return ctx.auth
+
+    @staticmethod
+    def _check_background(ctx: GatewayContext, agent: str, tool: str,
+                          args: dict[str, Any]) -> None:
+        """Background agents run only in their flow; a feedback run reads and writes only the
+        submission it was started for, and lists only that assignment's versions."""
+        bound = ctx.background_feedback
+        if bound is None:
+            if agent in BACKGROUND_AGENTS:
+                raise PermissionDenied("Feedback is generated after you submit, not in chat.")
+            return
+        if tool in BOUND_SUBMISSION_TOOLS and args.get("submission_id") != bound.submission_id:
+            raise ScopeDenied("This feedback run covers one submission only.")
+        if tool == SUBMISSION_LIST_TOOL and args.get("assignment_node") != bound.assignment_id:
+            raise ScopeDenied("This feedback run covers one assignment only.")
 
     def _check_role(self, auth: AuthContext, tool: str) -> None:
         roles = (self._tool_roles or get_tool_roles()).get(tool)
@@ -746,15 +858,21 @@ class ToolGateway:
     async def _apply_identity(
         self, auth: AuthContext, tool: str, args: dict[str, Any], purpose: str
     ) -> dict[str, Any]:
-        """Requester, author and grader ids are always the caller; a student's attestation
+        """Requester, author and grader ids are always the caller (requester_id is added when
+        the tool's contract declares it); a student's attestation
         carries no issuer, anyone else's carries the caller. A student's subject id is forced
         to self (a different non-empty value is refused, not rewritten; an omitted one that
         the tool's contract declares is added). Courses and other
         learners are scope-checked; `scope` (analytics.query) is checked the same way."""
         out = dict(args)
+        roles = (self._tool_roles or get_tool_roles()).get(tool)
+        declared = roles.input_keys if roles else frozenset()
         for key in (REQUESTER_ARG, AUTHOR_ARG, GRADER_ARG):
             if key in out:
                 out[key] = auth.person_id
+        # Servers mask or refuse by requester_id, so it is sent even when the model omits it.
+        if REQUESTER_ARG in declared:
+            out[REQUESTER_ARG] = auth.person_id
         if ISSUER_ARG in out:
             if auth.active_role == "student":
                 del out[ISSUER_ARG]
@@ -763,8 +881,6 @@ class ToolGateway:
         if auth.active_role == "student":
             # A tool whose contract takes a subject id must not run without one for a
             # student, or a tool that defaults to "everyone" would answer for other learners.
-            roles = (self._tool_roles or get_tool_roles()).get(tool)
-            declared = roles.input_keys if roles else frozenset()
             for key in SUBJECT_ARGS:
                 if key in declared and key not in out:
                     out[key] = auth.person_id
@@ -904,6 +1020,11 @@ class ToolGateway:
             if course is None:
                 raise ScopeDenied(UNRESOLVED)
             await self._check_course(auth, course, purpose)
+        elif tool == GRADING_STATUS_TOOL and not args.get(COURSE_ARG) \
+                and auth.active_role != "admin":
+            raise ScopeDenied("Grading status needs the course.")
+        elif tool in COURSE_OBJECT_TOOLS:
+            await self._check_course_objects(auth, tool, args, purpose)
         if tool not in SESSION_EXEMPT_TOOLS and (
                 "session_id" in args or tool in SESSION_REQUIRED_TOOLS):
             await self._check_session(auth, tool, args.get("session_id"), current_session,

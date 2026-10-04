@@ -7,8 +7,11 @@ from engine.jobs.outcome_linker import (
     CriterionAnchor,
     EvidenceObs,
     LinkableAction,
+    ScoreObs,
     action_nodes,
+    link_key,
     link_outcomes,
+    visible_score,
 )
 
 T0 = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
@@ -156,3 +159,63 @@ def test_private_criterion_evidence_is_not_linked():
 
 def test_evidence_defaults_to_private():
     assert EvidenceObs("e", STUDENT, NODE, 0.5, T0).visibility == "private"
+
+
+def rescore(sid: str, days: float, score: int | None, *, person: str = STUDENT,
+            criterion: str = CRIT) -> ScoreObs:
+    return ScoreObs(sid, person, criterion, score, at(days), f"sub-{sid}")
+
+
+def test_a_revision_scored_on_the_criterion_links_the_delta():
+    anchor = CriterionAnchor(CRIT, "evidence", 2, "own-score")
+    [link] = link_outcomes([action(criteria=(anchor,))], [], [], window=WINDOW, now=NOW,
+                           scores=[rescore("own-score", 0, 2), rescore("v2", 1, 3),
+                                   rescore("v3", 2, 4), rescore("x", 1, 1, person=OTHER),
+                                   rescore("late", 20, 4)])
+    assert link.evidence_id is None and link.observed_at == at(1)
+    assert link.delta == {"kind": "criterion", "criterion_id": CRIT, "criterion": "evidence",
+                          "before": 2.0, "after": 3.0, "change": 1.0,
+                          "submission_id": "sub-v2"}
+
+
+def test_criterion_evidence_earlier_than_a_rescore_wins():
+    anchor = CriterionAnchor(CRIT, "evidence", 2, "own-score")
+    [link] = link_outcomes([action(criteria=(anchor,))],
+                           [ev("e", 1, 0.5, criterion=CRIT, cs_id="other", cs_score=4)], [],
+                           window=WINDOW, now=NOW, scores=[rescore("v2", 2, 3)])
+    assert link.evidence_id == "e" and link.delta["after"] == 4.0
+
+
+def test_a_server_written_revision_link_counts_as_existing():
+    server_row = {"criterion": "evidence", "criterion_id": CRIT, "before": 2, "after": 3,
+                  "delta": 1}
+    anchor = CriterionAnchor(CRIT, "evidence", 2, "own-score")
+    links = link_outcomes([action(criteria=(anchor,))], [], [], window=WINDOW, now=NOW,
+                          existing={link_key("a-1", server_row)},
+                          scores=[rescore("v2", 1, 3)])
+    assert links == []
+
+
+def test_an_unseen_revision_score_leaves_the_anchor_open_for_a_later_seen_one():
+    anchor = CriterionAnchor(CRIT, "evidence", 2, "own-score")
+    unseen = link_outcomes([action(criteria=(anchor,))],
+                           [ev("e", 0.5, criterion=CRIT, cs_id="v2", cs_score=None)], [],
+                           window=WINDOW, now=NOW, scores=[rescore("v2", 1, None)])
+    [link] = link_outcomes([action(criteria=(anchor,))], [], [], window=WINDOW, now=NOW,
+                           scores=[rescore("v2", 1, None), rescore("v3", 2, 3)])
+    assert unseen == []
+    assert link.delta["after"] == 3.0 and link.delta["submission_id"] == "sub-v3"
+
+
+def test_feedback_its_learner_never_saw_is_not_linked():
+    anchor = CriterionAnchor(CRIT, "evidence", None, "own-score")
+    assert link_outcomes([action(criteria=(anchor,))], [], [], window=WINDOW, now=NOW,
+                         scores=[rescore("v2", 1, 3)]) == []
+
+
+def test_visible_score_is_the_committed_final_else_the_released_ai_score():
+    assert visible_score(4, True, 2, True) == 4
+    assert visible_score(4, False, 2, True) == 2
+    assert visible_score(None, True, 2, True) == 2
+    assert visible_score(4, False, 2, False) is None
+    assert visible_score(None, False, 2, False) is None

@@ -153,7 +153,10 @@ export async function runTurn(page: Page, scenario: LiveScenario): Promise<TurnO
   const gate = approvalGate(page);
   // The previous gate stays rendered, disabled, until its decision lands; an enabled
   // button therefore belongs to the next gate.
-  const nextApprove = gate.getByRole("button", { name: "Approve" }).and(page.locator(":enabled"));
+  // A grade_commit gate has no Approve: the scripted instructor confirms the drafted scores.
+  const nextApprove = gate
+    .getByRole("button", { name: /^(Approve|Commit with my scores)$/ })
+    .and(page.locator(":enabled"));
   const approvedActions: string[] = [];
   let approvalWaitMs = 0;
   const approveNext = async () => {
@@ -163,6 +166,13 @@ export async function runTurn(page: Page, scenario: LiveScenario): Promise<TurnO
     const decided = page.waitForResponse(
       (r) => new URL(r.url()).pathname === "/api/approval" && r.request().method() === "POST"
     );
+    if ((await nextApprove.textContent())?.includes("Commit with my scores")) {
+      for (const input of await gate.getByRole("spinbutton").all()) {
+        const label = (await input.locator("xpath=..").textContent()) ?? "";
+        await input.fill(/generated draft: (\d+)/.exec(label)?.[1] ?? "3");
+      }
+      await gate.getByLabel("Closing comment (required)").fill("Reviewed against the rubric; scores confirmed.");
+    }
     await nextApprove.click();
     expect((await decided).ok()).toBe(true);
     approvalWaitMs += Date.now() - shownAt;

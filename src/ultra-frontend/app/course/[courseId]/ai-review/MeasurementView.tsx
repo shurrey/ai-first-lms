@@ -173,6 +173,17 @@ export function MeasurementView({ summary }: { summary: MeasurementSummary }) {
         )}
       </Section>
 
+      {summary.practice && (
+        <Section id="ai-review-practice" title="Practice sets">
+          <p className="mb-2 text-xs text-gray-600">Counts only. Practice items, answers and results are private to each student.</p>
+          <dl className="grid grid-cols-3 gap-3 text-sm">
+            <div><dt className="text-xs text-gray-600">Generated</dt><dd className="font-semibold tabular-nums">{summary.practice.generated}</dd></div>
+            <div><dt className="text-xs text-gray-600">Started</dt><dd className="font-semibold tabular-nums">{summary.practice.started}</dd></div>
+            <div><dt className="text-xs text-gray-600">Marked not helpful</dt><dd className="font-semibold tabular-nums">{summary.practice.dismissed}</dd></div>
+          </dl>
+        </Section>
+      )}
+
       {summary.offloading && (
         <Section id="ai-review-offloading" title="Hint use">
           <dl className="grid grid-cols-2 gap-3 text-sm">

@@ -11,6 +11,7 @@ import { AdminPanel } from "./AdminPanel";
 import { RosterTab } from "./RosterTab";
 import { SettingsTab } from "./SettingsTab";
 import { AiReviewButton } from "./AiReviewDialog";
+import { AssessmentPanel } from "./AssessmentPanel";
 
 type TabId = "overview" | "roster" | "settings";
 
@@ -72,6 +73,7 @@ export function CoursePanel() {
                 role={role}
               />
             )}
+            <AssessmentPanel />
             {role === "student" && <StudentPanel data={briefCardData} />}
             {role === "faculty" && <FacultyPanel data={briefCardData} />}
             {role === "advisor" && <AdvisorPanel data={briefCardData} />}

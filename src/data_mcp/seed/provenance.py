@@ -60,7 +60,7 @@ def _json(value: Any) -> Any:
     return json.loads(value) if isinstance(value, str) else value
 
 
-class _Writer:
+class ProvenanceWriter:
     """Buffers rows so each table is written with one executemany."""
 
     def __init__(self, rng: random.Random) -> None:
@@ -99,12 +99,18 @@ class _Writer:
         self.links.append((action_id, evidence_id, attestation_id, json.dumps(delta), observed_at))
 
     async def flush(self, conn: asyncpg.Connection) -> None:
+        await self.flush_actions(conn)
+        await self.flush_decisions_and_links(conn)
+
+    async def flush_actions(self, conn: asyncpg.Connection) -> None:
         await conn.executemany(
             """INSERT INTO ai_actions (id, agent, action_type, subject_person, course_node,
                    target_type, target_id, sources, model, prompt_sha256, output, created_at)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)""",
             self.actions,
         )
+
+    async def flush_decisions_and_links(self, conn: asyncpg.Connection) -> None:
         await conn.executemany(
             """INSERT INTO human_decisions (id, ai_action_id, decided_by, decision, diff,
                    reason, decided_at)
@@ -127,7 +133,7 @@ async def seed_provenance(
 
     instructor_emails maps course slug to the faculty member who reviews AI output there.
     """
-    w = _Writer(rng)
+    w = ProvenanceWriter(rng)
     for slug in PROVENANCE_COURSES:
         course_id = uuid.UUID(course_ids[slug])
         faculty = await conn.fetchval(
@@ -147,7 +153,7 @@ async def seed_provenance(
 
 
 async def _grade_drafts(
-    conn: asyncpg.Connection, w: _Writer, slug: str, course_id: uuid.UUID,
+    conn: asyncpg.Connection, w: ProvenanceWriter, slug: str, course_id: uuid.UUID,
     faculty: uuid.UUID,
 ) -> None:
     grades = await conn.fetch(
@@ -253,7 +259,8 @@ def _ai_scores(
 
 
 def _grade_outcome(
-    w: _Writer, aid: uuid.UUID, g: asyncpg.Record, final: dict[str, int], changed: list[str],
+    w: ProvenanceWriter, aid: uuid.UUID, g: asyncpg.Record, final: dict[str, int],
+    changed: list[str],
     decided_at: datetime, committed_by_student: dict[uuid.UUID, list[asyncpg.Record]],
     evidence: dict[tuple[uuid.UUID, uuid.UUID], uuid.UUID],
 ) -> None:
@@ -281,7 +288,7 @@ def _grade_outcome(
 
 
 async def _generations(
-    conn: asyncpg.Connection, w: _Writer, course_id: uuid.UUID, faculty: uuid.UUID,
+    conn: asyncpg.Connection, w: ProvenanceWriter, course_id: uuid.UUID, faculty: uuid.UUID,
 ) -> None:
     items = await conn.fetch(
         """SELECT ci.id, ci.node_id, ci.kind, ci.title, n.metadata->>'order' AS ord
@@ -318,7 +325,7 @@ async def _generations(
 
 
 async def _attestations(
-    conn: asyncpg.Connection, w: _Writer, course_id: uuid.UUID, faculty: uuid.UUID,
+    conn: asyncpg.Connection, w: ProvenanceWriter, course_id: uuid.UUID, faculty: uuid.UUID,
 ) -> None:
     rows = await conn.fetch(
         """SELECT a.id, a.person_id, a.node_id, a.level::text AS level, n.title
@@ -353,7 +360,7 @@ async def _attestations(
 
 
 async def _recommendations(
-    conn: asyncpg.Connection, w: _Writer, course_id: uuid.UUID, faculty: uuid.UUID,
+    conn: asyncpg.Connection, w: ProvenanceWriter, course_id: uuid.UUID, faculty: uuid.UUID,
 ) -> None:
     mc = await conn.fetchrow(
         """SELECT id, title FROM nodes WHERE kind = 'microcredential'
@@ -389,7 +396,7 @@ async def _recommendations(
 
 
 async def _profile_updates(
-    conn: asyncpg.Connection, w: _Writer, course_id: uuid.UUID,
+    conn: asyncpg.Connection, w: ProvenanceWriter, course_id: uuid.UUID,
 ) -> None:
     students = await conn.fetch(
         """SELECT e.person_id FROM enrollments e WHERE e.course_node = $1 AND e.role = 'student'

@@ -34,8 +34,9 @@ _NAMESPACE = uuid.UUID("5d0c7a52-3f7e-4b8e-a3a1-6c1f4e2b9d70")
 MAX_SOURCES = 50
 SUPERSEDED_REASON = "A later draft of this grade was committed instead."
 
-# criterion_feedback and practice_item (Phase 2) and nudge/alert (Phase 4) are written by
-# their flows when those exist. `policies` stays [] until the Phase 3 resolver (spec.md §8.5).
+# criterion_feedback and practice_item rows are written by the assessments and content servers
+# (engine.formative.flow adds the model and prompt hash); nudge/alert (Phase 4) by their flows.
+# `policies` stays [] until the Phase 3 resolver (spec.md §8.5).
 
 GRADE = ("grades", "assessments.draft_grade")
 PENDING_CREDENTIALS = "pending_credentials"
@@ -53,6 +54,10 @@ GENERATION_FIELDS: dict[str, tuple[str, ...]] = {
                                     "bloom_level", "difficulty", "aligned_nodes"),
 }
 GRADE_FIELDS = ("submission_id", "rubric_id", "scores", "feedback", "holistic_md")
+# A validated proposal is a generation on the assignment node; faculty decide on it through
+# POST /api/assignments/{assignment_node}/alignment/decisions.
+ALIGNMENT_TOOL = "assessments.propose_alignment"
+ALIGNMENT_TARGET = "nodes"
 
 
 def as_uuid(value: Any) -> str | None:
@@ -347,6 +352,15 @@ def grade_diff(draft: dict[str, Any], final: dict[str, Any]) -> dict[str, Any]:
             "changed": bool(criteria or feedback or holistic)}
 
 
+def committed_grade(draft: dict[str, Any], commit_args: dict[str, Any]) -> dict[str, Any]:
+    """The grade as committed: the instructor's `final_scores` and `holistic_md`, and their
+    `feedback` where given (the draft's otherwise)."""
+    feedback = commit_args.get("feedback")
+    return {"scores": _mapping(commit_args.get("final_scores")),
+            "feedback": {**_mapping(draft.get("feedback")), **_mapping(feedback)},
+            "holistic_md": commit_args.get("holistic_md")}
+
+
 def fields_diff(before: dict[str, Any], after: dict[str, Any], keys: tuple[str, ...]
                 ) -> dict[str, Any]:
     """Which of `keys` an approver changed; text fields carry edit stats."""
@@ -513,6 +527,8 @@ class ProvenanceRecorder:
             await self._profile_updated(facts)
         elif tool in GENERATION_TOOLS:
             await self._generated(facts, result)
+        elif tool == ALIGNMENT_TOOL:
+            await self._alignment_proposed(facts, result)
 
     async def _tool_rejected(self, facts: ToolCallFacts) -> None:
         if facts.tool == "assessments.commit_grade":
@@ -600,7 +616,8 @@ class ProvenanceRecorder:
                            course=as_uuid(course))
 
     async def _grade_committed(self, facts: ToolCallFacts) -> None:
-        """The committed draft is accepted as drafted (commit_grade applies it unchanged).
+        """The committed draft is `edited` when the instructor's final scores or feedback
+        differ from it, else `accepted`; the diff also carries closing-comment edit stats.
         Earlier drafts of the same submission with no decision yet are marked edited, with the
         diff to what was committed; a rejected draft keeps its rejection."""
         committed = await self._latest(GRADE[0], facts.args.get("grade_id"), "grade_draft")
@@ -608,10 +625,10 @@ class ProvenanceRecorder:
             log.info("grade_commit_without_draft_action", grade_id=facts.args.get("grade_id"))
             return
         decided_by = _approver(facts)
-        final = committed.output
+        final = committed_grade(committed.output, facts.args)
         diff = grade_diff(committed.output, final)
         await self._decide(committed.id, facts.call_key, decided_by,
-                           "edited" if diff["changed"] else "accepted", diff)
+                           "edited" if diff["criteria"] or diff["feedback"] else "accepted", diff)
         submission = committed.output.get("submission_id")
         if not isinstance(submission, str):
             return
@@ -651,19 +668,21 @@ class ProvenanceRecorder:
             )
 
     async def credential_decided(self, pending_id: Any, decided_by: str,
-                                 decision: DecisionValue, key: str) -> None:
+                                 decision: DecisionValue, key: str,
+                                 reason: str | None = None) -> None:
         """Approve or reject on a pending credential's badge recommendation. Raises on a
         store failure; `credential_decided_safely` logs it instead."""
         action = await self._latest(PENDING_CREDENTIALS, pending_id, "recommendation")
         if action is None:
             log.info("credential_decision_without_recommendation", pending_id=pending_id)
             return
-        await self._decide(action.id, key, decided_by, decision)
+        await self._decide(action.id, key, decided_by, decision, reason=reason)
 
     async def credential_decided_safely(self, pending_id: Any, decided_by: str,
-                                        decision: DecisionValue, key: str) -> None:
+                                        decision: DecisionValue, key: str,
+                                        reason: str | None = None) -> None:
         try:
-            await self.credential_decided(pending_id, decided_by, decision, key)
+            await self.credential_decided(pending_id, decided_by, decision, key, reason)
         except Exception:
             log.error("provenance_write_failed", pending_id=pending_id, decision=decision,
                       exc_info=True)
@@ -686,6 +705,23 @@ class ProvenanceRecorder:
             diff = fields_diff(facts.proposed, facts.args, fields)
             await self._decide(action.id, facts.call_key, _approver(facts),
                                "edited" if diff["changed"] else "accepted", diff)
+
+
+    async def _alignment_proposed(self, facts: ToolCallFacts, result: dict[str, Any]) -> None:
+        """Only the second call, which returns a validated `proposal`, is recorded."""
+        proposal = result.get("proposal")
+        if not isinstance(proposal, dict):
+            return
+        assignment = as_uuid(result.get("assignment_node")) or as_uuid(
+            facts.args.get("assignment_node"))
+        syllabus = result.get("syllabus")
+        extra = [s for s in (source("node", assignment),
+                             source("content_item", syllabus.get("content_id")
+                                    if isinstance(syllabus, dict) else None)) if s]
+        await self._action(facts, "generation", target=ALIGNMENT_TARGET, target_id=assignment,
+                           output={"tool": facts.tool, "assignment_node": assignment,
+                                   "proposal": proposal},
+                           course=as_uuid(result.get("course_id")), extra_sources=extra)
 
 
 def _pick(args: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:

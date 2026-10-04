@@ -43,5 +43,6 @@ agent:
   - assessments.list_submission_history
   - assessments.draft_grade
   - assessments.commit_grade
+  - assessments.grading_status
   composable_with: []
   requires_human_approval: true

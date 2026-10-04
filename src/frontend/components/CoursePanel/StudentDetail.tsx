@@ -5,6 +5,7 @@ import { useSession } from "@/lib/session-context";
 import { useAuth } from "@/lib/auth-context";
 import { useApiGet } from "@/lib/use-api";
 import { AccessDenied } from "@/components/common/AccessDenied";
+import { AccessLogCanvas } from "@/components/Canvas/AccessLogCanvas";
 import { TranscriptView } from "./TranscriptView";
 
 interface StudentInfo {
@@ -92,6 +93,8 @@ function FacultyStudentView({
           {sessions.length} tutoring session{sessions.length !== 1 ? "s" : ""}
         </div>
       </div>
+
+      <AccessLogCanvas subjectId={student.id} subjectName={student.name} />
 
       {forbidden ? (
         <AccessDenied />
@@ -185,6 +188,8 @@ function AdvisorStudentView({
           Enrolled in {courses.length} course{courses.length !== 1 ? "s" : ""}
         </div>
       </div>
+
+      <AccessLogCanvas subjectId={student.id} subjectName={student.name} />
 
       {forbidden ? (
         <AccessDenied />

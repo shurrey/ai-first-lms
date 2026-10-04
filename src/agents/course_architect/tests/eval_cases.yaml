@@ -70,3 +70,107 @@ cases:
         - drafts_before_asking: true
         - lists_defaults_used: true
         - draft_saved_via_tool: true
+
+  # Assignment alignment (spec.md §7.6). reference_proposal is a valid proposal block for
+  # the candidate outcomes; eval_harness.alignment_proposal_errors scores a run the same way.
+  - id: ca-alignment-proposal-eng102-essay
+    inputs:
+      message: "Propose an alignment for assignment node-essay-2."
+      persona: faculty
+      course_id: eng102
+      assignment_node: node-essay-2
+      candidate_outcomes:
+        - {node_id: out-thesis, title: Thesis Development, score: 0.91}
+        - {node_id: out-evidence, title: "Evidence & Reasoning", score: 0.88}
+        - {node_id: out-sources, title: Source Integration, score: 0.74}
+        - {node_id: out-rhetoric, title: Rhetorical Analysis, score: 0.41}
+    expected:
+      artifact_types: [content_draft]
+      assertions:
+        - emits_artifact: content_draft
+        - uses_tool: assessments.propose_alignment
+        - proposal_valid: true
+        - outcomes_only_from_candidates: true
+        - criteria_count_between: [3, 6]
+        - does_not_call: content.save_draft
+        - each_proposal_separately_decidable: true
+      reference_proposal:
+        title: "Alignment proposal: Essay 2"
+        kind: alignment_proposal
+        assignment_node: node-essay-2
+        outcomes:
+          - {node_id: out-thesis, title: Thesis Development, reason: The prompt asks for a position on a question.}
+          - {node_id: out-evidence, title: "Evidence & Reasoning", reason: The prompt asks for two sources and a counterargument.}
+          - {node_id: out-sources, title: Source Integration, reason: Sources must be attributed and cited.}
+        criteria:
+          - key: thesis
+            description: States a clear, arguable position on the question.
+            outcome_nodes: [out-thesis]
+            levels:
+              - {score: 1, label: Beginning, descriptor: No identifiable position.}
+              - {score: 2, label: Developing, descriptor: Position is vague or hedged.}
+              - {score: 3, label: Proficient, descriptor: Clear, arguable position stated early.}
+              - {score: 4, label: Exemplary, descriptor: Precise, qualified position that frames the essay.}
+          - key: evidence
+            description: Supports the position with relevant, attributed sources.
+            outcome_nodes: [out-evidence, out-sources]
+            levels:
+              - {score: 1, label: Beginning, descriptor: No source evidence.}
+              - {score: 2, label: Developing, descriptor: One source, or sources not tied to the claim.}
+              - {score: 3, label: Proficient, descriptor: Two relevant sources tied to the claim.}
+              - {score: 4, label: Exemplary, descriptor: Well-chosen sources that advance the argument.}
+          - key: analysis
+            description: Explains how the evidence supports the claim and answers an objection.
+            outcome_nodes: [out-evidence]
+            levels:
+              - {score: 1, label: Beginning, descriptor: Summary only.}
+              - {score: 2, label: Developing, descriptor: Counterargument missing or dismissed.}
+              - {score: 3, label: Proficient, descriptor: One counterargument addressed.}
+              - {score: 4, label: Exemplary, descriptor: Counterargument engaged fairly and answered.}
+          - key: writing_mechanics
+            description: Organization, clarity, grammar and citation.
+            outcome_nodes: [out-sources]
+            levels:
+              - {score: 1, label: Beginning, descriptor: Frequent errors obscure meaning.}
+              - {score: 2, label: Developing, descriptor: Noticeable errors distract the reader.}
+              - {score: 3, label: Proficient, descriptor: Clear, few errors, sources cited.}
+              - {score: 4, label: Exemplary, descriptor: Polished prose with consistent citation.}
+
+  - id: ca-alignment-keeps-existing-criteria
+    inputs:
+      message: "I edited Essay 2. Which outcomes does it test now?"
+      persona: faculty
+      course_id: eng102
+      assignment_node: node-essay-2
+      existing_criteria: [thesis, evidence]
+    expected:
+      artifact_types: [content_draft]
+      assertions:
+        - emits_artifact: content_draft
+        - uses_tool: assessments.propose_alignment
+        - keeps_existing_criterion_keys: [thesis, evidence]
+        - criteria_count_between: [3, 6]
+
+  - id: ca-alignment-without-syllabus
+    inputs:
+      message: "Propose an alignment for assignment node-lab-1."
+      persona: instructional_designer
+      course_id: bio150
+      assignment_node: node-lab-1
+      syllabus: null
+    expected:
+      artifact_types: [content_draft]
+      assertions:
+        - emits_artifact: content_draft
+        - says_based_on_outcomes_alone: true
+        - outcomes_only_from_candidates: true
+
+  - id: ca-alignment-not-for-admin
+    inputs:
+      message: "Propose an alignment for assignment node-essay-2."
+      persona: admin
+      course_id: eng102
+    expected:
+      assertions:
+        - does_not_call: assessments.propose_alignment
+        - says_alignment_is_for_course_faculty: true

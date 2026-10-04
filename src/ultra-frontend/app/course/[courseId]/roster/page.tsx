@@ -4,6 +4,8 @@ import { use, useEffect, useState } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { apiFetch } from "@/lib/api";
 import { NoAccess } from "@/components/NoAccess";
+import Link from "next/link";
+import { canReadAccessLog } from "@/lib/assessment";
 import { Search, ChevronRight, MessageSquare, User } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -47,7 +49,7 @@ export default function RosterPage({ params }: { params: Promise<{ courseId: str
   }
 
   if (!capabilities.roster) return <NoAccess />;
-  return <FacultyRoster courseId={courseId} />;
+  return <FacultyRoster courseId={courseId} showAccessLog={canReadAccessLog(capabilities)} />;
 }
 
 function StudentOwnSessions({ courseId, personId, displayName }: { courseId: string; personId: string | null; displayName: string }) {
@@ -133,7 +135,7 @@ function StudentOwnSessions({ courseId, personId, displayName }: { courseId: str
   );
 }
 
-function FacultyRoster({ courseId }: { courseId: string }) {
+function FacultyRoster({ courseId, showAccessLog }: { courseId: string; showAccessLog: boolean }) {
   const [students, setStudents] = useState<RosterStudent[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -256,6 +258,14 @@ function FacultyRoster({ courseId }: { courseId: string }) {
               <p className="text-xs text-gray-500">
                 {selectedStudent.session_count} tutoring session{selectedStudent.session_count !== 1 ? "s" : ""} · {selectedStudent.total_turns} total messages
               </p>
+              {showAccessLog && (
+                <Link
+                  href={`/learners/${selectedStudent.id}/access-log?name=${encodeURIComponent(selectedStudent.name)}`}
+                  className="mt-2 inline-block text-sm text-[#1a5fb4] underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#1a73e8]"
+                >
+                  Data access log
+                </Link>
+              )}
             </div>
 
             <h4 className="text-xs font-semibold text-gray-500 uppercase mb-3">Tutoring Sessions</h4>

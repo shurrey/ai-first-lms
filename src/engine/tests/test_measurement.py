@@ -17,6 +17,7 @@ from engine.measurement import (
     DecisionRecord,
     LinkRecord,
     Program,
+    ReleasedCriterion,
     criterion_changes,
     criterion_uuid,
     decision_rates,
@@ -499,6 +500,86 @@ async def test_learner_view_strips_decision_diff_and_reason(authed_client, data,
     assert faculty["decisions"][-1]["reason"] == "Too generous on thesis"
 
 
+
+def _reviewed_feedback(data: Data, auth_world: AuthWorld) -> tuple[str, dict[str, str]]:
+    """Feedback on three criteria released after review: evidence edited 2 -> 3 with a new
+    rationale and next step, thesis suppressed (the latest decision), organization as is."""
+    fid, crit = _id(), {k: _id() for k in ("evidence", "thesis", "organization")}
+    data.store.actions.append(ActionRecord(
+        id=fid, agent="feedback", action_type="criterion_feedback",
+        output={"submission_id": _id(), "dropped_spans": {crit["evidence"]: [{"quote": "x"}]},
+                "criteria": [{"criterion_id": cid, "key": key, "ai_score": 2,
+                              "ai_rationale": f"AI on {key}", "evidence_spans": [],
+                              "next_step": f"AI step for {key}"}
+                             for key, cid in crit.items()]},
+        created_at=BASE + timedelta(hours=9), subject_person=auth_world.people["student"].id,
+        course_node=CS101.course_id))
+    data.store.released_actions.add(fid)
+    data.store.released_criteria[fid] = {
+        crit["evidence"]: ReleasedCriterion(3, "Instructor on evidence", []),
+        crit["organization"]: ReleasedCriterion(2, "AI on organization", [])}
+    torres = auth_world.people["faculty"].id
+    for hours, (key, decision, diff) in enumerate((
+            ("organization", "accepted", {}),
+            ("evidence", "edited", {"fields": {
+                "ai_score": {"before": 2, "after": 3},
+                "next_step": {"before": "AI step for evidence", "after": "Cite two sources."}}}),
+            ("thesis", "rejected", {}))):
+        data.store.decisions.append(DecisionRecord(
+            id=_id(), ai_action_id=fid, decided_by=torres, decision=decision,
+            decided_at=BASE + timedelta(hours=10 + hours),
+            diff={"criterion_id": crit[key], **diff}))
+    return fid, crit
+
+
+@pytest.mark.parametrize("actor", ["student", "advisor"])
+async def test_learner_view_shows_reviewed_feedback_as_released(
+        authed_client, auth_world, data, actor):
+    fid, _ = _reviewed_feedback(data, auth_world)
+    client = await authed_client(actor)
+
+    detail = (await client.get(f"/api/ai-actions/{fid}")).json()
+    listed = next(i for i in await _list(client) if i["id"] == fid)
+    staff = (await (await authed_client("faculty")).get(f"/api/ai-actions/{fid}")).json()
+
+    for item in (detail, listed):
+        assert [(c["key"], c["ai_score"], c["ai_rationale"], c["next_step"])
+                for c in item["output"]["criteria"]] == [
+            ("evidence", 3, "Instructor on evidence", "Cite two sources."),
+            ("organization", 2, "AI on organization", "AI step for organization")]
+        assert "dropped_spans" not in item["output"]
+        assert "AI on evidence" not in str(item) and "AI on thesis" not in str(item)
+    assert len(staff["output"]["criteria"]) == 3
+
+
+async def test_learner_view_hides_feedback_whose_every_criterion_was_suppressed(
+        authed_client, auth_world, data):
+    fid, _ = _reviewed_feedback(data, auth_world)
+    data.store.released_criteria[fid] = {}
+
+    client = await authed_client("student")
+
+    assert (await client.get(f"/api/ai-actions/{fid}")).status_code == 404
+
+
+async def test_learner_view_blanks_scores_the_course_hides_on_drafts(
+        authed_client, auth_world, data):
+    fid, crit = _reviewed_feedback(data, auth_world)
+    data.store.released_criteria[fid] = {
+        crit["organization"]: ReleasedCriterion(2, "AI on organization", [], hide_score=True)}
+
+    detail = (await (await authed_client("student")).get(f"/api/ai-actions/{fid}")).json()
+
+    assert [(c["key"], c["ai_score"]) for c in detail["output"]["criteria"]] == [
+        ("organization", None)]
+
+
+async def test_failed_feedback_runs_are_left_out_of_the_rates():
+    run = ActionRecord(id=_id(), agent="feedback", action_type="criterion_feedback",
+                       output={"failed": True, "reason": "agent_error"}, created_at=BASE)
+
+    assert summarize([run], {}, {}, _resolve)["rates"] == []
+
 async def test_learner_view_pages_past_hidden_items(authed_client, data):
     client = await authed_client("student")
     first = (await client.get("/api/ai-actions", params={"limit": 1})).json()
@@ -623,3 +704,194 @@ async def test_export_succeeds_when_the_access_log_write_fails(authed_client, au
 async def test_export_requires_course_id(authed_client, data):
     client = await authed_client("admin")
     assert (await client.get("/api/measurement/export")).status_code == 422
+
+
+# --- outcome links in the learner view ------------------------------------------------------
+
+
+def _linked_feedback(data: Data, auth_world: AuthWorld) -> tuple[str, dict[str, str]]:
+    """Released feedback (evidence and organization shown, thesis suppressed) with one link
+    per kind of observation; see the test for which the learner may see."""
+    fid, crit = _reviewed_feedback(data, auth_world)
+    revision, at = _id(), BASE + timedelta(days=3)
+
+    def link(name: str, *, criterion: str | None = None, evidence: str | None = None,
+             attestation: str | None = None, submission: str | None = None) -> None:
+        delta = {"name": name, "before": 2, "after": 4}
+        if criterion:
+            delta["criterion_id"] = crit[criterion]
+        if submission:
+            delta["submission_id"] = submission
+        data.store.links.append(LinkRecord(fid, at, evidence_id=evidence,
+                                           attestation_id=attestation, delta=delta))
+
+    shown_ev, hidden_ev = _id(), _id()
+    link("released_rescore", criterion="evidence", submission=revision)
+    link("unreleased_rescore", criterion="organization", submission=revision)
+    link("visible_evidence", evidence=shown_ev)
+    link("draft_evidence", evidence=hidden_ev)
+    link("attestation", attestation=_id())
+    link("suppressed_criterion", criterion="thesis", submission=revision)
+    data.store.visible_scores |= {(revision, crit["evidence"]): 4, (revision, crit["thesis"]): 4}
+    data.store.visible_evidence[shown_ev] = None
+    return fid, crit
+
+
+@pytest.mark.parametrize("actor", ["student", "advisor"])
+async def test_learner_view_keeps_only_links_whose_observation_the_learner_can_see(
+        authed_client, auth_world, data, actor):
+    fid, _ = _linked_feedback(data, auth_world)
+    client = await authed_client(actor)
+
+    detail = (await client.get(f"/api/ai-actions/{fid}")).json()
+    listed = next(i for i in await _list(client) if i["id"] == fid)
+    staff = (await (await authed_client("faculty")).get(f"/api/ai-actions/{fid}")).json()
+
+    for item in (detail, listed):
+        assert sorted(x["delta"]["name"] for x in item["outcome_links"]) == [
+            "attestation", "released_rescore", "visible_evidence"]
+    assert len(staff["outcome_links"]) == 6
+
+
+@pytest.mark.parametrize("actor", ["student", "advisor"])
+async def test_learner_view_drops_links_on_criteria_whose_score_is_hidden(
+        authed_client, auth_world, data, actor):
+    fid, crit = _linked_feedback(data, auth_world)
+    data.store.released_criteria[fid] = {
+        crit["evidence"]: ReleasedCriterion(3, "Instructor on evidence", [], hide_score=True),
+        crit["organization"]: ReleasedCriterion(2, "AI on organization", [])}
+
+    detail = (await (await authed_client(actor)).get(f"/api/ai-actions/{fid}")).json()
+
+    assert sorted(x["delta"]["name"] for x in detail["outcome_links"]) == [
+        "attestation", "visible_evidence"]
+
+
+async def test_learner_view_shows_link_scores_as_the_learner_sees_them_now(
+        authed_client, auth_world, data):
+    fid, crit = _reviewed_feedback(data, auth_world)
+    revision = _id()
+    # Stored while the revision's AI score (2) was unreleased; it was edited to 3 on release.
+    data.store.links.append(LinkRecord(fid, BASE + timedelta(days=3), delta={
+        "kind": "criterion", "criterion_id": crit["evidence"], "before": 2, "after": 2,
+        "change": 0, "submission_id": revision}))
+    data.store.visible_scores[(revision, crit["evidence"])] = 3
+
+    student = (await (await authed_client("student")).get(f"/api/ai-actions/{fid}")).json()
+    staff = (await (await authed_client("faculty")).get(f"/api/ai-actions/{fid}")).json()
+
+    [link] = student["outcome_links"]
+    assert (link["delta"]["before"], link["delta"]["after"], link["delta"]["change"]) == (
+        3.0, 3.0, 0.0)
+    assert staff["outcome_links"][0]["delta"]["after"] == 2
+
+
+# --- practice is private (§12.5) ------------------------------------------------------------
+
+
+def _practice(data: Data, auth_world: AuthWorld, *, decision: str | None = "accepted") -> str:
+    emma = auth_world.people["student"].id
+    pid = _id()
+    data.store.actions.append(ActionRecord(
+        id=pid, agent="content_generator", action_type="practice_item",
+        output={"criterion_key": "evidence", "items": [{"stem": "Cite a source"}]},
+        created_at=BASE + timedelta(hours=11), subject_person=emma,
+        course_node=CS101.course_id, target_type="question_banks", target_id=_id()))
+    if decision:
+        data.store.decisions.append(DecisionRecord(
+            id=_id(), ai_action_id=pid, decided_by=emma, decision=decision,
+            decided_at=BASE + timedelta(hours=12), reason="Not for me"))
+    return pid
+
+
+async def test_practice_items_and_their_decisions_are_shown_only_to_their_learner(
+        authed_client, auth_world, data):
+    auth_world.directory.programs[auth_world.people["faculty"].id] = frozenset(
+        {CS101.course_id})
+    pid = _practice(data, auth_world)
+
+    student = await authed_client("student")
+    assert pid in {i["id"] for i in await _list(student)}
+    mine = (await student.get(f"/api/ai-actions/{pid}")).json()
+    assert [d["decision"] for d in mine["decisions"]] == ["accepted"]
+
+    for actor in ("faculty", "advisor", "admin", "program_lead"):
+        client = await authed_client(actor)
+        assert pid not in {i["id"] for i in await _list(client)}, actor
+        assert pid not in {i["id"] for i in await _list(client, action_type="practice_item")}
+        assert (await client.get(f"/api/ai-actions/{pid}")).status_code == 404, actor
+
+
+@pytest.mark.parametrize("actor", ["faculty", "admin"])
+async def test_export_leaves_out_practice_items_and_their_decisions(
+        authed_client, auth_world, data, actor):
+    pid = _practice(data, auth_world)
+
+    resp = await (await authed_client(actor)).get(
+        "/api/measurement/export", params={"course_id": CS101.course_id})
+
+    body = resp.json()
+    assert pid not in {a["id"] for a in body["ai_actions"]}
+    assert pid not in {d["ai_action_id"] for d in body["human_decisions"]}
+    assert "Not for me" not in resp.text
+
+
+async def test_course_measurement_counts_practice_without_rating_it(authed_client, auth_world,
+                                                                    data):
+    _practice(data, auth_world, decision="accepted")
+    _practice(data, auth_world, decision="dismissed")
+    _practice(data, auth_world, decision=None)
+
+    body = (await (await authed_client("faculty")).get(
+        f"/api/measurement/courses/{CS101.course_id}")).json()
+
+    assert "practice_item" not in {r["action_type"] for r in body["rates"]}
+    assert body["practice"] == {"generated": 3, "started": 1, "dismissed": 1}
+
+
+# --- feedback on drafts ----------------------------------------------------------------------
+
+
+def _draft_feedback(data: Data, auth_world: AuthWorld) -> str:
+    fid, _ = _reviewed_feedback(data, auth_world)
+    action = next(a for a in data.store.actions if a.id == fid)
+    draft = _id()
+    data.store.actions.remove(action)
+    data.store.actions.append(replace(action, target_type="submissions", target_id=draft))
+    data.store.draft_submissions.add(draft)
+    return fid
+
+
+async def test_draft_feedback_is_shown_to_its_learner_and_the_courses_faculty_only(
+        authed_client, auth_world, data):
+    auth_world.directory.programs[auth_world.people["faculty"].id] = frozenset(
+        {CS101.course_id})
+    fid = _draft_feedback(data, auth_world)
+
+    for actor in ("student", "faculty"):
+        client = await authed_client(actor)
+        assert fid in {i["id"] for i in await _list(client)}, actor
+        assert (await client.get(f"/api/ai-actions/{fid}")).status_code == 200, actor
+    for actor in ("advisor", "admin", "program_lead"):
+        client = await authed_client(actor)
+        assert fid not in {i["id"] for i in await _list(client)}, actor
+        assert (await client.get(f"/api/ai-actions/{fid}")).status_code == 404, actor
+
+
+async def test_draft_feedback_is_exported_and_rated_only_for_the_courses_faculty(
+        authed_client, auth_world, data):
+    fid = _draft_feedback(data, auth_world)
+    params = {"course_id": CS101.course_id}
+    path = f"/api/measurement/courses/{CS101.course_id}"
+
+    faculty, admin = await authed_client("faculty"), await authed_client("admin")
+    staff_export = (await faculty.get("/api/measurement/export", params=params)).json()
+    admin_export = (await admin.get("/api/measurement/export", params=params)).json()
+    staff_rates = (await faculty.get(path)).json()["rates"]
+    admin_rates = (await admin.get(path)).json()["rates"]
+
+    assert fid in {a["id"] for a in staff_export["ai_actions"]}
+    assert fid not in {a["id"] for a in admin_export["ai_actions"]}
+    assert fid not in {d["ai_action_id"] for d in admin_export["human_decisions"]}
+    assert "criterion_feedback" in {r["action_type"] for r in staff_rates}
+    assert "criterion_feedback" not in {r["action_type"] for r in admin_rates}

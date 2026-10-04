@@ -9,6 +9,11 @@ import asyncpg
 
 from data_mcp.mcp_base import ToolDef
 from data_mcp.mcp_servers._helpers import resolve_concept_id, validation_error
+from data_mcp.mcp_servers.content.formative import (
+    BLOOM_LEVELS,
+    DIFFICULTIES,
+    formative_content_handlers,
+)
 
 # Values of the edge_kind enum in contracts/db-schema.sql.
 EDGE_KINDS = frozenset({
@@ -42,6 +47,7 @@ def _parse_edge_kinds(raw: Any) -> list[str] | None:
 
 def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
     """Return all content server tool definitions."""
+    formative = formative_content_handlers(pool)
 
     async def retrieve(args: dict[str, Any]) -> dict[str, Any]:
         node_id = args.get("node_id")
@@ -542,5 +548,55 @@ def get_tools(pool: asyncpg.Pool) -> list[ToolDef]:
             },
             handler=list_skills,
             mutates=False,
+        ),
+        ToolDef(
+            name="content.generate_practice",
+            description=(
+                "Save a targeted practice set (3-5 items the agent wrote) for one student and "
+                "one rubric criterion; items are aligned to the criterion's outcomes"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "criterion_id": {"type": "string"},
+                    "student_id": {"type": "string"},
+                    "count": {"type": "integer"},
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": {"type": "string",
+                                         "enum": ["mcq", "short_answer", "essay", "code"]},
+                                "stem": {"type": "string"},
+                                "options": {"type": "object"},
+                                "answer_key": {"type": "object"},
+                                "bloom_level": {"type": "string", "enum": sorted(BLOOM_LEVELS)},
+                                "difficulty": {"type": "string", "enum": sorted(DIFFICULTIES)},
+                            },
+                            "required": ["type", "stem", "answer_key", "bloom_level"],
+                        },
+                    },
+                },
+                "required": ["criterion_id", "student_id", "count", "items"],
+            },
+            handler=formative["content.generate_practice"],
+            mutates=True,
+        ),
+        ToolDef(
+            name="graph.subgraph_for_outcomes",
+            description=(
+                "Concepts, modules and assessments linked to the given outcomes over "
+                "aligned_with, part_of and contributes_to edges"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "outcome_ids": {"type": "array", "items": {"type": "string"}},
+                    "depth": {"type": "integer"},
+                },
+                "required": ["outcome_ids"],
+            },
+            handler=formative["graph.subgraph_for_outcomes"],
         ),
     ]

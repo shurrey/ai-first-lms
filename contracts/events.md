@@ -161,6 +161,13 @@ interface ApprovalRequestPayload {
 | `feedback.release` (under `feedback.release_mode = instructor_release`) | `feedback_release` | planned (T-E-107, T-E-116) |
 | `policy.set` | `policy_change` | planned (T-E-107, T-E-116) |
 
+For `grade_commit`, `preview.artifact` carries the drafted grade (`grade`: `grade_id`,
+`submission_id`, `rubric_id`, the AI's draft `scores`, `feedback`, `holistic_md`), the
+`submission` and `student`, and `requires = { final_scores: string[], holistic_md: true }`:
+the criterion keys the approver must score. The approver answers with decision `edit` and
+`edited_payload = { grade_id, final_scores, holistic_md, feedback? }` (see `POST /api/approval`);
+a plain `approve` is refused with 422. Change: T-C-118.
+
 ### `final`
 
 The turn is complete. The orchestrator's final answer and any artifacts.
@@ -266,9 +273,9 @@ interface PolicyContextPayload {
 
 ### `feedback_ready`
 
-**Status: planned** — T-E-116 (spec.md §7.3, §8.4 `feedback.release_mode`); consumed by T-F-106.
+**Status: REST only** (Round 2 Phase 2, spec.md §7.3). Draft feedback is generated and released outside any chat turn, so this event is never pushed on SSE. Clients poll `GET /api/feedback/{submission_id}` until `status` is `released`, `suppressed` or `failed` (stop polling; `POST /api/feedback/{submission_id}/retry` starts another run, T-C-119); that response carries the same `submission_id`, `release_mode` and per-criterion `released_at`. T-E-116 moves `feedback.release_mode` into the policy registry; consumed by T-F-106.
 
-Emitted when criterion-level formative feedback on a submission becomes visible to the student: immediately after the feedback agent saves it under `auto`, or when faculty release it under `instructor_release`.
+Would be emitted when criterion-level formative feedback on a submission becomes visible to the student: immediately after the feedback agent saves it under `auto`, or when faculty release it under `instructor_release`.
 
 ```typescript
 interface FeedbackReadyPayload {

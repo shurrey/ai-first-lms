@@ -3,10 +3,10 @@ import type { BrowserContext, Page, Request, Route } from "@playwright/test";
 /** Origin baked into NEXT_PUBLIC_API_URL for the smoke dev server; never resolvable. */
 export const FAKE_API_ORIGIN = "http://api.smoke.test";
 
-export const CS101_ID = "bdd640fb-0667-4ad1-9c80-317fa3b1799d";
-export const MATH201_ID = "23b8c1e9-3924-46de-beb1-3b9046685257";
-export const BIO150_ID = "972a8469-1641-4f82-8b9d-2434e465e150";
-export const EMMA_ID = "5be6128e-18c2-4797-a142-ea7d17be3111";
+import { BIO150_ID, CS101_ID, EMMA_ID, MATH201_ID } from "./ids";
+import { handleAssessment, newAssessmentState, type AssessmentState } from "./fake-assessment";
+
+export { BIO150_ID, CS101_ID, EMMA_ID, MATH201_ID };
 
 export const SMOKE_CSRF = "smoke-csrf-token";
 
@@ -40,6 +40,7 @@ export const EMMA_ME: FakeMe = {
   capabilities: {
     course_list: self("read"),
     tutor_chat: self(),
+    submit_work: self(),
     mastery_matrix: self("read"),
     improvement_view: self("read"),
     ai_actions_log: self("read"),
@@ -53,6 +54,8 @@ export const EMMA_ME: FakeMe = {
 const FACULTY_CAPS = {
   course_list: own(),
   tutor_chat: own(),
+  feedback_release: own(),
+  grade_commit: own(),
   mastery_matrix: own(),
   roster: own(),
   badge_approve: own(),
@@ -158,6 +161,7 @@ export const CS101_MEASUREMENT = {
     { criterion_id: "c0000000-0000-4000-8000-000000000002", criterion_key: "evidence_use", edit_count: 3, edit_rate: 0.3 },
   ],
   offloading: { hint_dependency_ratio: 0.25, solution_check_trips: 2 },
+  practice: { generated: 4, started: 3, dismissed: 1 },
 };
 
 // MeasurementRollup in contracts/api.openapi.yaml.
@@ -316,6 +320,8 @@ export interface FakeEngine {
   onLogin?: () => Promise<void>;
   /** username -> /me returned by POST /api/auth/login; anything else is a 401. */
   accounts: Record<string, { password: string; me: FakeMe }>;
+  /** Mutable formative-loop data (fake-assessment.ts). */
+  assessment: AssessmentState;
 }
 
 export function corsHeaders(req: Request): Record<string, string> {
@@ -360,6 +366,7 @@ export async function mockEngine(page: Page, opts: Partial<Pick<FakeEngine, "me"
     statusOverrides: {},
     accounts: opts.accounts ?? {},
     onLogin: opts.onLogin,
+    assessment: newAssessmentState(),
   };
 
   await page.route(`${FAKE_API_ORIGIN}/**`, async (route) => {
@@ -525,6 +532,9 @@ export async function mockEngine(page: Page, opts: Partial<Pick<FakeEngine, "me"
         ],
       });
     }
+
+    const assessed = handleAssessment(engine.assessment, me.active_role, method, path, url, body);
+    if (assessed) return json(route, assessed.body, assessed.status);
 
     engine.unhandled.push(`${method} ${path}${url.search}`);
     return json(route, { detail: "not mocked" }, 404);

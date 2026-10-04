@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import clsx from "clsx";
 import { useAuth } from "@/lib/auth-context";
+import { showsAssignmentsTab, showsReviewQueueTab } from "@/lib/assessment";
 import type { Capabilities, Enrollment, Role } from "@/lib/types";
 
 interface Tab {
@@ -42,6 +43,9 @@ function courseTabs(base: string, role: Role, caps: Capabilities, isScope: boole
   }
   const isStudent = role === "student";
   const tabs: Tab[] = [{ label: "Content", href: base }];
+  if (showsAssignmentsTab(role, caps)) tabs.push({ label: "Assignments", href: `${base}/assignments` });
+  if (showsReviewQueueTab(caps)) tabs.push({ label: "Review Queue", href: `${base}/review` });
+  if (!isStudent && caps.improvement_view) tabs.push({ label: "Improvement", href: `${base}/improvement` });
   if (caps.mastery_matrix) tabs.push({ label: "Attestations", href: `${base}/gradebook` });
   if (isStudent || caps.roster) tabs.push({ label: isStudent ? "Sessions" : "Roster", href: `${base}/roster` });
   if (credentialsView(role, caps)) tabs.push({ label: "Badges", href: `${base}/credentials` });

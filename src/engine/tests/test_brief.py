@@ -20,8 +20,12 @@ ROSTER = {
 
 CONTEXT = {
     "recent_evidence": [
-        {"title": "Quiz 1", "kind": "quiz", "score": 0.8},
-        {"title": "Lab 1", "kind": "lab", "score": 0.6},
+        {"node_id": "n-quiz-1", "title": "Quiz 1", "kind": "attempt", "score": 0.8,
+         "observed_at": "2026-09-20T10:00:00+00:00", "source": "quiz_engine",
+         "visibility": "course"},
+        {"node_id": "n-lab-1", "title": "Lab 1", "kind": "artifact_submission", "score": 0.6,
+         "observed_at": "2026-09-19T10:00:00+00:00", "source": "grading_assistant",
+         "visibility": "course"},
     ]
 }
 
@@ -119,3 +123,97 @@ async def test_roster_page_leaves_profile_attributes_out(
 
     students = [p for p in data["persons"] if p["role"] == "student"]
     assert [p["attributes"] for p in students] == [{"major": "CS"}, {"major": "CS"}]
+
+
+async def test_the_student_brief_reads_evidence_as_the_learner(monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def record(server: str, tool: str, args: dict[str, Any]) -> dict[str, Any]:
+        if tool == "assessments.list_recent_evidence":
+            calls.append(args)
+        if tool.startswith("graph."):
+            return {}
+        return await _fake_call_mcp(server, tool, args)
+
+    monkeypatch.setattr(brief, "_call_mcp", record)
+
+    await brief.StudentBriefGatherer().gather("s1", COURSE_ID)
+
+    assert calls == [{"person_id": "s1", "course_id": COURSE_ID, "requester_id": "s1"}]
+
+
+PRACTICE = {"node_id": "n-recursion", "title": "Recursion", "kind": "attempt", "score": 0.25,
+            "observed_at": "2026-09-21T10:00:00+00:00", "source": "practice",
+            "visibility": "private"}
+
+
+def _context_with_practice(server_filters: bool):
+    async def call_mcp(server: str, tool: str, args: dict[str, Any]) -> dict[str, Any]:
+        if tool == "roster.get_student_context":
+            own = args.get("requester_id") == args["person_id"]
+            rows = list(CONTEXT["recent_evidence"])
+            if own or not server_filters:
+                rows.append(PRACTICE)
+            return {"recent_evidence": rows}
+        return await _fake_call_mcp(server, tool, args)
+    return call_mcp
+
+
+@pytest.mark.parametrize("server_filters", [True, False])
+@pytest.mark.parametrize("persona", ["faculty", "admin", "advisor"])
+async def test_the_staff_gradebook_never_shows_practice_evidence(
+    generator: BriefGenerator, monkeypatch: pytest.MonkeyPatch, persona: str,
+    server_filters: bool,
+) -> None:
+    monkeypatch.setattr(brief, "_call_mcp", _context_with_practice(server_filters))
+
+    data = await generator._page_gradebook(persona, "staff-1", COURSE_ID)
+
+    assert all("Recursion" not in s["grades"] for s in data["students"])
+    assert "Recursion" not in data["assignments"]
+    assert data["students"][0]["overall"] == 0.7
+
+
+@pytest.mark.parametrize("persona", ["faculty", "admin", "advisor"])
+async def test_the_staff_gradebook_leaves_out_evidence_not_marked_shared(
+    generator: BriefGenerator, monkeypatch: pytest.MonkeyPatch, persona: str,
+) -> None:
+    unmarked = {"title": "Recursion", "kind": "attempt", "score": 0.25}
+
+    async def call_mcp(server: str, tool: str, args: dict[str, Any]) -> dict[str, Any]:
+        if tool == "roster.get_student_context":
+            return {"recent_evidence": [*CONTEXT["recent_evidence"], unmarked]}
+        return await _fake_call_mcp(server, tool, args)
+
+    monkeypatch.setattr(brief, "_call_mcp", call_mcp)
+
+    data = await generator._page_gradebook(persona, "staff-1", COURSE_ID)
+
+    assert all("Recursion" not in s["grades"] for s in data["students"])
+
+
+async def test_the_gradebook_reads_student_context_as_the_viewer(
+    generator: BriefGenerator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def record(server: str, tool: str, args: dict[str, Any]) -> dict[str, Any]:
+        if tool == "roster.get_student_context":
+            calls.append(args)
+        return await _fake_call_mcp(server, tool, args)
+
+    monkeypatch.setattr(brief, "_call_mcp", record)
+
+    await generator._page_gradebook("faculty", "f1", COURSE_ID)
+
+    assert calls and {c["requester_id"] for c in calls} == {"f1"}
+
+
+async def test_a_student_sees_their_own_practice_in_the_gradebook(
+    generator: BriefGenerator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(brief, "_call_mcp", _context_with_practice(server_filters=True))
+
+    data = await generator._page_gradebook("student", "s1", COURSE_ID)
+
+    assert data["students"][0]["grades"]["Recursion"] == 0.25

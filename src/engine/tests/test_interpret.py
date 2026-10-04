@@ -229,6 +229,18 @@ async def test_classifier_cannot_route_a_student_to_learning_analyst(caplog):
     assert "learning_analyst" in caplog.text
 
 
+@pytest.mark.parametrize("persona", ["student", "faculty"])
+async def test_classifier_cannot_route_a_chat_turn_to_the_feedback_agent(persona):
+    set_llm_client(MockLLMClient({"action": "feedback", "agent": "feedback",
+                                  "parameters": {"agents": ["feedback", "tutor"]},
+                                  "confidence": 0.95}))
+
+    result = await interpret({**_student_state(), "persona": persona})
+
+    assert result["interpretation"]["agent"] == "tutor"
+    assert result["interpretation"]["parameters"]["agents"] == ["tutor"]
+
+
 async def test_classifier_cannot_route_a_student_to_a_staff_agent():
     set_llm_client(MockLLMClient({"action": "grade", "agent": "grading_assistant",
                                   "parameters": {}, "confidence": 0.95}))

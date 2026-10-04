@@ -22,6 +22,7 @@ from engine.guardrails.approval import (
 )
 from engine.guardrails.budget import ActiveClock, BudgetConfig, BudgetTracker
 from engine.guardrails.gateway import (
+    EditRejected,
     GatewayContext,
     PermissionDenied,
     ScopeDenied,
@@ -44,6 +45,8 @@ def auth_app(auth_world):
                       object_directory=_objects())
 
 COMMITTED = json.dumps({"committed": True, "committed_at": "2026-10-02T12:00:00Z"})
+INSTRUCTOR = {"final_scores": {"c1": 4}, "holistic_md": "Well argued; cite one more source."}
+COMMIT_EDIT = {"grade_id": "g1", **INSTRUCTOR}
 
 
 class FakeMcp:
@@ -204,17 +207,19 @@ async def test_gated_tool_is_held_until_approved(world):
     assert payload["step_id"] == "s1"
     assert payload["preview"]["arguments"] == {"grade_id": "g1"}
     assert payload["preview"]["artifact"]["grade"]["scores"] == {"c1": 3}
+    assert payload["preview"]["artifact"]["requires"] == {"final_scores": ["c1"],
+                                                          "holistic_md": True}
     assert rig.turns.rows[0].outcome == "gated"
     assert rig.turns.rows[0].args["approval_id"] == approval_id
 
-    await rig.decide("approve")
+    await rig.decide("edit", edited=COMMIT_EDIT)
     result = await call
 
     assert result.success
-    assert rig.mcp.calls_to("assessments.commit_grade") == [{"grade_id": "g1"}]
+    assert rig.mcp.calls_to("assessments.commit_grade") == [COMMIT_EDIT]
     assert rig.statuses.history == ["awaiting_approval", "active"]
     faculty_id = world.people["faculty"].id
-    assert result.approval == {"approval_id": approval_id, "decision": "approve",
+    assert result.approval == {"approval_id": approval_id, "decision": "edit",
                                "approved_by": faculty_id}
     assert rig.turns.rows[-1].outcome == "ok"
     assert rig.turns.rows[-1].args["approved_by"] == faculty_id
@@ -297,7 +302,7 @@ async def test_time_waiting_for_a_person_is_not_charged_to_the_budget(world):
         {"grade_id": "g1"}))
     await rig.pending()
     await asyncio.sleep(0.1)
-    await rig.decide("approve")
+    await rig.decide("edit", edited=COMMIT_EDIT)
 
     assert (await call).success
     assert budget.wall_time_ms < 50
@@ -355,7 +360,7 @@ async def test_grade_approval_uses_the_submissions_course_not_the_sessions(world
                                       {"grade_id": "g1"}, course_id="all")
 
     args = await rig.gateway.authorize_approver(request, auth_context(world, "faculty"),
-                                                request.tool_arguments)
+                                                {**request.tool_arguments, **INSTRUCTOR})
 
     assert args["grade_id"] == "g1"
 
@@ -465,12 +470,13 @@ async def test_approving_commits_once_with_the_approved_args(auth_app, authed_cl
     faculty = await authed_client("faculty")
     ids = await _start_grading_turn(auth_app, faculty)
 
-    resp = await faculty.post("/api/approval", json={**ids, "decision": "approve"})
+    resp = await faculty.post("/api/approval", json={**ids, "decision": "edit",
+                                                     "edited_payload": COMMIT_EDIT})
     assert resp.status_code == 202
     turn = await _wait_for(auth_app, ids["turn_id"], ("completed", "error"))
 
     assert turn.status == "completed"
-    assert live.mcp.calls_to("assessments.commit_grade") == [{"grade_id": "g1"}]
+    assert live.mcp.calls_to("assessments.commit_grade") == [COMMIT_EDIT]
     tool_result = live.claude.requests[2]["messages"][-1]["content"][0]["content"]
     assert "committed" in tool_result
     call = next(e["payload"] for e in turn.events if e["event"] == "agent_tool_call"
@@ -541,6 +547,65 @@ async def test_grader_becomes_the_approver(world):
                                       course_id=CS101.course_id)
     torres = auth_context(world, "faculty")
 
-    args = await rig.gateway.authorize_approver(request, torres, request.tool_arguments)
+    args = await rig.gateway.authorize_approver(request, torres,
+                                                {**request.tool_arguments, **INSTRUCTOR})
 
     assert args["graded_by"] == torres.person_id
+
+
+# --- commit_grade needs the instructor's final scores and closing comment (spec.md §7.9) --
+
+
+async def test_final_scores_the_model_proposes_never_reach_the_commit(world):
+    rig = Rig(world)
+    call = asyncio.create_task(rig.gateway.invoke(
+        rig.ctx(), "grading_assistant", "assessments.commit_grade",
+        {"grade_id": "g1", "final_scores": {"c1": 3}, "holistic_md": "Model's comment"}))
+
+    approval_id = await rig.pending()
+    assert rig.gate.get_pending(approval_id).tool_arguments == {"grade_id": "g1"}
+    with pytest.raises(EditRejected):
+        await rig.decide("approve")
+    rig.gate.resolve(ApprovalDecision(approval_id, "reject"),
+                     approver=auth_context(world, "faculty"))
+    await call
+    assert rig.mcp.calls_to("assessments.commit_grade") == []
+
+
+async def test_a_resume_without_instructor_inputs_is_refused_and_nothing_commits(world):
+    rig = Rig(world)
+    call = asyncio.create_task(rig.gateway.invoke(
+        rig.ctx(), "grading_assistant", "assessments.commit_grade", {"grade_id": "g1"}))
+    approval_id = await rig.pending()
+
+    rig.gate.resolve(ApprovalDecision(approval_id, "approve"),
+                     approver=auth_context(world, "faculty"),
+                     tool_arguments={"grade_id": "g1"})
+    result = await call
+
+    assert result.outcome == "denied_policy"
+    assert "final score" in result.guardrail["reason"]
+    assert rig.mcp.calls_to("assessments.commit_grade") == []
+
+
+async def test_every_rubric_criterion_needs_a_final_score(world):
+    rig = Rig(world)
+    rig.gateway.drafts.remember("grade", "g3", world.people["faculty"].id,
+                                {"submission_id": "sub1", "rubric_id": "r1",
+                                 "scores": {"Thesis": 3}})
+    rig.mcp.responses["assessments.get_rubric"] = {"id": "r1", "criteria": [
+        {"name": "Thesis"}, {"name": "Writing Mechanics"}]}
+    request = rig.gate.create_request("s1", "grading_assistant", "Commit grade", {},
+                                      "grade_commit", "assessments.commit_grade",
+                                      {"grade_id": "g3"}, course_id=CS101.course_id)
+    faculty = auth_context(world, "faculty")
+    comment = {"holistic_md": "Good work."}
+
+    with pytest.raises(EditRejected, match="Writing Mechanics"):
+        await rig.gateway.authorize_approver(
+            request, faculty, {"grade_id": "g3", "final_scores": {"thesis": 3}, **comment})
+    args = await rig.gateway.authorize_approver(
+        request, faculty,
+        {"grade_id": "g3", "final_scores": {"thesis": 3, "writing_mechanics": 2}, **comment})
+
+    assert args["final_scores"] == {"Thesis": 3, "Writing Mechanics": 2}

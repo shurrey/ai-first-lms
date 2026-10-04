@@ -75,14 +75,22 @@ def _allowed_roles(tool: str) -> set[str]:
     return set(re.findall(r"`([a-z_]+)`", line))
 
 
-SHARED_WRITES = ("content.save_draft", "content.save_skill")
+ROLE_LIMITED_TOOLS = (
+    "content.save_draft",
+    "content.save_skill",
+    "content.generate_practice",
+    "assessments.propose_alignment",
+    "graph.subgraph_for_outcomes",
+)
+PROMPTED_AGENTS = sorted(p.parent.name for p in AGENTS_DIR.glob("*/system_prompt.md"))
 
 
-@pytest.mark.parametrize("name", AGENT_NAMES)
-def test_prompt_limits_shared_content_writes_to_allowed_roles(name: str):
-    # An agent serving roles the gateway refuses for these writes must tell the model so.
+@pytest.mark.parametrize("name", PROMPTED_AGENTS)
+def test_prompt_limits_role_limited_tools_to_allowed_roles(name: str):
+    # An agent serving roles the gateway refuses for these tools must tell the model so.
     agent = load_manifests()[name]
-    tools = [t for t in SHARED_WRITES if t in agent.get("mcp_tools", [])]
+    granted = set(agent.get("mcp_tools", [])) | set(agent.get("planned_mcp_tools") or [])
+    tools = [t for t in ROLE_LIMITED_TOOLS if t in granted]
     refused = {r for t in tools for r in set(agent["persona_scope"]) - _allowed_roles(t)}
     if not refused:
         return
@@ -92,3 +100,6 @@ def test_prompt_limits_shared_content_writes_to_allowed_roles(name: str):
     body = section[1].split("\n## ", 1)[0]
     for role in refused | {r for t in tools for r in _allowed_roles(t)}:
         assert f"`{role}`" in body, role
+    for tool in tools:
+        if set(agent["persona_scope"]) - _allowed_roles(tool):
+            assert f"`{tool}`" in body, tool

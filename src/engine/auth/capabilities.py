@@ -98,6 +98,7 @@ _MATRIX: dict[str, dict[str, Grant]] = {
         "program_outcome_report": _g("all", "full"),
         "deletion_request_approval": _g("all", "full"),
         "system_settings": _g("all", "full"),
+        "access_log": _g("all", "read"),
     },
 }
 

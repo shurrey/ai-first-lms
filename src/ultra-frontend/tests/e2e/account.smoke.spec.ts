@@ -92,7 +92,7 @@ test("tabs are filtered by capabilities", async ({ page }) => {
   await mockEngine(page, { me: EMMA_ME });
   await page.goto(`/course/${CS101_ID}`);
   const tabs = page.getByRole("navigation", { name: "Course" }).getByRole("link");
-  await expect(tabs).toHaveText(["Content", "Attestations", "Sessions", "Badges", "Analytics"]);
+  await expect(tabs).toHaveText(["Content", "Assignments", "Attestations", "Sessions", "Badges", "Analytics"]);
 
   await mockEngine(page, { me: { ...CHEN_ME, capabilities: { course_list: { scope: "own", access: "full" } } } });
   await page.goto(`/course/${MATH201_ID}`);

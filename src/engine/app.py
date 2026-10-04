@@ -12,13 +12,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from engine.agents.runner import _execute_mcp
+from engine.api.access_log import router as access_log_router
+from engine.api.alignment import router as alignment_router
 from engine.api.approval import router as approval_router
+from engine.api.assessment import router as assessment_router
 from engine.api.auth import router as auth_router
 from engine.api.converse import router as converse_router
 from engine.api.credentials import router as credentials_router
 from engine.api.decisions import router as decisions_router
 from engine.api.measurement import router as measurement_router
 from engine.api.podcast import router as podcast_router
+from engine.api.practice import router as practice_router
 from engine.api.roster import router as roster_router
 from engine.api.session import router as session_router
 from engine.api.stream import router as stream_router
@@ -31,6 +35,7 @@ from engine.auth.passwords import PasswordService
 from engine.auth.repository import PgAuthRepository, create_pool
 from engine.auth.service import AuthService
 from engine.db import SessionStore, TurnStore
+from engine.formative.locks import KeyedLocks
 from engine.guardrails.approval import ApprovalGate
 from engine.guardrails.gateway import ToolGateway
 from engine.guardrails.object_directory import ObjectDirectory, PgObjectDirectory
@@ -202,6 +207,7 @@ def create_app(
     app.state.provenance = ProvenanceRecorder(provenance) if provenance is not None else None
     app.state.db_pool = None
     app.state.background_tasks = set()
+    app.state.formative_locks = KeyedLocks()
     app.state.scheduler = None
 
     app.state.session_store = SessionStore()
@@ -224,6 +230,10 @@ def create_app(
     app.include_router(credentials_router)
     app.include_router(decisions_router)
     app.include_router(measurement_router)
+    app.include_router(assessment_router)
+    app.include_router(alignment_router)
+    app.include_router(practice_router)
+    app.include_router(access_log_router)
 
     setup_telemetry(app)
     return app

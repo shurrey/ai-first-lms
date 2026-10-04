@@ -4,7 +4,8 @@ GET /api/ai-actions[/{id}], /api/measurement/courses/{course_id}, /api/measureme
 and /api/measurement/export. Generated items about a learner the caller may not view
 individually (a program lead outside the courses they teach, or an export without that
 scope) carry a pseudonymous subject id and PII-filtered output; profile text is shown
-only to its subject (measurement.withhold_profile).
+only to its subject (measurement.withhold_profile). Practice items are their learner's alone
+and draft feedback is shown to that learner and the course's faculty (§12.5, `hidden_from`).
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import csv
 import io
 import json
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -37,6 +38,8 @@ from engine.auth.scope import (
 )
 from engine.logging_config import get_logger
 from engine.measurement import (
+    PRACTICE,
+    PRIVATE_TYPES,
     ActionQuery,
     ActionRecord,
     DecisionRecord,
@@ -46,7 +49,9 @@ from engine.measurement import (
     action_out,
     criterion_resolver,
     decision_rates,
+    learner_links,
     learner_visible,
+    practice_counts,
     source_refs,
     summarize,
 )
@@ -145,6 +150,15 @@ def learner_view(ctx: AuthContext) -> bool:
     return ctx.active_role in ("student", "advisor")
 
 
+def hidden_from(ctx: AuthContext) -> dict[str, Any]:
+    """ActionQuery fields leaving out what only others may see: practice items for anyone
+    but their learner, and feedback on draft submissions outside the courses the caller
+    teaches (their learner sees theirs through `learner_visible`)."""
+    if ctx.active_role == "student":
+        return {}
+    return {"exclude_types": PRIVATE_TYPES, "draft_feedback_courses": taught_course_ids(ctx)}
+
+
 def _narrow(scope: frozenset[str] | None, wanted: frozenset[str] | None
             ) -> frozenset[str] | None:
     if wanted is None:
@@ -191,6 +205,9 @@ async def _details(store: MeasurementStore, actions: list[ActionRecord]
 async def _serialize(ctx: AuthContext, store: MeasurementStore, actions: list[ActionRecord],
                      *, pseudonymize_all: bool = False) -> list[dict[str, Any]]:
     decisions, links = await _details(store, actions)
+    if learner_view(ctx) and links:
+        targets = await store.learner_link_targets(x for found in links.values() for x in found)
+        links = {a.id: learner_links(a, links.get(a.id, []), targets) for a in actions}
     titles = await store.source_titles(source_refs(actions)) if actions else {}
     return [action_out(a, decisions.get(a.id, []), links.get(a.id, []), titles,
                        viewer_id=ctx.person_id,
@@ -214,14 +231,22 @@ async def _page(ctx: AuthContext, store: MeasurementStore, query: ActionQuery, l
         batch_query = replace(batch_query, before=(last.created_at, last.id))
 
 
-async def _summary(store: MeasurementStore, course_ids: frozenset[str] | None,
-                   start: datetime | None, end: datetime
+async def _summary(ctx: AuthContext, store: MeasurementStore,
+                   course_ids: frozenset[str] | None, start: datetime | None, end: datetime
                    ) -> tuple[list[ActionRecord], dict[str, list[DecisionRecord]],
                               dict[str, Any]]:
-    actions = await store.find_actions(ActionQuery(end=end, start=start, course_ids=course_ids))
+    """Practice items are counted (`practice`), never rated, whoever asks."""
+    actions = await store.find_actions(ActionQuery(end=end, start=start, course_ids=course_ids,
+                                                   **hidden_from(ctx)))
+    actions = [a for a in actions if a.action_type not in PRIVATE_TYPES]
     decisions, links = await _details(store, actions)
     resolve = await criterion_resolver(store, actions, decisions)
-    return actions, decisions, summarize(actions, decisions, links, resolve)
+    practice = await store.find_actions(ActionQuery(end=end, start=start,
+                                                    course_ids=course_ids, action_type=PRACTICE))
+    counts = practice_counts(practice, await store.decisions_for([a.id for a in practice])
+                             if practice else {})
+    return actions, decisions, {**summarize(actions, decisions, links, resolve),
+                                "practice": counts}
 
 
 def _course_ref(course: CourseRef) -> dict[str, Any]:
@@ -264,7 +289,7 @@ async def list_ai_actions(
         subjects = _narrow(subjects, frozenset({subject_person_id}))
     query = ActionQuery(end=stop, start=begin, course_ids=courses, subject_ids=subjects,
                         agent=agent, action_type=action_type, decision=decision,
-                        before=decode_cursor(cursor) if cursor else None)
+                        before=decode_cursor(cursor) if cursor else None, **hidden_from(ctx))
     page, more = await _page(ctx, store, query, limit)
     return {"items": await _serialize(ctx, store, page),
             "next_cursor": encode_cursor(page[-1]) if more else None}
@@ -280,8 +305,16 @@ async def get_ai_action(ai_action_id: str, ctx: CurrentUser, directory: Director
     if not (_in_scope(action.course_node, courses) and _in_scope(action.subject_person,
                                                                  subjects)):
         raise forbidden()
-    if learner_view(ctx) and not await learner_visible(store, [action]):
+    hidden = hidden_from(ctx)
+    if hidden and not await store.find_actions(ActionQuery(
+            end=action.created_at + timedelta(microseconds=1), ids=frozenset({action.id}),
+            **hidden)):
         raise HTTPException(status_code=404, detail="No such generated item.")
+    if learner_view(ctx):
+        shown = await learner_visible(store, [action])
+        if not shown:
+            raise HTTPException(status_code=404, detail="No such generated item.")
+        action = shown[0]
     return (await _serialize(ctx, store, [action]))[0]
 
 
@@ -302,7 +335,7 @@ async def get_course_measurement(course_id: str, ctx: CurrentUser, directory: Di
                                  ) -> dict[str, Any]:
     course = await _course_in_scope(ctx, directory, course_id)
     begin, stop = time_range(start, end)
-    _, _, body = await _summary(store, frozenset({course.id}), begin, stop)
+    _, _, body = await _summary(ctx, store, frozenset({course.id}), begin, stop)
     return _envelope("course", course.id, course.title, begin, stop, body)
 
 
@@ -327,7 +360,7 @@ async def get_measurement_rollup(ctx: CurrentUser, directory: Directory, store: 
         scope_type, scope_id, title = "program", program.id, program.title
     else:
         courses = None
-    actions, decisions, body = await _summary(store, courses, begin, stop)
+    actions, decisions, body = await _summary(ctx, store, courses, begin, stop)
 
     per_course: dict[str, list[str | None]] = {}
     for action in actions:
@@ -390,12 +423,14 @@ async def export_measurement(
     table: Literal["ai_actions", "human_decisions", "outcome_links"] = "ai_actions",
 ) -> Response:
     """Learner ids are pseudonymized unless the caller may view this course's learners
-    individually (its faculty, or admin). Every learner the export is about gets a
+    individually (its faculty, or admin). Practice items and, for anyone but the course's
+    faculty, draft feedback are left out. Every learner the export is about gets a
     data_access_log row."""
     course = await _course_in_scope(ctx, directory, course_id)
     begin, stop = time_range(start, end)
     actions = await store.find_actions(ActionQuery(end=stop, start=begin,
-                                                   course_ids=frozenset({course.id})))
+                                                   course_ids=frozenset({course.id}),
+                                                   **hidden_from(ctx)))
     actions.reverse()  # oldest first reads better in a file
     hidden = not sees_learners(ctx, course.id)
     items = await _serialize(ctx, store, actions, pseudonymize_all=hidden)

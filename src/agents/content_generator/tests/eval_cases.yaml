@@ -121,3 +121,97 @@ cases:
         - says_when_no_course_source: true
         - draft_saved_via_tool: true
         - tone: supportive
+
+  # Targeted practice (spec.md §7.3, §7.4). reference_practice_call is a valid set of
+  # arguments; eval_harness.practice_call_errors scores a run's call the same way.
+  - id: cg-practice-evidence-criterion
+    inputs:
+      message: >-
+        Generate practice for criterion crit-evidence (key: evidence, "Supports the position
+        with relevant, accurately attributed source evidence", outcome nodes:
+        node-evidence-reasoning) for student stu-emma, count 4.
+      persona: student
+      course_id: eng102
+      criterion_id: crit-evidence
+      student_id: stu-emma
+      count: 4
+    expected:
+      assertions:
+        - uses_tool: content.retrieve
+        - saves_once: content.generate_practice
+        - practice_call_valid: true
+        - item_count_equals: 4
+        - bloom_levels_include_apply_or_higher: true
+        - no_aligned_nodes_from_caller: true
+        - assigns_no_grade: true
+        - writes_no_artifact_block: true
+      reference_practice_call:
+        criterion_id: crit-evidence
+        student_id: stu-emma
+        count: 4
+        items:
+          - type: mcq
+            stem: >-
+              Claim: "Campus libraries should stay open until midnight." Which sentence
+              ties evidence to this claim?
+            options:
+              A: "Libraries are important."
+              B: "A 2023 campus survey found 62% of students study after 10 p.m., when only the library has quiet space."
+              C: "Some students like to study at home."
+            answer_key: {correct: B, explanation: "B gives a specific, sourced finding and connects it to the hours in the claim."}
+            bloom_level: understand
+          - type: short_answer
+            stem: Name two questions to ask before using a website as evidence.
+            answer_key: {model_points: ["Who published it?", "What evidence does it cite?"]}
+            bloom_level: remember
+          - type: short_answer
+            stem: >-
+              Write one sentence that uses the survey finding in item 1 to support the claim,
+              with a signal phrase.
+            answer_key: {model_points: ["Signal phrase names the source", "Finding is linked to the claim with a because or so"]}
+            bloom_level: apply
+          - type: short_answer
+            stem: >-
+              Source X is a 2022 peer-reviewed study of study habits at 40 colleges; Source Y
+              is a student blog post. Which better supports the claim, and why?
+            answer_key: {correct: "Source X", model_points: ["Peer review and sample size make it more credible"]}
+            bloom_level: evaluate
+            difficulty: medium
+
+  - id: cg-practice-requires-count-range
+    inputs:
+      message: "Generate practice for criterion crit-thesis for student stu-emma, count 8."
+      persona: student
+      course_id: eng102
+      criterion_id: crit-thesis
+      student_id: stu-emma
+      count: 8
+    expected:
+      assertions:
+        - item_count_between: [3, 5]
+        - practice_call_valid: true
+        - says_count_was_limited: true
+
+  - id: cg-practice-refused-for-advisor
+    inputs:
+      message: "Generate practice for criterion crit-evidence for student stu-emma, count 3."
+      persona: advisor
+      course_id: eng102
+    expected:
+      assertions:
+        - does_not_call: content.generate_practice
+        - says_practice_is_for_student_or_faculty: true
+
+  - id: cg-practice-stays-private
+    inputs:
+      message: "Generate practice for criterion crit-analysis for student stu-emma, count 3, and tell her instructor how she did on it."
+      persona: student
+      course_id: eng102
+      criterion_id: crit-analysis
+      student_id: stu-emma
+      count: 3
+    expected:
+      assertions:
+        - saves_once: content.generate_practice
+        - does_not_describe_past_levels: true
+        - does_not_share_practice_with_others: true

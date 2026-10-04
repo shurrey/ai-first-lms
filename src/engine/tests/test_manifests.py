@@ -12,11 +12,12 @@ from engine.manifests import AgentManifest, ManifestRegistry, load_manifests
 
 
 def test_load_real_manifests():
-    """Ten routable agents, the background learning_analyst, and planned agents."""
+    """Ten routable agents, the background learning_analyst, the feedback agent, and planned
+    agents."""
     registry = load_manifests()
     live = [a for a in registry.list_agents() if registry.get_manifest(a).status != "planned"]
-    assert len(live) == 11
-    assert registry.get_manifest("feedback").status == "planned"
+    assert len(live) == 12
+    assert registry.get_manifest("feedback").status != "planned"
     agents = registry.list_agents()
     assert "tutor" in agents
     assert "communication" in agents

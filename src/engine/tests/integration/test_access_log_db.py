@@ -10,11 +10,15 @@ import os
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 
 import asyncpg
 import pytest
+from httpx import ASGITransport, AsyncClient
 
+from engine.app import create_app
 from engine.auth.access_log import AccessEntry, PgAccessLog
+from engine.auth.deps import current_user
 from engine.auth.models import AuthContext
 from engine.auth.repository import create_pool
 from engine.auth.scope import SensitiveRead, can_view_student
@@ -103,3 +107,39 @@ async def test_record_many_writes_every_row(pool, people):
     assert [(r.actor_id, r.resource, r.purpose) for r in await log.list_by_subject(subject)] \
         == [(actor, "ai_actions", "measurement_export")]
     assert [r.actor_id for r in await log.list_by_subject(actor)] == [subject]
+
+
+async def test_admin_endpoint_filters_and_pages_through_rows_with_equal_timestamps(pool, people):
+    """Three rows share one created_at, so paging must break ties by id."""
+    actor, subject = people
+    same = datetime(2026, 9, 1, 12, tzinfo=UTC)
+    async with pool.acquire() as conn:
+        for purpose, resource, at in (("old", "profile", same - timedelta(days=1)),
+                                      ("a", "transcript", same), ("b", "profile", same),
+                                      ("c", "transcript", same)):
+            await conn.execute(
+                "INSERT INTO data_access_log (actor_id, subject_id, resource, purpose,"
+                " created_at) VALUES ($1, $2, $3, $4, $5)",
+                uuid.UUID(actor), uuid.UUID(subject), resource, purpose, at)
+    world = build_auth_world()
+    admin = replace(auth_context(world, "admin"), person_id=actor)
+    app = create_app(auth_service=world.service, scope_directory=world.directory,
+                     access_log=PgAccessLog(pool))
+    app.dependency_overrides[current_user] = lambda: admin
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        purposes, before = [], None
+        while True:
+            params = {"subject_id": subject, "limit": 2, **({"before": before} if before else {})}
+            page = (await client.get("/api/access-log", params=params)).json()
+            purposes += [e["purpose"] for e in page["entries"]]
+            before = page["next_before"]
+            if before is None:
+                break
+        filtered = (await client.get("/api/access-log", params={
+            "subject_id": subject, "resource": "transcript",
+            "from": same.isoformat(), "to": (same + timedelta(seconds=1)).isoformat()})).json()
+
+    assert purposes == ["c", "b", "a", "old"]
+    assert [e["purpose"] for e in filtered["entries"]] == ["c", "a"]
+    assert filtered["entries"][0]["actor"]["display_name"].startswith("AccessLog admin")

@@ -56,13 +56,15 @@ class Seed:
     next_attestation: uuid.UUID
     next_evidence: uuid.UUID
     revision_evidence: uuid.UUID
+    revision_score: uuid.UUID
+    revision: uuid.UUID
 
 
 @pytest.fixture
 async def seed(pool) -> AsyncIterator[Seed]:
     """An attestation action on a concept, then a criterion_feedback action scoring 'thesis' 2
-    on the draft, a revision scored 3, and a mastery attestation. Evidence on both criterion
-    scores is also evidence on the concept."""
+    on the draft (released), a revision graded 3 (committed), and a mastery attestation.
+    Evidence on both criterion scores is also evidence on the concept."""
     tag = uuid.uuid4().hex[:8]
     async with pool.acquire() as conn:
         student, other = [await conn.fetchval(
@@ -116,17 +118,20 @@ async def seed(pool) -> AsyncIterator[Seed]:
         feedback_action = await action("criterion_feedback", student, {}, 0.5)
         other_action = await action("practice_item", other, {"node_id": str(concept)}, 1)
         draft_cs = await conn.fetchval(
-            "INSERT INTO criterion_scores (submission_id, criterion_id, ai_score, ai_action_id)"
-            " VALUES ($1, $2, 2, $3) RETURNING id", draft, criterion, feedback_action)
+            "INSERT INTO criterion_scores (submission_id, criterion_id, ai_score, ai_action_id,"
+            " released_at) VALUES ($1, $2, 2, $3, $4) RETURNING id", draft, criterion,
+            feedback_action, at(0.55))
         revision_cs = await conn.fetchval(
             "INSERT INTO criterion_scores (submission_id, criterion_id, ai_score, final_score)"
             " VALUES ($1, $2, 2, 3) RETURNING id", revision, criterion)
+        await conn.execute("INSERT INTO grades (submission_id, scores, feedback, is_draft)"
+                           " VALUES ($1, '{}'::jsonb, '{}'::jsonb, false)", revision)
         draft_ev = await evidence(0.6, 0.5, draft_cs)
         revision_ev = await evidence(3, 0.75, revision_cs)
         next_attestation = await attest("mastery", 4)
         await evidence(16, 0.9, person=other)
     ids = Seed(student, other, concept, criterion, attest_action, feedback_action, other_action,
-               own, next_attestation, draft_ev, revision_ev)
+               own, next_attestation, draft_ev, revision_ev, revision_cs, revision)
     try:
         yield ids
     finally:
@@ -139,6 +144,7 @@ async def seed(pool) -> AsyncIterator[Seed]:
             await conn.execute("DELETE FROM attestations WHERE person_id = $1", student)
             await conn.execute("DELETE FROM criterion_scores WHERE submission_id = ANY($1::uuid[])",
                                [draft, revision])
+            await conn.execute("DELETE FROM grades WHERE submission_id = $1", revision)
             await conn.execute("DELETE FROM ai_actions WHERE id = ANY($1::uuid[])", actions)
             await conn.execute("DELETE FROM submissions WHERE id = ANY($1::uuid[])",
                                [draft, revision])
@@ -219,3 +225,32 @@ async def test_app_lifespan_runs_the_scheduler_unless_disabled(monkeypatch, enab
         else:
             assert scheduler is None
     assert app.state.scheduler is None
+
+
+async def test_a_revision_score_links_only_once_its_learner_sees_it(pool, seed):
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM grades WHERE submission_id = $1", seed.revision)
+    linker = PgOutcomeLinker(pool, window=WINDOW)
+
+    await linker.run(NOW)
+    assert not [row for row in await _links(pool, seed) if row[0] == seed.feedback_action]
+
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE criterion_scores SET ai_score = 3, final_score = NULL,"
+                           " released_at = $2 WHERE id = $1", seed.revision_score, at(5))
+    await linker.run(NOW)
+
+    [(_, ev_id, _, delta, _)] = [row for row in await _links(pool, seed)
+                                 if row[0] == seed.feedback_action]
+    assert ev_id == seed.revision_evidence
+    assert (delta["before"], delta["after"]) == (2.0, 3.0)
+
+
+async def test_feedback_never_released_to_its_learner_is_not_linked(pool, seed):
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE criterion_scores SET released_at = NULL"
+                           " WHERE ai_action_id = $1", seed.feedback_action)
+
+    await PgOutcomeLinker(pool, window=WINDOW).run(NOW)
+
+    assert not [row for row in await _links(pool, seed) if row[0] == seed.feedback_action]
